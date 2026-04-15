@@ -86,6 +86,7 @@ CONFIG="$ORION_DIR/server/config.js"
 msg_ok "config.js patched"
 
 cat > /etc/default/orion << ENVEOF
+APPDATA=${ORION_DATA}
 ORION_DATA_DIR=${ORION_DATA}
 NODE_ENV=production
 ENVEOF
