@@ -8,7 +8,7 @@ const path = require('path');
 const fs   = require('fs');
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
-const DATA_DIR = path.join(process.env.APPDATA || process.env.HOME || __dirname, 'Orion');
+const DATA_DIR = process.env.ORION_DATA_DIR || process.env.APPDATA || path.join(process.env.HOME || __dirname, 'orion-data');
 const CFG_FILE = path.join(DATA_DIR, 'config.json');
 
 // Ensure data directory exists
