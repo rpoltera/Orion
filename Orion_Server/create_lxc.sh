@@ -139,7 +139,7 @@ ENVEOF"
 
 # ── Run the Orion install script inside the container ────────────────────────
 msg_info "Running Orion installer inside container..."
-pct exec ${CTID} -- bash -c "curl -fsSL https://raw.githubusercontent.com/rpoltera/Orion/main/Orion_Server/scripts/install_container.sh | bash"
+pct exec ${CTID} -- bash -c "curl -fsSL https://raw.githubusercontent.com/rpoltera/Orion/main/Orion_Server/install_container.sh | bash"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 CONTAINER_IP=$(pct exec ${CTID} -- hostname -I | awk '{print $1}')
