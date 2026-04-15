@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<title>Orion</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{--bg:#040714;--bg2:#0b0d17;--bg3:#12152a;--card:#1a1d33;--accent:#0063e5;--text:#fff;--muted:#a8acb3;--dim:#6b7180;--r:10px}
+html,body{background:var(--bg);color:var(--text);font-family:'Segoe UI',Arial,sans-serif;height:100%;overflow:hidden;user-select:none}
+
+/* SETUP */
+#setup{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;background:radial-gradient(ellipse at 50% 60%,#0d1a3a,#040714 70%)}
+#setup.gone{display:none}
+.sbox{width:100%;max-width:440px;text-align:center}
+.slogo{width:80px;height:80px;background:linear-gradient(135deg,#1a1a3e,#2d1b69);border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 18px;box-shadow:0 0 40px rgba(0,99,229,0.4)}
+.stitle{font-size:26px;font-weight:800;margin-bottom:8px}
+.ssub{font-size:14px;color:var(--muted);margin-bottom:28px;line-height:1.6}
+.scard{background:var(--card);border-radius:14px;padding:24px;border:1px solid rgba(255,255,255,0.08);text-align:left}
+.slabel{font-size:11px;font-weight:700;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}
+.sinput{width:100%;padding:13px 14px;background:var(--bg3);border:2px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:14px;outline:none;font-family:monospace;-webkit-appearance:none;transition:border-color 0.2s;margin-bottom:6px}
+.sinput:focus{border-color:var(--accent)}
+.shint{font-size:11px;color:var(--dim);margin-bottom:18px;line-height:1.6;padding:8px 10px;background:var(--bg3);border-radius:6px}
+.shint b{color:var(--accent)}
+.sbtn{width:100%;padding:13px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer}
+.sbtn:active{background:#147fcd}
+.sbtn:disabled{opacity:0.4;cursor:default}
+#smsg{margin-top:12px;font-size:13px;min-height:18px;text-align:center;color:var(--muted)}
+#smsg.err{color:#f87171}
+#smsg.ok{color:#34d399}
+
+/* APP */
+#app{display:none;height:100vh;width:100vw;flex-direction:row}
+#app.show{display:flex}
+#sidebar{width:220px;min-width:220px;background:rgba(4,7,20,0.98);border-right:1px solid rgba(255,255,255,0.06);display:flex;flex-direction:column;flex-shrink:0}
+#main{flex:1;overflow:hidden}
+#content{height:100vh;overflow-y:auto;overflow-x:hidden}
+#content::-webkit-scrollbar{display:none}
+
+.logo{display:flex;align-items:center;gap:11px;padding:16px 14px;border-bottom:1px solid rgba(255,255,255,0.05)}
+.logo-icon{width:36px;height:36px;min-width:36px;background:linear-gradient(135deg,#1a1a3e,#2d1b69);border-radius:8px;display:flex;align-items:center;justify-content:center}
+.logo-text{font-size:18px;font-weight:800}
+.nsec{padding:10px 14px 3px;font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--dim);text-transform:uppercase}
+.nitem{display:flex;align-items:center;gap:11px;padding:11px 14px;cursor:pointer;color:var(--muted);border-left:3px solid transparent;transition:all 0.15s}
+.ni{font-size:18px;min-width:22px;text-align:center}
+.nl{font-size:14px;font-weight:500}
+.nitem.active{background:rgba(0,99,229,0.15);color:var(--accent);border-left-color:var(--accent)}
+.nitem:active{background:rgba(0,99,229,0.2)}
+
+/* hero */
+.hero{position:relative;height:44vh;min-height:200px;overflow:hidden}
+.hbg{position:absolute;inset:0;background-size:cover;background-position:center top;opacity:0.45}
+.hg1{position:absolute;inset:0;background:linear-gradient(90deg,rgba(4,7,20,0.95) 0%,rgba(4,7,20,0.5) 55%,transparent 100%)}
+.hg2{position:absolute;inset:0;background:linear-gradient(0deg,var(--bg) 0%,transparent 35%)}
+.hcon{position:absolute;bottom:0;left:0;padding:14px 22px 18px;max-width:60%}
+.htitle{font-size:clamp(16px,3vw,32px);font-weight:800;line-height:1.1;margin-bottom:6px}
+.hmeta{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;gap:10px}
+.hdesc{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.hbtn{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;border:none;background:var(--accent);color:#fff}
+.hbtn:active{background:#147fcd}
+
+/* rows */
+.srow{margin-bottom:18px}
+.shdr{padding:0 18px 7px;font-size:14px;font-weight:700}
+.crow{display:flex;gap:9px;padding:3px 18px 6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.crow::-webkit-scrollbar{display:none}
+
+/* cards */
+.card{flex-shrink:0;width:115px;border-radius:var(--r);overflow:hidden;cursor:pointer;background:var(--card);transition:transform 0.15s}
+.card:active{transform:scale(0.93)}
+.card.w{width:175px}
+.cpost{aspect-ratio:2/3;background:var(--bg3);overflow:hidden;position:relative}
+.card.w .cpost{aspect-ratio:16/9}
+.cpost img{width:100%;height:100%;object-fit:cover}
+.cph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:30px}
+.cbadge{position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,0.78);color:#fff;font-size:9px;font-weight:700;padding:2px 5px;border-radius:8px}
+.cinfo{padding:7px 8px}
+.ctitle{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:1px}
+.cmeta{font-size:10px;color:var(--dim)}
+
+/* grid */
+.mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:11px;padding:0 18px 40px}
+.phdr{padding:14px 18px 11px}
+.ptitle{font-size:20px;font-weight:800;margin-bottom:2px}
+.psub{font-size:12px;color:var(--muted)}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px;padding:0 18px 40px}
+.cch{background:var(--card);border-radius:var(--r);padding:11px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:background 0.15s}
+.cch:active{background:var(--bg3)}
+.chlogo{width:40px;height:40px;border-radius:6px;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+
+/* settings page */
+.setpage{padding:16px 18px 40px}
+.setcard{background:var(--card);border-radius:12px;padding:18px;margin-bottom:14px;border:1px solid rgba(255,255,255,0.07)}
+.setcard h3{font-size:14px;font-weight:700;margin-bottom:6px}
+.setcard p{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px}
+.seturl{font-size:11px;color:var(--accent);font-family:monospace;background:var(--bg3);padding:7px 10px;border-radius:6px;word-break:break-all;margin-bottom:12px}
+.xbtn{padding:9px 16px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;border:none;margin-right:7px;margin-bottom:7px;display:inline-block}
+.xbtn.red{background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3)}
+.xbtn.blue{background:var(--accent);color:#fff}
+.xbtn.grey{background:rgba(255,255,255,0.08);color:var(--muted);border:1px solid rgba(255,255,255,0.1)}
+
+/* misc */
+.spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,0.1);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;margin:60px auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{text-align:center;padding:50px 18px;color:var(--dim)}
+.empty .icon{font-size:46px;margin-bottom:10px;opacity:0.4}
+.empty h3{font-size:17px;color:var(--muted);margin-bottom:4px}
+
+/* player */
+#player{display:none;position:fixed;inset:0;background:#000;z-index:1000}
+#player.open{display:block}
+#video{width:100%;height:100%;object-fit:contain;display:block}
+#pui{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;opacity:0;transition:opacity 0.3s;pointer-events:none}
+#pui.show{opacity:1;pointer-events:all}
+#ptop{padding:14px 18px;background:linear-gradient(180deg,rgba(0,0,0,0.85),transparent);display:flex;align-items:center;justify-content:space-between}
+#ptitle{font-size:15px;font-weight:700}
+#pback{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:7px 14px;border-radius:18px;cursor:pointer;font-size:13px}
+#pbot{padding:10px 18px 18px;background:linear-gradient(0deg,rgba(0,0,0,0.85),transparent)}
+#pwrap{width:100%;height:5px;background:rgba(255,255,255,0.2);border-radius:3px;margin-bottom:11px;cursor:pointer;position:relative}
+#pbuf,#pprog{position:absolute;top:0;left:0;height:100%;border-radius:3px}
+#pbuf{background:rgba(255,255,255,0.2)}
+#pprog{background:var(--accent)}
+.prow{display:flex;align-items:center;gap:13px}
+.pbtn{background:none;border:none;color:#fff;cursor:pointer;font-size:21px;padding:5px;outline:none}
+.pbtn:active{opacity:0.6}
+#ptime{font-size:12px;color:rgba(255,255,255,0.5);margin-left:4px}
+#audlab{font-size:11px;color:var(--accent);margin-left:auto;padding:3px 9px;background:rgba(0,99,229,0.18);border-radius:12px;border:1px solid rgba(0,99,229,0.35);cursor:pointer;display:none}
+#skipbtn{position:absolute;bottom:75px;right:18px;background:rgba(0,0,0,0.82);border:2px solid #fff;color:#fff;padding:9px 16px;border-radius:var(--r);font-size:13px;font-weight:700;cursor:pointer;display:none;z-index:10}
+#skipbtn.show{display:block}
+#tov{position:absolute;inset:0;display:flex}
+#tl,#tr{flex:1}
+
+@media(max-width:600px) and (orientation:portrait){
+  #sidebar{width:58px;min-width:58px}
+  .logo-text,.nl,.nsec{display:none}
+  .card{width:95px}.card.w{width:145px}
+  .hero{height:30vh}
+}
+@media(min-width:860px){
+  .card{width:140px}.card.w{width:205px}
+  .hero{height:48vh}
+  .mgrid{grid-template-columns:repeat(auto-fill,minmax(135px,1fr))}
+}
+</style>
+</head>
+<body>
+
+<!-- SETUP: runs once per device, saves server URL in localStorage -->
+<div id="setup">
+  <div class="sbox">
+    <div class="slogo">
+      <svg width="40" height="40" viewBox="0 0 22 22" fill="none">
+        <ellipse cx="11" cy="11" rx="9" ry="5" stroke="url(#sg)" stroke-width="1.2" fill="none" transform="rotate(-25 11 11)"/>
+        <circle cx="11" cy="6.5" r="1.8" fill="white" transform="rotate(-25 11 11)"/>
+        <line x1="11" y1="3.5" x2="11" y2="2" stroke="white" stroke-width="1" transform="rotate(-25 11 11)"/>
+        <defs><linearGradient id="sg" x1="2" y1="6" x2="20" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#c084fc"/></linearGradient></defs>
+      </svg>
+    </div>
+    <div class="stitle">Welcome to Orion</div>
+    <div class="ssub">Enter your Orion server address.<br>This is saved on this device — you only do this once.</div>
+    <div class="scard">
+      <div class="slabel">Your Orion Server URL</div>
+      <input id="sv-input" class="sinput" type="url" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+        placeholder="http://192.168.1.x:3001  or  https://orion.example.com"/>
+      <div class="shint">
+        💡 Find your server URL in Orion on your PC.<br>
+        <b>Local:</b> http://YOUR-PC-IP:3001<br>
+        <b>Remote:</b> https://your-cloudflare-tunnel.com
+      </div>
+      <button class="sbtn" id="sv-btn" onclick="tryConnect()">Connect to My Server</button>
+      <div id="smsg"></div>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app">
+  <nav id="sidebar">
+    <div class="logo">
+      <div class="logo-icon"><img src="/icon.png" alt="Orion" style="width:36px;height:36px;border-radius:8px;display:block;"/></div>
+      <div class="logo-text">Orion</div>
+    </div>
+    <div class="nsec">BROWSE</div>
+    <div class="nitem active" data-p="home"><span class="ni">🏠</span><span class="nl">Home</span></div>
+    <div class="nitem" data-p="movies"><span class="ni">🎬</span><span class="nl">Movies</span></div>
+    <div class="nitem" data-p="tv"><span class="ni">📺</span><span class="nl">TV Shows</span></div>
+    <div class="nitem" data-p="music"><span class="ni">🎵</span><span class="nl">Music</span></div>
+    <div class="nsec">LIVE</div>
+    <div class="nitem" data-p="iptv"><span class="ni">📡</span><span class="nl">Live TV</span></div>
+    <div class="nsec">SYSTEM</div>
+    <div class="nitem" data-p="settings"><span class="ni">⚙️</span><span class="nl">Settings</span></div>
+  </nav>
+  <div id="main"><div id="content"><div class="spinner"></div></div></div>
+</div>
+
+<!-- ANDROID/TV PLAYER -->
+<div id="player">
+  <video id="video" playsinline webkit-playsinline preload="auto"></video>
+
+  <!-- Double-tap seek zones -->
+  <div id="tov">
+    <div id="tl"></div>
+    <div id="tr"></div>
+  </div>
+
+  <!-- Seek ripple feedback -->
+  <div id="seek-feedback" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:white;font-size:22px;font-weight:700;background:rgba(0,0,0,0.6);padding:14px 22px;border-radius:40px;pointer-events:none;z-index:15"></div>
+
+  <div id="pui">
+    <!-- Top bar -->
+    <div id="ptop">
+      <div style="display:flex;align-items:center;gap:12px">
+        <button id="pback" style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:white;padding:8px 16px;border-radius:20px;cursor:pointer;font-size:14px">← Back</button>
+        <div>
+          <div id="ptitle" style="font-size:17px;font-weight:700"></div>
+          <div id="psubtitle" style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:2px"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div id="pspeed" style="display:none;font-size:13px;color:#f59e0b;padding:4px 10px;background:rgba(245,158,11,0.15);border-radius:14px;border:1px solid rgba(245,158,11,0.3)"></div>
+        <div id="audlab" style="display:none;font-size:12px;color:var(--accent);padding:4px 10px;background:rgba(0,99,229,0.18);border-radius:14px;border:1px solid rgba(0,99,229,0.35);cursor:pointer"></div>
+      </div>
+    </div>
+
+    <!-- Bottom controls -->
+    <div id="pbot">
+      <!-- Progress bar -->
+      <div id="pwrap">
+        <div id="pbuf"></div>
+        <div id="pprog" style="width:0%"></div>
+        <!-- Chapter markers injected by JS -->
+        <div id="pmarkers"></div>
+      </div>
+      <!-- Time + controls -->
+      <div class="prow">
+        <button class="pbtn" id="bplay">⏸</button>
+        <button class="pbtn" id="bb30" title="Back 30s">⏮ 30</button>
+        <button class="pbtn" id="bb10" title="Back 10s">⏪ 10</button>
+        <button class="pbtn" id="bf10" title="Forward 10s">10 ⏩</button>
+        <button class="pbtn" id="bf30" title="Forward 30s">30 ⏭</button>
+        <button class="pbtn" id="bmute">🔊</button>
+        <div id="ptime" style="font-size:13px;color:rgba(255,255,255,0.55);margin-left:6px;min-width:120px">0:00 / 0:00</div>
+        <div style="flex:1"></div>
+        <!-- Speed button -->
+        <button class="pbtn" id="bspeed" title="Playback Speed" style="font-size:13px">1x</button>
+        <!-- Chapters button -->
+        <button class="pbtn" id="bchapters" title="Chapters" style="display:none;font-size:13px">📖</button>
+        <!-- Fullscreen -->
+        <button class="pbtn" id="bfull">⛶</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Skip Intro button -->
+  <button id="skipbtn" style="display:none;position:absolute;bottom:90px;right:20px;background:rgba(0,0,0,0.85);border:2px solid white;color:white;padding:12px 20px;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;z-index:10">⏩ Skip Intro</button>
+
+  <!-- Skip Credits button -->
+  <button id="skipoutro" style="display:none;position:absolute;bottom:90px;right:20px;background:rgba(0,0,0,0.85);border:2px solid #8b5cf6;color:white;padding:12px 20px;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer;z-index:10">🎬 Skip Credits</button>
+
+  <!-- Next episode banner -->
+  <div id="nextepdiv" style="display:none;position:absolute;bottom:100px;right:20px;background:rgba(0,0,0,0.92);border:1px solid rgba(255,255,255,0.15);border-radius:12px;padding:14px 18px;z-index:10;max-width:320px">
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:4px">NEXT EPISODE</div>
+    <div id="nexteptitle" style="font-size:14px;font-weight:600;margin-bottom:10px"></div>
+    <div style="display:flex;gap:8px">
+      <button id="playnext" style="background:var(--accent);border:none;color:white;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700">Play Now</button>
+      <button id="dismissnext" style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:white;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">Dismiss</button>
+    </div>
+  </div>
+
+  <!-- Chapters panel -->
+  <div id="chapterpanel" style="display:none;position:absolute;top:80px;right:20px;background:rgba(10,12,30,0.96);border:1px solid rgba(255,255,255,0.1);border-radius:12px;min-width:260px;max-height:60vh;overflow-y:auto;z-index:20;padding:12px">
+    <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.4);letter-spacing:1px;margin-bottom:10px">CHAPTERS</div>
+    <div id="chapterlist"></div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────
+let API = '', IMGB = '';
+const S = { lib:{movies:[],tvShows:[],music:[]}, iptv:[], serverDur:0, audioTracks:[], audioTrack:0, introEnd:0, uiT:null, open:false, nowPlaying:null };
+
+const $=id=>document.getElementById(id);
+const get=u=>fetch(u,{signal:AbortSignal.timeout(8000)}).then(r=>r.json()).catch(()=>({}));
+
+function img(u){
+  if(!u)return null;
+  if(u.startsWith('http'))return u;
+  if(u.startsWith('/api'))return IMGB+u;
+  return null;
+}
+function fmt(s){
+  if(!s||isNaN(s)||!isFinite(s))return'0:00';
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sc=Math.floor(s%60).toString().padStart(2,'0');
+  return h>0?`${h}:${m.toString().padStart(2,'0')}:${sc}`:`${m}:${sc}`;
+}
+function fmtLang(l){return{eng:'English',spa:'Spanish',fra:'French',deu:'German',jpn:'Japanese',kor:'Korean',por:'Portuguese',rus:'Russian',und:'Unknown'}[l]||l?.toUpperCase()||'Audio';}
+
+// ── SETUP ─────────────────────────────────────────────────────────────────
+async function tryConnect(){
+  const val=$('sv-input').value.trim().replace(/\/$/,'');
+  if(!val){showMsg('Please enter your server URL','err');return;}
+  $('sv-btn').disabled=true;
+  showMsg('Connecting...','');
+  try{
+    const res=await fetch(val+'/api/health',{signal:AbortSignal.timeout(6000)});
+    const data=await res.json();
+    if(data.ok){
+      localStorage.setItem('orion_server',val);
+      showMsg('Connected! Loading...','ok');
+      setTimeout(()=>launch(val),600);
+    }else{throw new Error('Bad response');}
+  }catch(e){
+    showMsg('Could not connect. Check the URL and make sure your Orion server is running.','err');
+    $('sv-btn').disabled=false;
+  }
+}
+function showMsg(t,cls){const el=$('smsg');el.textContent=t;el.className=cls;}
+
+$('sv-input').addEventListener('keydown',e=>{if(e.key==='Enter')tryConnect();});
+
+// ── LAUNCH ────────────────────────────────────────────────────────────────
+async function launch(base){
+  API=base+'/api'; IMGB=base;
+  $('setup').classList.add('gone');
+  $('app').classList.add('show');
+  $('content').innerHTML='<div class="spinner"></div>';
+  const[mov,tv,mus,ipt]=await Promise.all([
+    get(`${API}/library/movies`),
+    get(`${API}/library/tvShows`),
+    get(`${API}/library/music`),
+    get(`${API}/iptv/channels`),
+  ]);
+  S.lib.movies=mov.items||[];
+  S.lib.tvShows=tv.items||[];
+  S.lib.music=mus.items||[];
+  S.iptv=ipt.channels||[];
+  navigate('home');
+}
+
+// ── GROUP SHOWS ───────────────────────────────────────────────────────────
+function groupShows(eps){
+  const m={};
+  for(const ep of eps){
+    let n=null;
+    if(ep.filePath){const p=ep.filePath.replace(/\\/g,'/').split('/');for(let i=p.length-2;i>=0;i--){if(!p[i].match(/^(season|s\d|disc|extras?)/i)&&p[i].length>2){n=p[i].replace(/[._]/g,' ').replace(/\s*\(?(19|20)\d{2}\)?\s*$/,'').trim();break;}}}
+    if(!n)n=ep.title||'Unknown';
+    if(!m[n])m[n]={id:'s_'+n,showName:n,episodes:[],thumbnail:null,rating:null,year:null};
+    m[n].episodes.push(ep);
+    if(!m[n].thumbnail&&ep.thumbnail){m[n].thumbnail=ep.thumbnail;m[n].year=ep.year;}
+    if(ep.rating&&parseFloat(ep.rating)>parseFloat(m[n].rating||0))m[n].rating=ep.rating;
+  }
+  return Object.values(m).sort((a,b)=>a.showName.localeCompare(b.showName));
+}
+
+// ── CARD HTML ─────────────────────────────────────────────────────────────
+function card(item,wide,badge){
+  const p=img(item.thumbnail||item.backdrop);
+  const t=item.title||item.showName||'Untitled';
+  return`<div class="card${wide?' w':''}" data-id="${item.id||''}" data-url="${item.url||''}" data-name="${t.replace(/"/g,'&quot;')}" tabindex="0">
+    <div class="cpost">${p?`<img src="${p}" alt="" loading="lazy" onerror="this.style.display='none'"/>`:
+    `<div class="cph">${item.type==='music'?'🎵':item.type==='tvShows'?'📺':'🎬'}</div>`}
+    ${badge?`<div class="cbadge">${badge}</div>`:''}</div>
+    <div class="cinfo"><div class="ctitle">${t}</div>
+    <div class="cmeta">${item.year?item.year+' ':''} ${item.rating&&parseFloat(item.rating)>0?'★'+item.rating:''}</div></div>
+  </div>`;
+}
+
+// ── PAGES ─────────────────────────────────────────────────────────────────
+function pageHome(){
+  const mv=S.lib.movies.slice(0,18), sh=groupShows(S.lib.tvShows).slice(0,12);
+  const h=mv.find(m=>m.backdrop||m.thumbnail)||mv[0];
+  const hi=h?img(h.backdrop||h.thumbnail):null;
+  return`${h?`<div class="hero"><div class="hbg" style="${hi?'background-image:url('+hi+')':'background:var(--bg2)'}"></div>
+    <div class="hg1"></div><div class="hg2"></div>
+    <div class="hcon"><div class="htitle">${h.title||''}</div>
+    <div class="hmeta">${h.year?`<span>${h.year}</span>`:''} ${h.rating&&parseFloat(h.rating)>0?`<span>★${h.rating}</span>`:''}</div>
+    ${h.overview?`<div class="hdesc">${h.overview}</div>`:''}
+    <button class="hbtn" data-play="${h.id}">▶ Play</button></div></div>`:''}
+  ${mv.length?`<div class="srow"><div class="shdr">🎬 Movies</div><div class="crow">${mv.map(m=>card(m,false,null)).join('')}</div></div>`:''}
+  ${sh.length?`<div class="srow"><div class="shdr">📺 TV Shows</div><div class="crow">${sh.map(s=>card({...s,title:s.showName,type:'tvShows'},true,`${s.episodes.length} ep`)).join('')}</div></div>`:''}`;
+}
+function pageMovies(){
+  if(!S.lib.movies.length)return`<div class="empty"><div class="icon">🎬</div><h3>No movies yet</h3><p>Add folders in Orion on your PC</p></div>`;
+  return`<div class="phdr"><div class="ptitle">🎬 Movies</div><div class="psub">${S.lib.movies.length.toLocaleString()} titles</div></div>
+    <div class="mgrid">${S.lib.movies.map(m=>card(m,false,null)).join('')}</div>`;
+}
+function pageTV(){
+  const sh=groupShows(S.lib.tvShows);
+  if(!sh.length)return`<div class="empty"><div class="icon">📺</div><h3>No TV shows yet</h3></div>`;
+  return`<div class="phdr"><div class="ptitle">📺 TV Shows</div><div class="psub">${sh.length} series</div></div>
+    <div class="mgrid">${sh.map(s=>card({...s,title:s.showName,type:'tvShows'},false,`${s.episodes.length} ep`)).join('')}</div>`;
+}
+function pageMusic(){
+  if(!S.lib.music.length)return`<div class="empty"><div class="icon">🎵</div><h3>No music yet</h3></div>`;
+  return`<div class="phdr"><div class="ptitle">🎵 Music</div><div class="psub">${S.lib.music.length} tracks</div></div>
+    <div class="mgrid">${S.lib.music.map(m=>card({...m,type:'music'},false,null)).join('')}</div>`;
+}
+function pageIPTV(){
+  if(!S.iptv.length)return`<div class="empty"><div class="icon">📡</div><h3>No channels</h3><p>Load an M3U playlist in Orion on your PC</p></div>`;
+  return`<div class="phdr"><div class="ptitle">📡 Live TV</div><div class="psub">${S.iptv.length} channels</div></div>
+    <div class="cgrid">${S.iptv.map(ch=>`<div class="cch" data-url="${ch.url}" data-name="${ch.name}">
+      <div class="chlogo">${ch.logo?`<img src="${ch.logo}" style="width:100%;height:100%;object-fit:contain;border-radius:5px" onerror="this.style.display='none'"/>`:' 📺'}</div>
+      <div><div style="font-size:12px;font-weight:600">${ch.name}</div><div style="font-size:10px;color:var(--dim)">${ch.group||'General'}</div></div>
+    </div>`).join('')}</div>`;
+}
+function pageSettings(){
+  const srv=localStorage.getItem('orion_server')||'';
+  return`<div class="setpage">
+    <div class="phdr"><div class="ptitle">⚙️ Settings</div></div>
+    <div class="setcard">
+      <h3>🌐 Connected Server</h3>
+      <p>This device is connected to:</p>
+      <div class="seturl">${srv}</div>
+      <button class="xbtn blue" onclick="testConn()">🔍 Test Connection</button>
+      <button class="xbtn red" onclick="disconnect()">Disconnect</button>
+      <div id="test-result" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
+    </div>
+    <div class="setcard">
+      <h3>ℹ️ About</h3>
+      <p>Orion Media Server TV Client.<br>Each user connects to their own Orion server.<br>Version 1.0.0</p>
+    </div>
+  </div>`;
+}
+
+function testConn(){
+  const el=$('test-result');
+  el.textContent='Testing...';
+  fetch(`${API}/health`,{signal:AbortSignal.timeout(5000)})
+    .then(r=>r.json())
+    .then(d=>{el.style.color='#34d399';el.textContent=d.ok?'✅ Connected!':'❌ Unexpected response';})
+    .catch(()=>{el.style.color='#f87171';el.textContent='❌ Cannot reach server';});
+}
+function disconnect(){
+  if(!confirm('Disconnect from this server?'))return;
+  localStorage.removeItem('orion_server');
+  location.reload();
+}
+
+// ── NAVIGATE ──────────────────────────────────────────────────────────────
+function navigate(page){
+  document.querySelectorAll('.nitem').forEach(el=>el.classList.toggle('active',el.dataset.p===page));
+  const c=$('content');
+  switch(page){
+    case'home':    c.innerHTML=pageHome();    break;
+    case'movies':  c.innerHTML=pageMovies();  break;
+    case'tv':      c.innerHTML=pageTV();      break;
+    case'music':   c.innerHTML=pageMusic();   break;
+    case'iptv':    c.innerHTML=pageIPTV();    break;
+    case'settings':c.innerHTML=pageSettings();break;
+  }
+  c.scrollTop=0;
+  c.querySelectorAll('.card,.cch,[data-play]').forEach(el=>{
+    el.addEventListener('click',handleClick);
+  });
+}
+
+function handleClick(e){
+  const el=e.currentTarget;
+  if(el.dataset.play){const m=S.lib.movies.find(x=>x.id===el.dataset.play);if(m)play(m);return;}
+  if(el.dataset.url){play({url:el.dataset.url,title:el.dataset.name,filePath:null});return;}
+  if(el.dataset.id){
+    const all=[...S.lib.movies,...S.lib.tvShows,...S.lib.music];
+    const m=all.find(x=>x.id===el.dataset.id);
+    if(m)play(m);
+  }
+}
+
+// ── PLAYER ────────────────────────────────────────────────────────────────
+const video=$('video');
+// Player
+const video=$('video');
+const SPEEDS=[0.5,0.75,1,1.25,1.5,1.75,2];
+let speedIdx=2;
+
+function getResume(fp){try{return parseFloat(localStorage.getItem('orion_r_'+btoa(fp).slice(0,16)))||0;}catch{return 0;}}
+function saveResume(fp,t){try{localStorage.setItem('orion_r_'+btoa(fp).slice(0,16),t);}catch{}}
+
+async function play(item){
+  S.open=true;S.nowPlaying=item;S.serverDur=0;S.audioTrack=0;
+  S.introEnd=item.introEnd||0;S.outroStart=item.outroStart||null;
+  S.chapters=[];S.nextEp=null;
+  $('ptitle').textContent=item.title||item.showName||'Now Playing';
+  const ps=$('psubtitle');if(ps)ps.textContent=item.year?item.year+' - '+(item.ext||'').replace('.','').toUpperCase():'';
+  $('player').classList.add('open');
+  ['skipbtn','skipoutro','nextepdiv','chapterpanel'].forEach(id=>{const el=$(id);if(el)el.style.display='none';});
+  showUI();
+  const resume=item.filePath?getResume(item.filePath):0;
+  if(item.filePath){
+    try{
+      const info=await get(API+'/streams?path='+encodeURIComponent(item.filePath));
+      S.serverDur=info.duration||0;S.audioTracks=info.audio||[];S.chapters=info.chapters||[];
+      const al=$('audlab');
+      if(al){if(S.audioTracks.length>1){al.textContent='Audio: '+fmtLang(S.audioTracks[0]?.language);al.style.display='block';}else al.style.display='none';}
+      renderChapterMarkers();
+      const bc=$('bchapters');if(bc)bc.style.display=S.chapters.length>0?'block':'none';
+    }catch(e){}
+    if(item.id){try{const cd=await get(API+'/chapters/'+item.id);if(cd.introEnd>0)S.introEnd=cd.introEnd;if(cd.outroStart)S.outroStart=cd.outroStart;}catch{}}
+  }
+  if(item.type==='tvShows'&&S.lib.tvShows.length){
+    const idx=S.lib.tvShows.findIndex(e=>e.filePath===item.filePath);
+    if(idx>=0&&idx<S.lib.tvShows.length-1){S.nextEp=S.lib.tvShows[idx+1];const ne=$('nexteptitle');if(ne)ne.textContent=S.nextEp.title||'Next Episode';}
+  }
+  const ext=(item.filePath||'').split('.').pop().toLowerCase();
+  const native=['mp4','webm','m4v'].includes(ext);
+  let url=item.url||'';
+  if(item.filePath){url=API+'/stream?path='+encodeURIComponent(item.filePath)+((!native)?'&transcode=1&audio='+S.audioTrack:'');if(resume>30)url+='&seek='+Math.floor(resume);}
+  video.src=url;video.load();video.play().catch(console.error);
+  const bp=$('bplay');if(bp)bp.textContent='||';
+  speedIdx=2;video.playbackRate=1;const bs=$('bspeed');if(bs)bs.textContent='1x';const pp2=$('pspeed');if(pp2)pp2.style.display='none';
+}
+
+function closePlayer(){if(S.nowPlaying?.filePath)saveResume(S.nowPlaying.filePath,video.currentTime);video.pause();video.src='';$('player').classList.remove('open');S.open=false;}
+function showUI(){$('pui').classList.add('show');clearTimeout(S.uiT);S.uiT=setTimeout(()=>{if(!video.paused)$('pui').classList.remove('show');},4000);}
+
+function renderChapterMarkers(){
+  const m=$('pmarkers');if(!m)return;m.innerHTML='';
+  const d=S.serverDur||video.duration||0;if(!d)return;
+  S.chapters.forEach(ch=>{const pin=document.createElement('div');pin.title=ch.title;pin.style.cssText='position:absolute;top:-3px;width:3px;height:11px;background:rgba(255,255,255,0.6);border-radius:1px;transform:translateX(-50%);left:'+(ch.start/d*100)+'%;z-index:5;cursor:pointer';pin.onclick=e=>{e.stopPropagation();video.currentTime=ch.start;showUI();};m.appendChild(pin);});
+}
+function showChapterPanel(){
+  const panel=$('chapterpanel');if(!panel)return;if(panel.style.display==='block'){panel.style.display='none';return;}
+  const list=$('chapterlist');if(!list)return;list.innerHTML='';
+  S.chapters.forEach(ch=>{const row=document.createElement('div');row.style.cssText='display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:rgba(255,255,255,0.8)';row.innerHTML='<span style="font-family:monospace;color:var(--accent);min-width:44px;font-size:11px">'+fmt(ch.start)+'</span><span>'+ch.title+'</span>';row.onclick=()=>{video.currentTime=ch.start;panel.style.display='none';showUI();};list.appendChild(row);});
+  panel.style.display='block';
+}
+function showSeekFeedback(txt){const el=$('seek-feedback');if(!el)return;el.textContent=txt;el.style.display='block';clearTimeout(el._t);el._t=setTimeout(()=>el.style.display='none',700);}
+
+video.addEventListener('timeupdate',()=>{
+  const t=video.currentTime,d=S.serverDur>0?S.serverDur:(isFinite(video.duration)?video.duration:0);
+  if(d>0){const pp=$('pprog');if(pp)pp.style.width=(t/d*100)+'%';const pt=$('ptime');if(pt)pt.textContent=fmt(t)+' / '+fmt(d);if(video.buffered.length>0){const pb=$('pbuf');if(pb)pb.style.width=(video.buffered.end(video.buffered.length-1)/d*100)+'%';}}
+  const si=$('skipbtn');if(si)si.style.display=(S.introEnd>0&&t>2&&t<S.introEnd)?'block':'none';
+  const so=$('skipoutro');if(so)so.style.display=(S.outroStart&&d>0&&t>=S.outroStart&&t<d-5)?'block':'none';
+  const nd=$('nextepdiv');if(S.nextEp&&d>0&&t>d-120&&nd&&nd.style.display==='none')nd.style.display='block';
+  if(S.nowPlaying?.filePath)saveResume(S.nowPlaying.filePath,t);
+});
+video.addEventListener('durationchange',()=>{if(S.serverDur===0&&isFinite(video.duration)){S.serverDur=video.duration;renderChapterMarkers();}});
+video.addEventListener('pause',()=>{const b=$('bplay');if(b)b.textContent='>';});
+video.addEventListener('play',()=>{const b=$('bplay');if(b)b.textContent='||';});
+video.addEventListener('ended',()=>{const nd=$('nextepdiv');if(S.nextEp&&nd)nd.style.display='block';});
+
+function wire(id,fn){const el=$(id);if(el)el.onclick=fn;}
+wire('bplay',()=>{video.paused?video.play():video.pause();showUI();});
+wire('bb10',()=>{showSeekFeedback('-10s');video.currentTime=Math.max(0,video.currentTime-10);showUI();});
+wire('bf10',()=>{showSeekFeedback('+10s');video.currentTime+=10;showUI();});
+wire('bb30',()=>{showSeekFeedback('-30s');video.currentTime=Math.max(0,video.currentTime-30);showUI();});
+wire('bf30',()=>{showSeekFeedback('+30s');video.currentTime+=30;showUI();});
+wire('bmute',()=>{video.muted=!video.muted;const b=$('bmute');if(b)b.textContent=video.muted?'[mute]':'[vol]';showUI();});
+wire('bfull',()=>{if(!document.fullscreenElement)$('player').requestFullscreen();else document.exitFullscreen();showUI();});
+wire('bspeed',()=>{speedIdx=(speedIdx+1)%SPEEDS.length;const s=SPEEDS[speedIdx];video.playbackRate=s;const bs=$('bspeed');if(bs)bs.textContent=s+'x';const p2=$('pspeed');if(p2){p2.textContent=s+'x';p2.style.display=s===1?'none':'block';}showUI();});
+wire('bchapters',()=>{showChapterPanel();showUI();});
+wire('pback',closePlayer);
+wire('skipbtn',()=>{video.currentTime=S.introEnd;const si=$('skipbtn');if(si)si.style.display='none';});
+wire('skipoutro',()=>{video.currentTime=S.serverDur||video.duration;});
+wire('playnext',()=>{if(S.nextEp){const n=S.nextEp;closePlayer();setTimeout(()=>play(n),200);}});
+wire('dismissnext',()=>{const nd=$('nextepdiv');if(nd)nd.style.display='none';});
+wire('audlab',()=>{if(S.audioTracks.length<2)return;S.audioTrack=(S.audioTrack+1)%S.audioTracks.length;const al=$('audlab');if(al)al.textContent='Audio: '+fmtLang(S.audioTracks[S.audioTrack]?.language);const item=S.nowPlaying;const pos=video.currentTime;if(item?.filePath){const ext=item.filePath.split('.').pop().toLowerCase();const native=['mp4','webm','m4v'].includes(ext);video.src=API+'/stream?path='+encodeURIComponent(item.filePath)+((!native)?('&transcode=1&audio='+S.audioTrack+'&seek='+Math.floor(pos)):'');video.load();video.play().catch(()=>{});}showUI();});
+$('pwrap').onclick=function(e){const r=this.getBoundingClientRect();const d=S.serverDur||video.duration;if(d)video.currentTime=((e.clientX-r.left)/r.width)*d;showUI();};
+let lt=0;
+wire('tl',()=>{const n=Date.now();if(n-lt<300){showSeekFeedback('-10s');video.currentTime=Math.max(0,video.currentTime-10);}else showUI();lt=n;});
+wire('tr',()=>{const n=Date.now();if(n-lt<300){showSeekFeedback('+10s');video.currentTime+=10;}else showUI();lt=n;});
+$('player').onclick=e=>{if(e.target===$('player')||e.target===video)showUI();};
+
