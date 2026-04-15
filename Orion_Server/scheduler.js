@@ -35,8 +35,14 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
     // Dispatch task by type/name
     const type = (task.type || task.name || '').toLowerCase();
     if (type.includes('update') || type.includes('check for update')) {
-      // Check GitHub for latest commit vs current version
       const https = require('https');
+      const fsSync = require('fs');
+      const pathMod = require('path');
+      // Read the installed commit SHA (written at install time)
+      const shaFile = pathMod.join(__dirname, '.git', 'refs', 'heads', 'main');
+      const currentSha = fsSync.existsSync(shaFile)
+        ? fsSync.readFileSync(shaFile, 'utf8').trim().slice(0,7)
+        : 'unknown';
       https.get('https://api.github.com/repos/rpoltera/Orion/commits/main',
         { headers: { 'User-Agent': 'Orion', 'Accept': 'application/vnd.github.v3+json' } },
         (r) => {
@@ -47,12 +53,14 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
               const latest = commit?.sha?.slice(0,7) || 'unknown';
               const msg = commit?.commit?.message?.split('\n')[0] || '';
               const date = commit?.commit?.author?.date || '';
-              console.log(`[Scheduler] Latest GitHub commit: ${latest} — ${msg} (${date})`);
-              // Store result so UI can display it
-              if (!db.scheduledTasks) db.scheduledTasks = [];
-              const t = db.scheduledTasks.find(t => t.id === task.id);
-              if (t) { t.lastResult = { latestCommit: latest, message: msg, date }; saveDB(false, 'scheduledTasks'); }
-              if (io) io.emit('update:checked', { latestCommit: latest, message: msg, date });
+              const upToDate = currentSha !== 'unknown' && currentSha === latest;
+              console.log(`[Scheduler] Update check — installed: ${currentSha}, latest: ${latest} — ${upToDate ? 'UP TO DATE' : 'UPDATE AVAILABLE: ' + msg}`);
+              const t = (db.scheduledTasks||[]).find(t => t.id === task.id);
+              if (t) {
+                t.lastResult = { currentSha, latestCommit: latest, message: msg, date, upToDate };
+                saveDB(false, 'scheduledTasks');
+              }
+              if (io) io.emit('update:checked', { currentSha, latestCommit: latest, message: msg, date, upToDate });
             } catch(e) { console.error('[Scheduler] update check parse error:', e.message); }
           });
         }).on('error', e => console.error('[Scheduler] update check error:', e.message));
