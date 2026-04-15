@@ -23,11 +23,6 @@ Prerequisites
 Node.js v18+
 FFmpeg in system PATH (for transcoding)
 
-```
-Build Windows Installer
-```bash
-npm run dist
-```
 Output will be in `/dist/` as a `.exe` NSIS installer.
 🎨 Default Theme
 Orion launches with a Disney+ inspired dark blue theme. Switch themes in Settings.
