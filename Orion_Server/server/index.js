@@ -21,6 +21,7 @@ const fs         = require('fs');
 const ffmpeg     = require('fluent-ffmpeg');
 const ffmpegStatic = require('ffmpeg-static');
 
+const multer = require('multer');
 const { loadConfig, getConfig, getSettings, updateConfig, updateSettings, saveConfig, PATHS } = require('./config');
 const logger   = require('./logger');
 const OrionDB  = require('./database');
