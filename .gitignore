@@ -1,0 +1,25 @@
+# Database files — never commit these
+*.db
+*.db-shm
+*.db-wal
+
+# Data directories
+/var/lib/orion/
+orion-data/
+Orion/
+
+# Config with personal data
+config.json
+
+# Build output
+build/
+node_modules/
+dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env.local
+.env.production.local
