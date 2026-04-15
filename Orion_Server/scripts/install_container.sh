@@ -82,14 +82,15 @@ msg_ok ".env written"
 
 msg_info "Building React frontend (2-3 min)..."
 cd "$ORION_DIR"
+# React build — source is in root, server is in Orion_Server/
 sudo -u "$ORION_USER" npm run react-build 2>&1 | tail -5
 [ -f "$ORION_DIR/build/index.html" ] || msg_error "React build failed"
 msg_ok "React built"
 
 msg_info "Configuring data directory..."
-if [ -f "$ORION_DIR/server/config.js" ]; then
+if [ -f "$ORION_DIR/Orion_Server/config.js" ]; then
   sed -i "s|const DATA_DIR = path.join(process.env.APPDATA.*);|const DATA_DIR = process.env.ORION_DATA_DIR \|\| path.join(process.env.HOME \|\| __dirname, 'orion-data');|g" \
-    "$ORION_DIR/server/config.js" 2>/dev/null || true
+    "$ORION_DIR/Orion_Server/config.js" 2>/dev/null || true
 fi
 cat > /etc/default/orion << ENVEOF
 ORION_DATA_DIR=${ORION_DATA}
@@ -128,7 +129,7 @@ User=${ORION_USER}
 WorkingDirectory=${ORION_DIR}
 EnvironmentFile=/etc/default/orion
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/node server/index.js
+ExecStart=/usr/bin/node Orion_Server/index.js
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -151,14 +152,25 @@ cat > /usr/local/bin/orion-update << 'UPDATEEOF'
 set -e
 echo "Stopping Orion..."
 systemctl stop orion
-cd /opt/orion
-echo "Pulling latest code..."
-sudo -u orion git pull
+cd /tmp
+rm -rf orion-repo
+git clone --depth=1 https://github.com/rpoltera/Orion.git orion-repo
+if [ -d orion-repo/Orion_Server ]; then
+  rsync -a --exclude=node_modules --exclude=build orion-repo/Orion_Server/ /opt/orion/
+  for f in package.json package-lock.json .env src public; do
+    [ -e "orion-repo/$f" ] && cp -r "orion-repo/$f" /opt/orion/
+  done
+else
+  rsync -a --exclude=node_modules --exclude=build orion-repo/ /opt/orion/
+fi
+rm -rf /tmp/orion-repo
+chown -R orion:orion /opt/orion
 echo "Installing dependencies..."
 sudo -u orion npm install --ignore-scripts --quiet
 sudo -u orion npm rebuild better-sqlite3 --quiet
 echo "Building frontend..."
 sudo -u orion npm run react-build
+echo "Starting Orion..."
 echo "Starting Orion..."
 systemctl start orion
 echo "Done."
