@@ -37,6 +37,7 @@ msg_ok "User ready"
 msg_info "Cloning Orion from GitHub..."
 rm -rf "$REPO_DIR"
 git clone --depth=1 https://github.com/rpoltera/Orion.git "$REPO_DIR"
+git config --global --add safe.directory "$REPO_DIR"
 chown -R orion:orion "$REPO_DIR"
 msg_ok "Repository cloned to $REPO_DIR"
 
@@ -45,7 +46,8 @@ msg_ok "Repository cloned to $REPO_DIR"
 [ -f "$ORION_DIR/package.json" ] || msg_error "package.json not found in Orion_Server/"
 msg_ok "Repo structure verified"
 
-msg_info "Creating data directory..."
+msg_info "Creating fresh data directory..."
+rm -rf "$ORION_DATA"
 mkdir -p "$ORION_DATA"
 chown -R orion:orion "$ORION_DATA"
 msg_ok "Data dir: ${ORION_DATA}"
@@ -143,6 +145,7 @@ systemctl is-active --quiet orion && msg_ok "Orion service started" || {
 cat > /usr/local/bin/orion-update << 'UPDATEEOF'
 #!/bin/bash
 set -e
+git config --global --add safe.directory /opt/orion
 systemctl stop orion
 cd /opt/orion
 git pull
