@@ -1,4 +1,4 @@
-install for orion server lxc is bash <(curl -fsSL https://raw.githubusercontent.com/rpoltera/Orion/main/Orion_Server/create_lxc.sh)
+install for orion server lxc is bash " <(curl -fsSL https://raw.githubusercontent.com/rpoltera/Orion/main/Orion_Server/create_lxc.sh)"
 
 <p align="center">
   <img src="/Orion_Server/assets/logo.png" width="180" alt="Orion Logo" />
