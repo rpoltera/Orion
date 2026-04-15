@@ -25,10 +25,20 @@ msg_ok "Using container ID: ${CTID}"
 
 # ── Storage selection ─────────────────────────────────────────────────────────
 echo -e "\n${YW}Available storage pools:${CL}"
-pvesm status | awk 'NR>1 {print NR-1". "$1" ("$2")"}'
+mapfile -t STORAGE_LIST < <(pvesm status | awk 'NR>1 {print $1}')
+for i in "${!STORAGE_LIST[@]}"; do
+  echo "  $((i+1)). ${STORAGE_LIST[$i]}"
+done
 echo ""
-read -rp "Enter storage name for container [default: local-lvm]: " STORAGE
-STORAGE=${STORAGE:-local-lvm}
+read -rp "Enter storage name or number [default: ${STORAGE_LIST[0]}]: " STORAGE_INPUT
+if [[ "$STORAGE_INPUT" =~ ^[0-9]+$ ]]; then
+  STORAGE="${STORAGE_LIST[$((STORAGE_INPUT-1))]}"
+elif [ -z "$STORAGE_INPUT" ]; then
+  STORAGE="${STORAGE_LIST[0]}"
+else
+  STORAGE="$STORAGE_INPUT"
+fi
+msg_ok "Using storage: ${STORAGE}" 
 
 # ── Container resources ───────────────────────────────────────────────────────
 read -rp "RAM in MB [default: 4096]: " RAM;     RAM=${RAM:-4096}
@@ -59,17 +69,22 @@ read -rp "NAS hostname or IP (e.g. 192.168.0.245): " NAS_HOST
 read -rp "NAS username [default: guest]:             " NAS_USER; NAS_USER=${NAS_USER:-guest}
 read -rsp "NAS password [leave blank for none]:      " NAS_PASS; echo ""
 
-echo -e "\n${YW}How many NAS shares do you want to mount?${CL}"
-read -rp "Number of shares [default: 2]: " SHARE_COUNT; SHARE_COUNT=${SHARE_COUNT:-2}
-
+echo -e "\n${YW}NAS Shares to mount — press Enter with blank name when done:${CL}"
+echo -e "  e.g. share name: media  →  mount path: /mnt/media"
+echo -e "  e.g. share name: jbod1  →  mount path: /mnt/jbod1"
 declare -a SHARE_NAMES=()
 declare -a SHARE_PATHS=()
-for ((i=1; i<=SHARE_COUNT; i++)); do
-  read -rp "  Share $i name on NAS (e.g. jbod1):          " SNAME
-  read -rp "  Mount path inside LXC (e.g. /mnt/jbod1):   " SPATH
+i=1
+while true; do
+  read -rp "  Share $i name on NAS [blank to finish]: " SNAME
+  [ -z "$SNAME" ] && break
+  read -rp "  Mount path inside LXC [default: /mnt/${SNAME}]: " SPATH
+  SPATH=${SPATH:-/mnt/${SNAME}}
   SHARE_NAMES+=("$SNAME")
   SHARE_PATHS+=("$SPATH")
+  ((i++))
 done
+[ ${#SHARE_NAMES[@]} -eq 0 ] && echo -e "${YW}No shares — add manually later via /etc/fstab${CL}"
 
 # ── Hostname ──────────────────────────────────────────────────────────────────
 read -rp "Container hostname [default: orion]: " HOSTNAME; HOSTNAME=${HOSTNAME:-orion}
