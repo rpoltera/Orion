@@ -1,7 +1,7 @@
 install for orion server lxc is bash <(curl -fsSL https://raw.githubusercontent.com/rpoltera/Orion/main/Orion_Server/create_lxc.sh)
 
 <p align="center">
-  <img src="blob/main/Orion_Server/assets/logo.png" width="180" alt="Orion Logo" />
+  <img src="/Orion_Server/assets/logo.png" width="180" alt="Orion Logo" />
 </p>
 <h1 align="center">Orion</h1>
 <p align="center">A powerful personal media server for Windows — with IPTV, hardware transcoding, and streaming service integration.</p>
