@@ -22,12 +22,7 @@ install for orion server lxc is bash <(curl -fsSL https://raw.githubusercontent.
 Prerequisites
 Node.js v18+
 FFmpeg in system PATH (for transcoding)
-Development
-```bash
-git clone https://github.com/YOUR_USERNAME/orion.git
-cd orion
-npm install
-npm start
+
 ```
 Build Windows Installer
 ```bash
