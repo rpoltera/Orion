@@ -3,9 +3,8 @@ install for orion server lxc is bash <(curl -fsSL https://raw.githubusercontent.
 <p align="center">
   <img src="/Orion_Server/assets/logo.png" width="180" alt="Orion Logo" />
 </p>
-<p align="center">A powerful personal media server for Windows — with IPTV, hardware transcoding, and streaming service integration.</p>
+<p align="center">A powerful personal media server for Proxmox — with IPTV, hardware transcoding, and streaming service integration.</p>
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Windows-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/status-alpha-orange?style=flat-square" />
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" />
 </p>
