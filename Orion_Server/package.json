@@ -1,0 +1,109 @@
+{
+  "name": "orion",
+  "version": "1.0.0",
+  "description": "Orion Media Server - Self-hosted media server with IPTV, hardware transcoding, and streaming integration",
+  "author": "R. Poltera",
+  "main": "main.js",
+  "homepage": "./",
+  "scripts": {
+    "start": "concurrently \"npm run server\" \"npm run react-start\" \"npm run electron-dev\"",
+    "electron-dev": "wait-on http://localhost:3000 && wait-on http://localhost:3001 && electron .",
+    "server": "node server/index.js",
+    "react-start": "react-scripts start",
+    "react-build": "react-scripts build",
+    "build": "npm run rebuild-electron && npm run react-build && electron-builder build --win && npm run rebuild-node",
+    "dist": "electron-builder",
+    "rebuild-node": "npm rebuild better-sqlite3",
+    "rebuild-electron": "electron-rebuild -f -w better-sqlite3"
+  },
+  "build": {
+    "appId": "com.orionmediaserver.app",
+    "productName": "Orion Media Server",
+    "extends": null,
+    "icon": "assets/icon.ico",
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "installer.nsh"
+    },
+    "files": [
+      "build/**/*",
+      "main.js",
+      "preload.js",
+      "server/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "extraResources": [
+      {
+        "from": "C:/Program Files/nodejs/node.exe",
+        "to": "node/node.exe"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/**/*",
+      "server/**/*",
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "extraMetadata": {
+      "main": "main.js"
+    }
+  },
+  "dependencies": {
+    "@ffprobe-installer/ffprobe": "^1.4.1",
+    "axios": "^1.6.0",
+    "better-sqlite3": "^9.6.0",
+    "cors": "^2.8.5",
+    "electron-store": "^8.1.0",
+    "express": "^4.18.2",
+    "ffmpeg-static": "^5.2.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "framer-motion": "^10.16.5",
+    "hls.js": "^1.6.15",
+    "lucide-react": "^0.263.1",
+    "m3u-parser-generator": "^1.4.1",
+    "multer": "^1.4.5-lts.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-player": "^2.13.0",
+    "react-router-dom": "^6.18.0",
+    "socket.io": "^4.6.1",
+    "socket.io-client": "^4.6.1",
+    "sql.js": "^1.12.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
+    "concurrently": "^8.2.2",
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4",
+    "react-scripts": "5.0.1",
+    "wait-on": "^7.2.0"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
