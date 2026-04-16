@@ -228,7 +228,7 @@ echo "Orion updated and restarted."
 UPDATEEOF
 chmod +x /usr/local/bin/orion-update
 # Allow orion user to run orion-update without password
-echo 'orion ALL=(ALL) NOPASSWD: /usr/local/bin/orion-update' > /etc/sudoers.d/orion-update
+printf 'orion ALL=(ALL) NOPASSWD: /usr/local/bin/orion-update\norion ALL=(ALL) NOPASSWD: /usr/bin/systemd-run\n' > /etc/sudoers.d/orion-update
 chmod 440 /etc/sudoers.d/orion-update
 # Allow orion user to run systemctl and orion-update without password
 echo "orion ALL=(ALL) NOPASSWD: /bin/systemctl stop orion, /bin/systemctl start orion, /bin/systemctl restart orion, /usr/local/bin/orion-update" > /etc/sudoers.d/orion
