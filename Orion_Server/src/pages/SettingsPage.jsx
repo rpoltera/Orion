@@ -2002,22 +2002,6 @@ const TAB_GROUPS = [
     await scanFolders([browserPath], browserType);
     setBrowserOpen(false);
   };
-    // In Electron — use native folder picker
-    if (window.electron) {
-      const result = await window.electron.openFolderDialog();
-      if (!result?.canceled && result?.filePaths?.length) {
-        await scanFolders(result.filePaths, type);
-      }
-      return;
-    }
-    // In browser — prompt for path manually
-    const path = window.prompt(
-      'Enter the full folder path for ' + type + ':\n\nExamples:\n  C:\\Users\\Ray\\Videos\\Movies\n  \\\\192.168.0.245\\media\\movies\n\nMake sure the Orion server can access this path.'
-    );
-    if (path && path.trim()) {
-      await scanFolders([path.trim()], type);
-    }
-  };
 
   const handleRemovePath = async (type, idx) => {
     const folderPath = localPaths[type][idx];
