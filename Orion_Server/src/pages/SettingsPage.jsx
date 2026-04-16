@@ -2223,7 +2223,7 @@ const TAB_GROUPS = [
             </div>
           </div>
 
-          <div style={{ marginTop:24, padding:20, background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--radius-lg)' }}>
+          {window.electron && <div style={{ marginTop:24, padding:20, background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--radius-lg)' }}>
             <div style={{ fontWeight:700, fontSize:14, marginBottom:6 }}>🗺 Network Path Mappings</div>
             <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:12 }}>
               Map UNC paths to drive letters so FFprobe can scan NAS media.
@@ -2254,7 +2254,7 @@ const TAB_GROUPS = [
                 Save Mappings
               </button>
             </div>
-          </div>
+          </div>}
           </>
         )}
 
