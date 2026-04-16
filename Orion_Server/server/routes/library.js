@@ -194,15 +194,9 @@ module.exports = function libraryRoutes({ db, io, saveDB, rebuildIndex, OrionDB,
           let shouldMerge = false;
           if (a === b) {
             shouldMerge = true; // identical after stripping articles/punctuation
-          } else {
-            const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
-            if (shorter.length > 4 && longer.includes(shorter) && longer.length - shorter.length < 20) {
-              // Don't merge if the only extra chars are digits — that's a year
-              // e.g. "Sabrina" vs "Sabrina (2018)" should NOT merge
-              const extra = longer.replace(shorter, '');
-              if (!/^\d+$/.test(extra)) shouldMerge = true;
-            }
           }
+          // Substring check intentionally removed — too many false positives with
+          // year-disambiguated shows (e.g. "Avatar" matching "Avatar (2025)")
           if (!shouldMerge) continue;
           // Keep the one with a poster; absorb the other
           const [keep, absorb] = remaining[i].thumbnail ? [remaining[i], remaining[j]] : [remaining[j], remaining[i]];
@@ -243,8 +237,9 @@ module.exports = function libraryRoutes({ db, io, saveDB, rebuildIndex, OrionDB,
     const cacheKey = `grouped:${search||''}:${page||0}:${limit||0}`;
     const cached = getCached(cacheKey);
     if (cached && req.headers['if-none-match'] === cached.etag) return res.status(304).end();
-    const etag = setCached(cacheKey, { items: shows, total });
-    res.set('ETag', etag).set('Cache-Control', 'no-cache').json({ items: shows, total });
+    const totalEpisodes = (_groupedShowsCache || []).reduce((s, sh) => s + (sh.episodeCount || 0), 0);
+    const etag = setCached(cacheKey, { items: shows, total, totalEpisodes });
+    res.set('ETag', etag).set('Cache-Control', 'no-cache').json({ items: shows, total, totalEpisodes });
   });
 
   // ── GET /api/library/:type ────────────────────────────────────────────────────
