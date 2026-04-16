@@ -88,11 +88,12 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
               if (!upToDate) {
                 console.log('[Scheduler] Update available — running orion-update...');
                 if (io) io.emit('update:installing', { message: msg, latestCommit: latest });
-                // Run detached so it survives Orion restarting
+                // Run detached with nohup so it survives Orion stopping
                 const { spawn } = require('child_process');
-                const child = spawn('sudo', ['/usr/local/bin/orion-update'], {
+                const child = spawn('sudo', ['nohup', '/usr/local/bin/orion-update'], {
                   detached: true,
-                  stdio: 'ignore'
+                  stdio: 'ignore',
+                  env: { ...process.env, HOME: '/root' }
                 });
                 child.unref();
                 console.log('[Scheduler] orion-update launched detached, pid:', child.pid);
