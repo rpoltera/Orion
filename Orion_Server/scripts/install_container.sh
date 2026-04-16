@@ -209,6 +209,32 @@ npm install --ignore-scripts --quiet
 npm rebuild better-sqlite3 --quiet
 npm run react-build
 systemctl start orion
+sleep 8
+# Seed scheduled tasks if missing
+python3 << 'PYEOF'
+import json, subprocess, uuid
+result = subprocess.run(["sqlite3", "/var/lib/orion/orion.db", "SELECT value FROM kv_arrays WHERE key='scheduledTasks';"], capture_output=True, text=True)
+existing = result.stdout.strip()
+if existing and existing != '[]' and len(existing) > 5:
+    print("Scheduled tasks already exist, skipping seed.")
+else:
+    tasks = [
+        {"id": str(uuid.uuid4()), "name": "Scan Libraries", "description": "Scan all library folders for new or removed media", "icon": "📁", "type": "scan", "schedule": "daily", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Refresh Metadata", "description": "Re-fetch metadata for items missing posters/info", "icon": "🎭", "type": "metadata", "schedule": "daily", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Build Collections", "description": "Rebuild auto genre, decade and franchise collections", "icon": "📁", "type": "collections", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Database Backup", "description": "Backup the library database to a .bak file", "icon": "💾", "type": "backup", "schedule": "weekly", "scheduleTime": "01:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Database Optimize", "description": "Remove orphaned entries and compact the database", "icon": "🔧", "type": "optimize", "schedule": "weekly", "scheduleTime": "01:30", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Clear Debug Log", "description": "Automatically clear the debug log", "icon": "🗑", "type": "clearlog", "schedule": "daily", "scheduleTime": "06:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Check for Updates", "description": "Check if a new version of Orion is available", "icon": "🔄", "type": "checkupdate", "schedule": "daily", "scheduleTime": "07:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Download Trailers", "description": "Download and cache trailers for all movies from TMDB/YouTube", "icon": "🎬", "type": "trailers", "schedule": "weekly", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Download TV Trailers", "description": "Download and cache trailers for all TV shows from TMDB/YouTube", "icon": "📺", "type": "tv-trailers", "schedule": "weekly", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Generate Missing Thumbnails", "description": "Auto-generate video screenshots for items with no poster art", "icon": "🖼", "type": "thumbnails", "schedule": "daily", "scheduleTime": "05:00", "enabled": True, "lastRun": None},
+        {"id": str(uuid.uuid4()), "name": "Fetch Music Video Metadata", "description": "Fetch album art and artist info for music videos via iTunes/Last.fm", "icon": "🎵", "type": "musicvideo-meta", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
+    ]
+    val = json.dumps(tasks).replace("'", "''")
+    subprocess.run(["sqlite3", "/var/lib/orion/orion.db", f"INSERT OR REPLACE INTO kv_arrays (key, value) VALUES ('scheduledTasks', '{val}');"])
+    print("Scheduled tasks seeded.")
+PYEOF
 echo "Orion updated and restarted."
 UPDATEEOF
 chmod +x /usr/local/bin/orion-update
