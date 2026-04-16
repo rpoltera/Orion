@@ -61,7 +61,7 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
       const https = require('https');
       const fsSync = require('fs');
       const pathMod = require('path');
-      // Read the installed commit SHA (written at install time)
+      const { exec } = require('child_process');
       const shaFile = pathMod.join(__dirname, '..', '..', '..', '.git', 'refs', 'heads', 'main');
       const currentSha = fsSync.existsSync(shaFile)
         ? fsSync.readFileSync(shaFile, 'utf8').trim().slice(0,7)
@@ -85,6 +85,19 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
                 saveDB(true, 'scheduledTasks');
               }
               if (io) io.emit('update:checked', { currentSha, latestCommit: latest, message: msg, date, upToDate });
+              if (!upToDate) {
+                console.log('[Scheduler] Update available — running orion-update...');
+                if (io) io.emit('update:installing', { message: msg, latestCommit: latest });
+                exec('/usr/local/bin/orion-update', (err, stdout, stderr) => {
+                  if (err) {
+                    console.error('[Scheduler] orion-update failed:', err.message);
+                    if (io) io.emit('update:failed', { error: err.message });
+                  } else {
+                    console.log('[Scheduler] orion-update completed');
+                    if (io) io.emit('update:complete', { latestCommit: latest, message: msg });
+                  }
+                });
+              }
             } catch(e) { console.error('[Scheduler] update check parse error:', e.message); }
           });
         }).on('error', e => console.error('[Scheduler] update check error:', e.message));
