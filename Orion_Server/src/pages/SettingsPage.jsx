@@ -1962,7 +1962,46 @@ const TAB_GROUPS = [
     fetch(`${API}/metadata/status`).then(r => r.json()).then(setMetaStatus).catch(() => {});
   }, [API]);
 
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [browserPath, setBrowserPath] = useState('/');
+  const [browserDirs, setBrowserDirs] = useState([]);
+  const [browserType, setBrowserType] = useState(null);
+  const [browserLoading, setBrowserLoading] = useState(false);
+
+  const openBrowser = async (type) => {
+    // In Electron — use native folder picker
+    if (window.electron) {
+      const result = await window.electron.openFolderDialog();
+      if (!result?.canceled && result?.filePaths?.length) {
+        await scanFolders(result.filePaths, type);
+      }
+      return;
+    }
+    // In browser — use server-side directory browser
+    setBrowserType(type);
+    setBrowserOpen(true);
+    await browseTo('/');
+  };
+
+  const browseTo = async (path) => {
+    setBrowserLoading(true);
+    try {
+      const r = await fetch(`${API}/browse?path=${encodeURIComponent(path)}`);
+      const d = await r.json();
+      setBrowserPath(d.path);
+      setBrowserDirs(d.dirs || []);
+    } catch(e) {}
+    setBrowserLoading(false);
+  };
+
   const handleAddFolder = async (type) => {
+    openBrowser(type);
+  };
+
+  const handleBrowserSelect = async () => {
+    await scanFolders([browserPath], browserType);
+    setBrowserOpen(false);
+  };
     // In Electron — use native folder picker
     if (window.electron) {
       const result = await window.electron.openFolderDialog();
@@ -2009,6 +2048,53 @@ const TAB_GROUPS = [
 
   return (
     <div className="page">
+      {/* Directory Browser Modal */}
+      {browserOpen && (
+        <div style={{ position:'fixed',inset:0,zIndex:9999,background:'rgba(0,0,0,0.7)',display:'flex',alignItems:'center',justifyContent:'center' }}>
+          <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:16,width:560,maxHeight:'80vh',display:'flex',flexDirection:'column',overflow:'hidden' }}>
+            <div style={{ padding:'16px 20px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'space-between' }}>
+              <span style={{ fontWeight:700,fontSize:15 }}>📁 Select Folder</span>
+              <button onClick={()=>setBrowserOpen(false)} style={{ background:'none',border:'none',color:'var(--text-muted)',cursor:'pointer',fontSize:20 }}>×</button>
+            </div>
+            {/* Current path */}
+            <div style={{ padding:'10px 20px',background:'var(--bg-secondary)',borderBottom:'1px solid var(--border)',fontSize:12,color:'var(--text-muted)',fontFamily:'monospace',wordBreak:'break-all' }}>
+              {browserPath}
+            </div>
+            {/* Dir listing */}
+            <div style={{ flex:1,overflowY:'auto',padding:'8px 0' }}>
+              {browserLoading
+                ? <div style={{ padding:24,textAlign:'center',color:'var(--text-muted)' }}>Loading…</div>
+                : <>
+                  {browserPath !== '/' && (
+                    <div onClick={()=>browseTo(browserPath.split('/').slice(0,-1).join('/')||'/')}
+                      style={{ padding:'10px 20px',cursor:'pointer',display:'flex',alignItems:'center',gap:10,fontSize:13 }}
+                      onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.05)'}
+                      onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                      <span>📁</span><span style={{ color:'var(--accent)' }}>.. (up)</span>
+                    </div>
+                  )}
+                  {browserDirs.map(d => (
+                    <div key={d.path} onClick={()=>browseTo(d.path)}
+                      style={{ padding:'10px 20px',cursor:'pointer',display:'flex',alignItems:'center',gap:10,fontSize:13 }}
+                      onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.05)'}
+                      onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                      <span>📁</span><span>{d.name}</span>
+                    </div>
+                  ))}
+                  {browserDirs.length===0&&<div style={{ padding:24,textAlign:'center',color:'var(--text-muted)',fontSize:13 }}>No subdirectories</div>}
+                </>
+              }
+            </div>
+            {/* Actions */}
+            <div style={{ padding:'14px 20px',borderTop:'1px solid var(--border)',display:'flex',gap:10,alignItems:'center' }}>
+              <div style={{ flex:1,fontSize:12,color:'var(--text-muted)' }}>Selected: <span style={{ color:'var(--text-primary)',fontFamily:'monospace' }}>{browserPath}</span></div>
+              <button onClick={()=>setBrowserOpen(false)} style={{ padding:'8px 16px',background:'var(--bg-tertiary)',border:'1px solid var(--border)',borderRadius:'var(--radius)',cursor:'pointer',fontSize:13 }}>Cancel</button>
+              <button onClick={handleBrowserSelect} style={{ padding:'8px 16px',background:'var(--accent)',color:'white',border:'none',borderRadius:'var(--radius)',cursor:'pointer',fontSize:13,fontWeight:700 }}>Select This Folder</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="page-header">
         <div className="page-title">⚙️ Settings</div>
         <div className="page-subtitle">Configure your Orion media server</div>
