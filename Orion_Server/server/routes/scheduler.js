@@ -88,15 +88,18 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
               if (!upToDate) {
                 console.log('[Scheduler] Update available — running orion-update...');
                 if (io) io.emit('update:installing', { message: msg, latestCommit: latest });
-                // Run detached with nohup so it survives Orion stopping
+                // Use systemd-run to launch as a completely independent process
                 const { spawn } = require('child_process');
-                const child = spawn('sudo', ['nohup', '/usr/local/bin/orion-update'], {
+                const child = spawn('sudo', [
+                  'systemd-run', '--unit=orion-update',
+                  '--description=Orion Auto Update',
+                  '/usr/local/bin/orion-update'
+                ], {
                   detached: true,
-                  stdio: 'ignore',
-                  env: { ...process.env, HOME: '/root' }
+                  stdio: 'ignore'
                 });
                 child.unref();
-                console.log('[Scheduler] orion-update launched detached, pid:', child.pid);
+                console.log('[Scheduler] orion-update launched via systemd-run');
               }
             } catch(e) { console.error('[Scheduler] update check parse error:', e.message); }
           });
