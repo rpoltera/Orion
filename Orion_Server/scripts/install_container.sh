@@ -201,6 +201,9 @@ cat > /usr/local/bin/orion-update << 'UPDATEEOF'
 #!/bin/bash
 set -e
 git config --global --add safe.directory /opt/orion
+# Flush database before stopping
+curl -s -X POST http://localhost:3001/api/db/flush --max-time 5 > /dev/null 2>&1 || true
+sleep 2
 systemctl stop orion
 cd /opt/orion
 git pull
