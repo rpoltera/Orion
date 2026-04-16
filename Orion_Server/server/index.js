@@ -372,6 +372,93 @@ async function start() {
     } catch(e) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
   });
 
+  // ── NAS Shares management ────────────────────────────────────────────────────
+  api.get('/nas/shares', (req, res) => {
+    try {
+      const fstab = fs.readFileSync('/etc/fstab', 'utf8');
+      const shares = [];
+      for (const line of fstab.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const parts = trimmed.split(/[ \t]+/);
+        if (parts.length >= 3 && parts[1] && (parts[2] === 'cifs' || parts[0].startsWith('//'))) {
+          // Parse credentials file if present
+          let user = '';
+          const credMatch = parts[3]?.match(/credentials=([^,]+)/);
+          if (credMatch) {
+            try {
+              const cred = fs.readFileSync(credMatch[1], 'utf8');
+              user = cred.match(/username=(.+)/)?.[1]?.trim() || '';
+            } catch {}
+          } else {
+            user = parts[3]?.match(/username=([^,]+)/)?.[1] || '';
+          }
+          shares.push({
+            source: parts[0],
+            mountPoint: parts[1],
+            type: parts[2],
+            options: parts[3] || '',
+            user,
+            mounted: (() => { try { require('child_process').execSync(`mountpoint -q ${parts[1]}`); return true; } catch { return false; } })()
+          });
+        }
+      }
+      res.json({ shares });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  api.post('/nas/shares', (req, res) => {
+    const { source, mountPoint, user, password } = req.body;
+    if (!source || !mountPoint) return res.status(400).json({ error: 'source and mountPoint required' });
+    try {
+      // Create mount point
+      fs.mkdirSync(mountPoint, { recursive: true });
+      // Write credentials file
+      const credFile = `/etc/cifs-${mountPoint.replace(/\//g, '-')}.cred`;
+      fs.writeFileSync(credFile, `username=${user||'guest'}
+password=${password||''}
+`, { mode: 0o600 });
+      // Add to fstab
+      const fstab = fs.readFileSync('/etc/fstab', 'utf8');
+      const line = `${source}  ${mountPoint}  cifs  credentials=${credFile},iocharset=utf8,file_mode=0755,dir_mode=0755,noperm,_netdev  0  0
+`;
+      fs.writeFileSync('/etc/fstab', fstab + line);
+      // Mount
+      require('child_process').execSync(`mount ${mountPoint}`);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  api.delete('/nas/shares', (req, res) => {
+    const { mountPoint } = req.body;
+    if (!mountPoint) return res.status(400).json({ error: 'mountPoint required' });
+    try {
+      // Unmount
+      try { require('child_process').execSync(`umount ${mountPoint}`); } catch {}
+      // Remove from fstab
+      const fstab = fs.readFileSync('/etc/fstab', 'utf8');
+      const lines = fstab.split('\n').filter(l => !l.includes(mountPoint));
+      fs.writeFileSync('/etc/fstab', lines.join('\n'));
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  api.post('/nas/mount', (req, res) => {
+    const { mountPoint } = req.body;
+    try {
+      require('child_process').execSync(`mount ${mountPoint}`);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  api.post('/nas/umount', (req, res) => {
+    const { mountPoint } = req.body;
+    try {
+      require('child_process').execSync(`umount ${mountPoint}`);
+      res.json({ ok: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
   // Directory browser — lets the web UI browse server filesystem
   api.get('/browse', (req, res) => {
     const dirPath = req.query.path || '/';
