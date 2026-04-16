@@ -1,9 +1,9 @@
 // ─── TitleBar.jsx ─────────────────────────────────────────────────────────
 import React from 'react';
 import { Minus, Square, X } from 'lucide-react';
-
 export default function TitleBar() {
   const el = window.electron;
+  if (!el) return <div className="titlebar" />;
   return (
     <div className="titlebar">
       <div className="titlebar-controls">
