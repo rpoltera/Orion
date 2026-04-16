@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Play, X, Star } from 'lucide-react';
 
-const BASE = 'http://localhost:3001';
+const BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001` : `http://${window.location.hostname}:3001`;
 const API  = BASE + '/api';
 
 function decodeEntities(s) {

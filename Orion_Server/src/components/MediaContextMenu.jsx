@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactDOM from 'react-dom';
 import { useApp } from '../contexts/AppContext';
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 
 // Global context menu state — only one open at a time
 let _closeCurrentMenu = null;

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Film, Tv, Music, Video } from 'lucide-react';
 
-const BASE = 'http://localhost:3001';
+const BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001` : `http://${window.location.hostname}:3001`;
 
 const resolveImg = (url) => {
   if (!url) return null;
