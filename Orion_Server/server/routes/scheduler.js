@@ -88,7 +88,7 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
               if (!upToDate) {
                 console.log('[Scheduler] Update available — running orion-update...');
                 if (io) io.emit('update:installing', { message: msg, latestCommit: latest });
-                exec('/usr/local/bin/orion-update', (err, stdout, stderr) => {
+                exec('sudo /usr/local/bin/orion-update', (err, stdout, stderr) => {
                   if (err) {
                     console.error('[Scheduler] orion-update failed:', err.message);
                     if (io) io.emit('update:failed', { error: err.message });
