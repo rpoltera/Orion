@@ -963,7 +963,7 @@ function AlphaNav({ items, getKey }) {
 }
 
 export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsumed }) {
-  const { library, scanFolders, loading, API, fetchLibrary, scanStatus } = useApp();
+  const { library, libraryCounts, scanFolders, loading, API, fetchLibrary, scanStatus } = useApp();
   const [selectedShow, setSelectedShow] = useState(null);
 
   // When navigated here from search, open the show immediately
@@ -1231,7 +1231,7 @@ export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsume
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div>
             <div className="page-title">📺 TV Shows</div>
-            <div className="page-subtitle">{shows.length.toLocaleString()} series · {shows.reduce((s,sh)=>s+(sh.episodeCount||0),0).toLocaleString()} episodes</div>
+            <div className="page-subtitle">{(libraryCounts?.tvShows || shows.length).toLocaleString()} series · {(libraryCounts?.tvShows_episodes || shows.reduce((s,sh)=>s+(sh.episodeCount||0),0)).toLocaleString()} episodes</div>
           </div>
         </div>
       </div>
