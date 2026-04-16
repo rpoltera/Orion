@@ -139,27 +139,6 @@ CFGEOF
 chown orion:orion "$ORION_DATA/config.json" 2>/dev/null || true
 msg_ok "Config ready"
 
-msg_info "Seeding scheduled tasks..."
-python3 << 'PYEOF'
-import json, subprocess, uuid
-tasks = [
-    {"id": str(uuid.uuid4()), "name": "Scan Libraries", "description": "Scan all library folders for new or removed media", "icon": "📁", "type": "scan", "schedule": "daily", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Refresh Metadata", "description": "Re-fetch metadata for items missing posters/info", "icon": "🎭", "type": "metadata", "schedule": "daily", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Build Collections", "description": "Rebuild auto genre, decade and franchise collections", "icon": "📁", "type": "collections", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Database Backup", "description": "Backup the library database to a .bak file", "icon": "💾", "type": "backup", "schedule": "weekly", "scheduleTime": "01:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Database Optimize", "description": "Remove orphaned entries and compact the database", "icon": "🔧", "type": "optimize", "schedule": "weekly", "scheduleTime": "01:30", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Clear Debug Log", "description": "Automatically clear the debug log", "icon": "🗑", "type": "clearlog", "schedule": "daily", "scheduleTime": "06:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Check for Updates", "description": "Check if a new version of Orion is available", "icon": "🔄", "type": "checkupdate", "schedule": "daily", "scheduleTime": "07:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Download Trailers", "description": "Download and cache trailers for all movies from TMDB/YouTube", "icon": "🎬", "type": "trailers", "schedule": "weekly", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Download TV Trailers", "description": "Download and cache trailers for all TV shows from TMDB/YouTube", "icon": "📺", "type": "tv-trailers", "schedule": "weekly", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Generate Missing Thumbnails", "description": "Auto-generate video screenshots for items with no poster art", "icon": "🖼", "type": "thumbnails", "schedule": "daily", "scheduleTime": "05:00", "enabled": True, "lastRun": None},
-    {"id": str(uuid.uuid4()), "name": "Fetch Music Video Metadata", "description": "Fetch album art and artist info for music videos via iTunes/Last.fm", "icon": "🎵", "type": "musicvideo-meta", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
-]
-val = json.dumps(tasks).replace("'", "''")
-subprocess.run(["sqlite3", "/var/lib/orion/orion.db", f"INSERT OR REPLACE INTO kv_arrays (key, value) VALUES ('scheduledTasks', '{val}');"])
-print("Scheduled tasks seeded")
-PYEOF
-msg_ok "Scheduled tasks seeded"
 
 msg_info "Creating systemd service..."
 cat > /etc/systemd/system/orion.service << SERVICEEOF
@@ -189,11 +168,34 @@ SERVICEEOF
 systemctl daemon-reload
 systemctl enable orion
 systemctl start orion
-sleep 4
+sleep 8
+
 systemctl is-active --quiet orion && msg_ok "Orion service started" || {
   echo "Service failed. Logs:"
   journalctl -u orion -n 20 --no-pager
 }
+
+msg_info "Seeding scheduled tasks..."
+python3 << 'PYEOF'
+import json, subprocess, uuid
+tasks = [
+    {"id": str(uuid.uuid4()), "name": "Scan Libraries", "description": "Scan all library folders for new or removed media", "icon": "📁", "type": "scan", "schedule": "daily", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Refresh Metadata", "description": "Re-fetch metadata for items missing posters/info", "icon": "🎭", "type": "metadata", "schedule": "daily", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Build Collections", "description": "Rebuild auto genre, decade and franchise collections", "icon": "📁", "type": "collections", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Database Backup", "description": "Backup the library database to a .bak file", "icon": "💾", "type": "backup", "schedule": "weekly", "scheduleTime": "01:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Database Optimize", "description": "Remove orphaned entries and compact the database", "icon": "🔧", "type": "optimize", "schedule": "weekly", "scheduleTime": "01:30", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Clear Debug Log", "description": "Automatically clear the debug log", "icon": "🗑", "type": "clearlog", "schedule": "daily", "scheduleTime": "06:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Check for Updates", "description": "Check if a new version of Orion is available", "icon": "🔄", "type": "checkupdate", "schedule": "daily", "scheduleTime": "07:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Download Trailers", "description": "Download and cache trailers for all movies from TMDB/YouTube", "icon": "🎬", "type": "trailers", "schedule": "weekly", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Download TV Trailers", "description": "Download and cache trailers for all TV shows from TMDB/YouTube", "icon": "📺", "type": "tv-trailers", "schedule": "weekly", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Generate Missing Thumbnails", "description": "Auto-generate video screenshots for items with no poster art", "icon": "🖼", "type": "thumbnails", "schedule": "daily", "scheduleTime": "05:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Fetch Music Video Metadata", "description": "Fetch album art and artist info for music videos via iTunes/Last.fm", "icon": "🎵", "type": "musicvideo-meta", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
+]
+val = json.dumps(tasks).replace("'", "''")
+subprocess.run(["sqlite3", "/var/lib/orion/orion.db", f"INSERT OR REPLACE INTO kv_arrays (key, value) VALUES ('scheduledTasks', '{val}');"])
+print("Scheduled tasks seeded")
+PYEOF
+msg_ok "Scheduled tasks seeded" 
 
 cat > /usr/local/bin/orion-update << 'UPDATEEOF'
 #!/bin/bash
