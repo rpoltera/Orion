@@ -28,6 +28,14 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
     res.json({ tasks: db.scheduledTasks });
   });
 
+  router.delete('/scheduler/:id', (req, res) => {
+    const idx = (db.scheduledTasks||[]).findIndex(t => t.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Task not found' });
+    db.scheduledTasks.splice(idx, 1);
+    saveDB(true, 'scheduledTasks');
+    res.json({ ok: true });
+  });
+
   router.put('/scheduler/:id', (req, res) => {
     const task = (db.scheduledTasks||[]).find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
