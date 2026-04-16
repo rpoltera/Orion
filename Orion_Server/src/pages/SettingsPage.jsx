@@ -299,6 +299,61 @@ const FILE_TYPES = [
   { value:'any',      label:'All Files', desc:'Any supported file type' },
 ];
 
+function NASSharesList({ API }) {
+  const [shares, setShares] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+
+  const load = () => {
+    setLoading(true);
+    fetch(`${API}/nas/shares`).then(r => r.json()).then(d => {
+      setShares(d.shares || []);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  };
+
+  React.useEffect(() => { load(); }, []);
+
+  const handleMount = async (mp) => {
+    await fetch(`${API}/nas/mount`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mountPoint: mp }) });
+    load();
+  };
+
+  const handleUmount = async (mp) => {
+    await fetch(`${API}/nas/umount`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mountPoint: mp }) });
+    load();
+  };
+
+  const handleRemove = async (mp) => {
+    if (!window.confirm(`Remove mount ${mp} from fstab?`)) return;
+    await fetch(`${API}/nas/shares`, { method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mountPoint: mp }) });
+    load();
+  };
+
+  if (loading) return <div style={{ fontSize:13, color:'var(--text-muted)', padding:'8px 0' }}>Loading shares...</div>;
+  if (!shares.length) return <div style={{ fontSize:13, color:'var(--text-muted)', padding:'8px 0' }}>No CIFS shares configured.</div>;
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {shares.map((s, i) => (
+        <div key={i} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 14px', background:'var(--bg-tertiary)', borderRadius:'var(--radius)', border:'1px solid var(--border)' }}>
+          <div style={{ width:8, height:8, borderRadius:'50%', background: s.mounted ? '#10b981' : '#ef4444', flexShrink:0 }} />
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:13, fontFamily:'monospace', color:'var(--text-primary)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.source}</div>
+            <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:2 }}>{s.mountPoint} {s.user ? `· user: ${s.user}` : ''}</div>
+          </div>
+          <div style={{ display:'flex', gap:6 }}>
+            {s.mounted
+              ? <button onClick={() => handleUmount(s.mountPoint)} className="btn btn-secondary btn-sm">Unmount</button>
+              : <button onClick={() => handleMount(s.mountPoint)} className="btn btn-primary btn-sm">Mount</button>
+            }
+            <button onClick={() => handleRemove(s.mountPoint)} style={{ padding:'4px 8px', background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.2)', borderRadius:'var(--radius)', color:'#ef4444', cursor:'pointer', fontSize:11 }}>Remove</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CustomLibrariesSettings({ API }) {
   const { customLibraries, fetchCustomLibraries } = useApp();
   const [creating, setCreating] = useState(false);
@@ -2195,6 +2250,33 @@ const TAB_GROUPS = [
                 </div>
               </div>
             ))}
+
+          {/* NAS Shares — only show on web (Linux server) */}
+          {!window.electron && (
+          <div style={{ marginTop:24, padding:20, background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--radius-lg)' }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+              <div>
+                <div style={{ fontWeight:700, fontSize:14 }}>🗄 NAS Shares</div>
+                <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>Manage CIFS/Samba mounts for your NAS</div>
+              </div>
+              <button className="btn btn-primary btn-sm" onClick={() => {
+                const src = window.prompt('NAS share path (e.g. //192.168.0.245/media):');
+                if (!src) return;
+                const mp = window.prompt('Mount point (e.g. /mnt/media):');
+                if (!mp) return;
+                const user = window.prompt('NAS username [default: guest]:') || 'guest';
+                const pass = window.prompt('NAS password [leave blank for none]:') || '';
+                fetch(`${API}/nas/shares`, { method:'POST', headers:{'Content-Type':'application/json'},
+                  body: JSON.stringify({ source: src, mountPoint: mp, user, password: pass }) })
+                  .then(r => r.json()).then(d => {
+                    if (d.ok) { alert('Share added and mounted!'); window.location.reload(); }
+                    else alert('Error: ' + d.error);
+                  });
+              }}>+ Add Share</button>
+            </div>
+            <NASSharesList API={API} />
+          </div>
+          )}
 
           <div style={{ marginTop:24, padding:20, background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--radius-lg)' }}>
             <div style={{ fontWeight:700, fontSize:14, marginBottom:6 }}>📁 StreamForge Data Directory</div>
