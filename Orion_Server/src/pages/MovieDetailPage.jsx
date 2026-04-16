@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom';
 import { useApp } from '../contexts/AppContext';
 import { Play, ChevronLeft, Plus, RotateCcw } from 'lucide-react';
 
-const BASE = 'http://localhost:3001';
+const BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001` : `http://${window.location.hostname}:3001`;
 const API  = BASE + '/api';
 
 function resolveImg(url) {
@@ -39,7 +39,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
   // Fetch full details (overview, cast, backdrop may be stripped from RAM)
   React.useEffect(() => {
     if (!item.id || !item.type) return;
-    fetch(`http://localhost:3001/api/library/${item.type}/${item.id}/detail`)
+    fetch(`http://${window.location.hostname}:3001/api/library/${item.type}/${item.id}/detail`)
       .then(r => r.json())
       .then(d => {
         if (d.id) {
@@ -50,7 +50,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
         if ((!d.overview || d.overview.length < 50) && (d.tmdbId || item.tmdbId)) {
           const tmdbId = d.tmdbId || item.tmdbId;
           const endpoint = item.type === 'tvShows' ? 'tv' : 'movie';
-          fetch(`http://localhost:3001/api/tmdb/detail/${endpoint}/${tmdbId}`)
+          fetch(`http://${window.location.hostname}:3001/api/tmdb/detail/${endpoint}/${tmdbId}`)
             .then(r => r.json())
             .then(t => {
               if (t.overview || t.tagline || t.writer) {
@@ -67,7 +67,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
       })
       .catch(() => {});
     // Always fetch versions
-    fetch(`http://localhost:3001/api/library/${item.type}/${item.id}/versions`)
+    fetch(`http://${window.location.hostname}:3001/api/library/${item.type}/${item.id}/versions`)
       .then(r => r.json())
       .then(d => {
         const vers = d.versions || [];
@@ -120,7 +120,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
 
     const fetchVideos = (tmdbId) => {
       console.log('[Trailers] Fetching videos for tmdbId:', tmdbId);
-      fetch(`http://localhost:3001/api/tmdb/videos/${tmdbId}`)
+      fetch(`http://${window.location.hostname}:3001/api/tmdb/videos/${tmdbId}`)
         .then(r => r.json())
         .then(d => {
           console.log('[Trailers] Got', d.videos?.length, 'videos');
@@ -136,7 +136,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
       // No tmdbId stored — search TMDB by title to get one
       const q = encodeURIComponent(item.title || '');
       console.log('[Trailers] No tmdbId, searching by title:', item.title);
-      fetch(`http://localhost:3001/api/tmdb/search?q=${q}&type=movie`)
+      fetch(`http://${window.location.hostname}:3001/api/tmdb/search?q=${q}&type=movie`)
         .then(r => r.json())
         .then(d => {
           console.log('[Trailers] Search results:', d.results?.length, 'first:', d.results?.[0]?.id, d.results?.[0]?.title);
@@ -270,7 +270,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
   const [clearLogoOk, setClearLogoOk] = useState(true);
   const [trailerUrls, setTrailerUrls] = useState([]);  // all trailer stream URLs
   const [trailerIdx, setTrailerIdx] = useState(0);     // current playing index
-  const clearLogoUrl = `http://localhost:3001/api/clearlogo-movie/${item.id}`;
+  const clearLogoUrl = `http://${window.location.hostname}:3001/api/clearlogo-movie/${item.id}`;
 
   const videoRef = React.useRef(null);
 
@@ -287,7 +287,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
       const shuffled = [...videos].sort(() => Math.random() - 0.5);
       // Build stream URLs — server will cache each one
       const urls = shuffled.map(v =>
-        `http://localhost:3001/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + v.key)}&movieId=${item.id}`
+        `http://${window.location.hostname}:3001/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + v.key)}&movieId=${item.id}`
       );
       console.log('[trailers] Queued', urls.length, 'trailers, pre-fetching first...');
       setTrailerUrls(urls);
@@ -296,7 +296,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
     };
 
     const getTrailers = (tmdbId) => {
-      fetch(`http://localhost:3001/api/tmdb/videos/${tmdbId}`)
+      fetch(`http://${window.location.hostname}:3001/api/tmdb/videos/${tmdbId}`)
         .then(r => r.json())
         .then(d => {
           const videos = (d.videos || []).filter(v => ['Trailer','Teaser'].includes(v.type));
@@ -309,7 +309,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
     if (item.tmdbId) {
       getTrailers(item.tmdbId);
     } else if (item.title) {
-      fetch(`http://localhost:3001/api/tmdb/search?q=${encodeURIComponent(item.title)}&type=movie`)
+      fetch(`http://${window.location.hostname}:3001/api/tmdb/search?q=${encodeURIComponent(item.title)}&type=movie`)
         .then(r => r.json())
         .then(d => { const id = d.results?.[0]?.id; if (id) getTrailers(id); })
         .catch(() => {});
@@ -761,7 +761,7 @@ export default function MovieDetailPage({ item, list = [], prev, next, onNavigat
                       <div key={v.key} style={{ flexShrink:0, width:280, cursor:'pointer' }}
                         onClick={() => {
                           const ytUrl = `https://www.youtube.com/watch?v=${v.key}`;
-                          fetch(`http://localhost:3001/api/ytdlp/stream?url=${encodeURIComponent(ytUrl)}`)
+                          fetch(`http://${window.location.hostname}:3001/api/ytdlp/stream?url=${encodeURIComponent(ytUrl)}`)
                             .then(r => r.json())
                             .then(d => { if (d.url) playMedia({ ...item, filePath: d.url, fileName: v.name, title: v.name }); else window.open(ytUrl, '_blank'); })
                             .catch(() => window.open(ytUrl, '_blank'));

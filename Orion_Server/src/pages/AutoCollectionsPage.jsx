@@ -6,7 +6,7 @@ import {
   ChevronRight, FolderOpen, ToggleLeft, ToggleRight, LayoutGrid
 } from 'lucide-react';
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 
 const Toggle = ({ value, onChange }) => (
   <button onClick={() => onChange(!value)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: value ? 'var(--accent)' : 'var(--text-muted)' }}>

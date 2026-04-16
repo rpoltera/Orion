@@ -49,7 +49,7 @@ export default function SchedulerPage() {
   useEffect(() => {
     let socket;
     import('socket.io-client').then(({ io }) => {
-      socket = io('http://localhost:3001');
+      socket = io(`http://${window.location.hostname}:3001`);
       socket.on('scheduler:progress', (data) => {
         setTaskProgress(prev => ({ ...prev, [data.id]: data }));
         if (data.done) {

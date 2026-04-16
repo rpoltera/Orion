@@ -176,8 +176,8 @@ function Dashboard({ call, onTabChange }) {
         <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius-lg)',padding:20 }}>
           <div style={{ fontWeight:700,fontSize:14,marginBottom:16 }}>🔗 Output URLs</div>
           {[
-            { label:'M3U Playlist', url:'http://localhost:3001/sf/iptv.m3u' },
-            { label:'XMLTV EPG',    url:'http://localhost:3001/sf/xmltv.xml' },
+            { label:'M3U Playlist', url:`http://${window.location.hostname}:3001/sf/iptv.m3u` },
+            { label:'XMLTV EPG',    url:`http://${window.location.hostname}:3001/sf/xmltv.xml` },
           ].map(u=>(
             <div key={u.label} style={{ marginBottom:14 }}>
               <div style={{ fontSize:11,color:'var(--text-muted)',fontWeight:700,letterSpacing:0.5,marginBottom:4 }}>{u.label}</div>

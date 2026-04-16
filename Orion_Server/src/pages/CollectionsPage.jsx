@@ -3,11 +3,11 @@ import { useApp } from '../contexts/AppContext';
 import MediaCard from '../components/MediaCard';
 import { Grid, ChevronLeft, Zap, Plus, Trash2 } from 'lucide-react';
 
-const BASE = 'http://localhost:3001/api';
+const BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 const resolveImg = (url) => {
   if (!url) return null;
   if (url.startsWith('http')) return url;
-  if (url.startsWith('/api')) return `http://localhost:3001${url}`;
+  if (url.startsWith('/api')) return `http://${window.location.hostname}:3001${url}`;
   return null;
 };
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { Plus, Trash2, Edit2, Shield, User, Users, Check, X, ChevronDown, ChevronRight } from 'lucide-react';
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 const AVATARS = ['👑','👤','🧑','👩','👦','👧','🧒','🎮','🎬','🎵','🌟','🚀','🦁','🐯','🦊','🐧'];
 const GROUP_COLORS = ['#0063e5','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16'];
 
@@ -357,7 +357,7 @@ export default function UsersPage() {
                     <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(160px, 1fr))', gap:8 }}>
                       {(SECTIONS.find(s=>s.id===assignSection)?.items||[]).map(item => {
                         const allowed = (assignTargetObj.mediaAccess?.[assignSection]||[]).includes(item.id);
-                        const thumbUrl = item.thumbnail ? (item.thumbnail.startsWith('http') ? item.thumbnail : 'http://localhost:3001'+item.thumbnail) : null;
+                        const thumbUrl = item.thumbnail ? (item.thumbnail.startsWith('http') ? item.thumbnail : `http://${window.location.hostname}:3001`+item.thumbnail) : null;
                         return (
                           <div key={item.id} onClick={() => toggleAccess(assignTarget.type, assignTarget.id, assignSection, item.id)}
                             style={{ background:'var(--bg-card)', border:`2px solid ${allowed?'var(--accent)':'var(--border)'}`, borderRadius:'var(--radius)', overflow:'hidden', cursor:'pointer', position:'relative', transition:'all 0.15s' }}>

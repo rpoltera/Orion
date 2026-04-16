@@ -369,7 +369,7 @@ export default function MoviesPage({ onSelect }) {
   const resolveImg = (url) => {
     if (!url) return null;
     if (url.startsWith('http')) return url;
-    if (url.startsWith('/api')) return `http://localhost:3001${url}`;
+    if (url.startsWith('/api')) return `http://${window.location.hostname}:3001${url}`;
     return null;
   };
 

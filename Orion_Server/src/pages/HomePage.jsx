@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import MediaCard from '../components/MediaCard';
 import { groupEpisodesToShows } from '../utils/helpers';
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 import { Play, Info, ChevronLeft, ChevronRight, Tv } from 'lucide-react';
 
 // Netflix-style hero — picks a random movie with a cached trailer
@@ -13,7 +13,7 @@ function ShowCard({ show, onSelect }) {
   const [imgError, setImgError] = useState(false);
   const [nextEp, setNextEp] = useState(null);
   const cardRef = React.useRef(null);
-  const BASE = 'http://localhost:3001';
+  const BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001` : `http://${window.location.hostname}:3001`;
 
   const resolveImg = (url) => {
     if (!url) return null;
@@ -247,7 +247,7 @@ export default function HomePage({ onSelect }) {
                       onClick={() => { if (item.type === 'movie') onSelect?.(item); else playMedia({ ...item, type: 'tvShows' }); }}>
                       <div style={{ width: 160, height: 240, borderRadius: 8, overflow: 'hidden', background: 'var(--bg-card)', border: '1px solid var(--border)', position: 'relative' }}>
                         {item.thumbnail ? (
-                          <img src={item.thumbnail.startsWith('/api') ? `http://localhost:3001${item.thumbnail}` : item.thumbnail} alt={item.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          <img src={item.thumbnail.startsWith('/api') ? `http://${window.location.hostname}:3001${item.thumbnail}` : item.thumbnail} alt={item.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                         ) : (
                           <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32 }}>{item.type === 'movie' ? '🎬' : '📺'}</div>
                         )}
@@ -395,7 +395,7 @@ export default function HomePage({ onSelect }) {
                 <div style={{ width: 160, height: 240, borderRadius: 8, overflow: 'hidden',
                   background: 'var(--bg-card)', border: '1px solid var(--border)', position: 'relative' }}>
                   {item.thumbnail ? (
-                    <img src={item.thumbnail.startsWith('/api') ? `http://localhost:3001${item.thumbnail}` : item.thumbnail}
+                    <img src={item.thumbnail.startsWith('/api') ? `http://${window.location.hostname}:3001${item.thumbnail}` : item.thumbnail}
                       alt={item.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   ) : (
                     <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center',

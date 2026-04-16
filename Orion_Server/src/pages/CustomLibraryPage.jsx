@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { FolderOpen, Search, RefreshCw } from 'lucide-react';
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 
 const MIME_TYPES = {
   '.mp4':'video/mp4', '.mkv':'video/x-matroska', '.avi':'video/x-msvideo',
@@ -125,8 +125,8 @@ export default function CustomLibraryPage({ library: lib }) {
               const isImg = isImage(ext);
               const isVid = isVideo(ext);
               const isAud = isAudio(ext);
-              const thumbUrl = item.thumbnail ? (item.thumbnail.startsWith('http') ? item.thumbnail : `http://localhost:3001${item.thumbnail}`) : null;
-              const imgUrl = isImg ? `http://localhost:3001/api/localimage?path=${encodeURIComponent(item.filePath)}` : null;
+              const thumbUrl = item.thumbnail ? (item.thumbnail.startsWith('http') ? item.thumbnail : `http://${window.location.hostname}:3001${item.thumbnail}`) : null;
+              const imgUrl = isImg ? `http://${window.location.hostname}:3001/api/localimage?path=${encodeURIComponent(item.filePath)}` : null;
               const displayUrl = thumbUrl || imgUrl;
               const icon = isVid ? '🎬' : isAud ? '🎵' : isImg ? '🖼️' : isDoc(ext) ? '📄' : '📁';
 
@@ -158,7 +158,7 @@ export default function CustomLibraryPage({ library: lib }) {
       {lightboxItem && (
         <div onClick={() => setLightboxItem(null)}
           style={{ position:'fixed', inset:0, zIndex:99999, background:'rgba(0,0,0,0.92)', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer' }}>
-          <img src={`http://localhost:3001/api/localimage?path=${encodeURIComponent(lightboxItem.filePath)}`}
+          <img src={`http://${window.location.hostname}:3001/api/localimage?path=${encodeURIComponent(lightboxItem.filePath)}`}
             alt={lightboxItem.title}
             style={{ maxWidth:'90vw', maxHeight:'90vh', objectFit:'contain', borderRadius:8 }} />
           <button onClick={() => setLightboxItem(null)}

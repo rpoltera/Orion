@@ -428,7 +428,7 @@ function CustomLibrariesSettings({ API }) {
 }
 
 function AutoCollectionsEmbedded() {
-  const API = 'http://localhost:3001/api';
+  const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
   const [cfg, setCfg] = React.useState(null);
   const [running, setRunning] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -978,7 +978,7 @@ function hexToRgba(hex, alpha = 1) {
 }
 
 function ThemeBuilder({ currentTheme, changeTheme }) {
-  const API = 'http://localhost:3001/api';
+  const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
   const [customThemes, setCustomThemes] = React.useState(() => {
     try { return JSON.parse(localStorage.getItem('orion_custom_themes') || '[]'); } catch { return []; }
   });
@@ -1222,7 +1222,7 @@ function ThumbnailGeneratorRow({ libSettings, updateLibSettings, API }) {
     (async () => {
       try {
         const { io } = await import('socket.io-client');
-        sock = io('http://localhost:3001');
+        sock = io(`http://${window.location.hostname}:3001`);
         socketRef.current = sock;
         sock.on('thumbnail:progress', (data) => {
           setProgress(data);
@@ -1371,7 +1371,7 @@ function HomeLayoutSettings() {
   const [dragOver, setDragOver] = React.useState(null);
 
   React.useEffect(() => {
-    fetch('http://localhost:3001/api/config').then(r => r.json()).then(d => {
+    fetch(`http://${window.location.hostname}:3001/api/config`).then(r => r.json()).then(d => {
       if (d.homeLayout?.length) {
         // Merge saved layout with defaults (in case new sections were added)
         const savedIds = new Set(d.homeLayout.map(s => s.id));
@@ -1387,7 +1387,7 @@ function HomeLayoutSettings() {
   }, []);
 
   const save = async () => {
-    await fetch('http://localhost:3001/api/config', {
+    await fetch(`http://${window.location.hostname}:3001/api/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ homeLayout: sections })
@@ -1452,7 +1452,7 @@ function HomeLayoutSettings() {
   );
 }
 function MovieSmartDedup() {
-  const API = 'http://localhost:3001/api';
+  const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
   const [scanning, setScanning] = React.useState(false);
   const [popup, setPopup] = React.useState(null); // { groups: [...] }
   const [choices, setChoices] = React.useState({}); // groupIdx -> 'merge'|'remove'|'skip'
@@ -1558,7 +1558,7 @@ function MovieSmartDedup() {
 }
 
 function TVShowSmartDedup() {
-  const API = 'http://localhost:3001/api';
+  const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
   const [scanning, setScanning] = React.useState(false);
   const [popup, setPopup] = React.useState(null);
   const [choices, setChoices] = React.useState({});
@@ -1657,7 +1657,7 @@ function TVShowSmartDedup() {
 }
 
 function MovieFolderCleanup() {
-  const API = 'http://localhost:3001/api';
+  const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
   const [status, setStatus] = React.useState(null);
   const [running, setRunning] = React.useState(false);
   const [preview, setPreview] = React.useState(null);
@@ -1962,46 +1962,7 @@ const TAB_GROUPS = [
     fetch(`${API}/metadata/status`).then(r => r.json()).then(setMetaStatus).catch(() => {});
   }, [API]);
 
-  const [browserOpen, setBrowserOpen] = useState(false);
-  const [browserPath, setBrowserPath] = useState('/');
-  const [browserDirs, setBrowserDirs] = useState([]);
-  const [browserType, setBrowserType] = useState(null);
-  const [browserLoading, setBrowserLoading] = useState(false);
-
-  const openBrowser = async (type) => {
-    // In Electron — use native folder picker
-    if (window.electron) {
-      const result = await window.electron.openFolderDialog();
-      if (!result?.canceled && result?.filePaths?.length) {
-        await scanFolders(result.filePaths, type);
-      }
-      return;
-    }
-    // In browser — use server-side directory browser
-    setBrowserType(type);
-    setBrowserOpen(true);
-    await browseTo('/');
-  };
-
-  const browseTo = async (path) => {
-    setBrowserLoading(true);
-    try {
-      const r = await fetch(`${API}/browse?path=${encodeURIComponent(path)}`);
-      const d = await r.json();
-      setBrowserPath(d.path);
-      setBrowserDirs(d.dirs || []);
-    } catch(e) {}
-    setBrowserLoading(false);
-  };
-
   const handleAddFolder = async (type) => {
-    openBrowser(type);
-  };
-
-  const handleBrowserSelect = async () => {
-    await scanFolders([browserPath], browserType);
-    setBrowserOpen(false);
-  };
     // In Electron — use native folder picker
     if (window.electron) {
       const result = await window.electron.openFolderDialog();
@@ -2048,53 +2009,6 @@ const TAB_GROUPS = [
 
   return (
     <div className="page">
-      {/* Directory Browser Modal */}
-      {browserOpen && (
-        <div style={{ position:'fixed',inset:0,zIndex:9999,background:'rgba(0,0,0,0.7)',display:'flex',alignItems:'center',justifyContent:'center' }}>
-          <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:16,width:560,maxHeight:'80vh',display:'flex',flexDirection:'column',overflow:'hidden' }}>
-            <div style={{ padding:'16px 20px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'space-between' }}>
-              <span style={{ fontWeight:700,fontSize:15 }}>📁 Select Folder</span>
-              <button onClick={()=>setBrowserOpen(false)} style={{ background:'none',border:'none',color:'var(--text-muted)',cursor:'pointer',fontSize:20 }}>×</button>
-            </div>
-            {/* Current path */}
-            <div style={{ padding:'10px 20px',background:'var(--bg-secondary)',borderBottom:'1px solid var(--border)',fontSize:12,color:'var(--text-muted)',fontFamily:'monospace',wordBreak:'break-all' }}>
-              {browserPath}
-            </div>
-            {/* Dir listing */}
-            <div style={{ flex:1,overflowY:'auto',padding:'8px 0' }}>
-              {browserLoading
-                ? <div style={{ padding:24,textAlign:'center',color:'var(--text-muted)' }}>Loading…</div>
-                : <>
-                  {browserPath !== '/' && (
-                    <div onClick={()=>browseTo(browserPath.split('/').slice(0,-1).join('/')||'/')}
-                      style={{ padding:'10px 20px',cursor:'pointer',display:'flex',alignItems:'center',gap:10,fontSize:13 }}
-                      onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.05)'}
-                      onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
-                      <span>📁</span><span style={{ color:'var(--accent)' }}>.. (up)</span>
-                    </div>
-                  )}
-                  {browserDirs.map(d => (
-                    <div key={d.path} onClick={()=>browseTo(d.path)}
-                      style={{ padding:'10px 20px',cursor:'pointer',display:'flex',alignItems:'center',gap:10,fontSize:13 }}
-                      onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.05)'}
-                      onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
-                      <span>📁</span><span>{d.name}</span>
-                    </div>
-                  ))}
-                  {browserDirs.length===0&&<div style={{ padding:24,textAlign:'center',color:'var(--text-muted)',fontSize:13 }}>No subdirectories</div>}
-                </>
-              }
-            </div>
-            {/* Actions */}
-            <div style={{ padding:'14px 20px',borderTop:'1px solid var(--border)',display:'flex',gap:10,alignItems:'center' }}>
-              <div style={{ flex:1,fontSize:12,color:'var(--text-muted)' }}>Selected: <span style={{ color:'var(--text-primary)',fontFamily:'monospace' }}>{browserPath}</span></div>
-              <button onClick={()=>setBrowserOpen(false)} style={{ padding:'8px 16px',background:'var(--bg-tertiary)',border:'1px solid var(--border)',borderRadius:'var(--radius)',cursor:'pointer',fontSize:13 }}>Cancel</button>
-              <button onClick={handleBrowserSelect} style={{ padding:'8px 16px',background:'var(--accent)',color:'white',border:'none',borderRadius:'var(--radius)',cursor:'pointer',fontSize:13,fontWeight:700 }}>Select This Folder</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       <div className="page-header">
         <div className="page-title">⚙️ Settings</div>
         <div className="page-subtitle">Configure your Orion media server</div>

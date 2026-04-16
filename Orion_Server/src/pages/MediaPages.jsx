@@ -3,11 +3,11 @@ import { useApp } from '../contexts/AppContext';
 import MediaCard from '../components/MediaCard';
 import { FolderOpen, Grid } from 'lucide-react';
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 const resolveImg = (url) => {
   if (!url) return null;
   if (url.startsWith('http')) return url;
-  if (url.startsWith('/api')) return `http://localhost:3001${url}`;
+  if (url.startsWith('/api')) return `http://${window.location.hostname}:3001${url}`;
   return null;
 };
 
@@ -429,7 +429,7 @@ export function MusicPage({ onSelect }) {
             <div className="media-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))' }}>
               {albums.map(alb => {
                 const art = alb.tracks.find(t => t.thumbnail)?.thumbnail;
-                const artUrl = art ? (art.startsWith('http') ? art : `http://localhost:3001${art}`) : null;
+                const artUrl = art ? (art.startsWith('http') ? art : `http://${window.location.hostname}:3001${art}`) : null;
                 return (
                   <div key={alb.album + alb.artist}
                     onClick={() => playMedia(alb.tracks[0], alb.tracks)}
@@ -467,7 +467,7 @@ export function MusicPage({ onSelect }) {
               onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.borderColor = 'var(--border)'; }}>
               <div style={{ aspectRatio: '1', background: '#111', position: 'relative', overflow: 'hidden' }}>
                 {track.thumbnail
-                  ? <img src={track.thumbnail.startsWith('http') ? track.thumbnail : `http://localhost:3001${track.thumbnail}`}
+                  ? <img src={track.thumbnail.startsWith('http') ? track.thumbnail : `http://${window.location.hostname}:3001${track.thumbnail}`}
                       alt={track.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
                   : <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 36, color: 'rgba(255,255,255,0.15)' }}>🎵</div>
                 }
