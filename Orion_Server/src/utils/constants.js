@@ -1,6 +1,6 @@
 export const APP_NAME = 'Orion';
 export const APP_VERSION = '1.0.0';
-export const API_BASE = 'http://localhost:3001/api';
+export const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 export const SERVER_PORT = 3001;
 export const GITHUB_URL = 'https://github.com/rpoltera/Orion';
 

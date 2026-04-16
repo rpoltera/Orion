@@ -76,14 +76,14 @@ export function getMimeType(filename) {
 }
 
 // ─── Stream URL Builder ───────────────────────────────────────────────────────
-const API_BASE = 'http://localhost:3001/api';
+const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 
 export function buildStreamUrl(filePath) {
   return `${API_BASE}/stream?path=${encodeURIComponent(filePath)}`;
 }
 
 export function buildHLSUrl(sessionId) {
-  return `http://localhost:3001/hls/${sessionId}/playlist.m3u8`;
+  return `http://${window.location.hostname}:3001/hls/${sessionId}/playlist.m3u8`;
 }
 
 // ─── Sort Helpers ─────────────────────────────────────────────────────────────
