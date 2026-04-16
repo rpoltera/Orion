@@ -89,6 +89,17 @@ done
 # ── Hostname ──────────────────────────────────────────────────────────────────
 read -rp "Container hostname [default: orion]: " HOSTNAME; HOSTNAME=${HOSTNAME:-orion}
 
+# ── Root password ─────────────────────────────────────────────────────────────
+echo -e "
+${YW}Set root password for the container:${CL}"
+read -rsp "  Root password: " ROOT_PASS; echo ""
+read -rsp "  Confirm password: " ROOT_PASS2; echo ""
+while [ "$ROOT_PASS" != "$ROOT_PASS2" ] || [ -z "$ROOT_PASS" ]; do
+  echo -e "${RD}  Passwords do not match or are empty. Try again.${CL}"
+  read -rsp "  Root password: " ROOT_PASS; echo ""
+  read -rsp "  Confirm password: " ROOT_PASS2; echo ""
+done
+
 # ── Download Ubuntu 22.04 template if needed ─────────────────────────────────
 msg_info "Checking for Ubuntu 22.04 template..."
 TEMPLATE="local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
@@ -115,7 +126,11 @@ pct create ${CTID} ${TEMPLATE} \
 msg_ok "Container ${CTID} created and started"
 
 # ── Wait for container to be ready ───────────────────────────────────────────
-msg_info "Waiting for container to boot..."
+msg_info "Setting root password..."
+pct exec ${CTID} -- bash -c "echo 'root:${ROOT_PASS}' | chpasswd"
+msg_ok "Root password set"
+
+msg_info "Waiting for container to boot..." 
 sleep 5
 for i in {1..30}; do
   if pct exec ${CTID} -- test -f /etc/os-release 2>/dev/null; then break; fi
