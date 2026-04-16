@@ -88,15 +88,14 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
               if (!upToDate) {
                 console.log('[Scheduler] Update available — running orion-update...');
                 if (io) io.emit('update:installing', { message: msg, latestCommit: latest });
-                exec('sudo /usr/local/bin/orion-update', (err, stdout, stderr) => {
-                  if (err) {
-                    console.error('[Scheduler] orion-update failed:', err.message);
-                    if (io) io.emit('update:failed', { error: err.message });
-                  } else {
-                    console.log('[Scheduler] orion-update completed');
-                    if (io) io.emit('update:complete', { latestCommit: latest, message: msg });
-                  }
+                // Run detached so it survives Orion restarting
+                const { spawn } = require('child_process');
+                const child = spawn('sudo', ['/usr/local/bin/orion-update'], {
+                  detached: true,
+                  stdio: 'ignore'
                 });
+                child.unref();
+                console.log('[Scheduler] orion-update launched detached, pid:', child.pid);
               }
             } catch(e) { console.error('[Scheduler] update check parse error:', e.message); }
           });
