@@ -33,20 +33,20 @@ function ClearlogoTitle({ title, section }) {
     setImgOk(true); setId(null);
     if (!title) return;
     // Find the item id to get clearlogo
-    fetch(`http://localhost:3001/api/tmdb/search?q=${encodeURIComponent(title)}&type=${section === 'home' ? 'movie' : 'tv'}`)
+    fetch(`http://${window.location.hostname}:3001/api/tmdb/search?q=${encodeURIComponent(title)}&type=${section === 'home' ? 'movie' : 'tv'}`)
       .then(r => r.json())
       .then(d => { if (d.results?.[0]?.id) setId(d.results[0].id); })
       .catch(() => {});
   }, [title, section]);
 
   const logoUrl = section === 'home'
-    ? `http://localhost:3001/api/clearlogo-movie/${id}`
-    : `http://localhost:3001/api/clearlogo-show/${encodeURIComponent(title)}`;
+    ? `http://${window.location.hostname}:3001/api/clearlogo-movie/${id}`
+    : `http://${window.location.hostname}:3001/api/clearlogo-show/${encodeURIComponent(title)}`;
 
   if (imgOk && (id || section === 'tvshows')) {
     return (
       <img
-        src={section === 'tvshows' ? logoUrl : `http://localhost:3001/api/clearlogo-movie/${id}`}
+        src={section === 'tvshows' ? logoUrl : `http://${window.location.hostname}:3001/api/clearlogo-movie/${id}`}
         alt={title}
         onError={() => setImgOk(false)}
         style={{ maxWidth:320, maxHeight:110, objectFit:'contain', display:'block',
@@ -80,10 +80,10 @@ function GlobalBackground() {
       (async () => {
         for (const m of shuffled) {
           try {
-            const r = await fetch(`http://localhost:3001/api/trailers/${m.id}`);
+            const r = await fetch(`http://${window.location.hostname}:3001/api/trailers/${m.id}`);
             const d = await r.json();
             if (d.trailers?.length) {
-              setVideoUrl(`http://localhost:3001${d.trailers[0].url}`);
+              setVideoUrl(`http://${window.location.hostname}:3001${d.trailers[0].url}`);
               setTitle(m.title);
               return;
             }
@@ -91,11 +91,11 @@ function GlobalBackground() {
         }
       })();
     } else if (activeSection === 'tvshows') {
-      fetch('http://localhost:3001/api/tv-trailers-random')
+      fetch(`http://${window.location.hostname}:3001/api/tv-trailers-random`)
         .then(r => r.json())
         .then(d => {
           if (d.trailer) {
-            setVideoUrl(`http://localhost:3001${d.trailer.url}`);
+            setVideoUrl(`http://${window.location.hostname}:3001${d.trailer.url}`);
             setTitle(d.trailer.showName);
           }
         })
@@ -310,7 +310,7 @@ function ServerGate({ children }) {
     let cancelled = false;
     const check = async () => {
       try {
-        const r = await fetch('http://localhost:3001/api/library/probe/status', { signal: AbortSignal.timeout(2000) });
+        const r = await fetch(`http://${window.location.hostname}:3001/api/library/probe/status`, { signal: AbortSignal.timeout(2000) });
         if (r.ok && !cancelled) { setReady(true); return; }
       } catch {}
       if (!cancelled) setTimeout(() => setAttempt(a => a + 1), 500);
