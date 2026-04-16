@@ -6,7 +6,7 @@ const AppContext = createContext(null);
 const API = process.env.REACT_APP_API_URL
   ? process.env.REACT_APP_API_URL
   : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? 'http://localhost:3001/api'
+    ? `http://${window.location.hostname}:3001/api`
     : `http://${window.location.hostname}:3001/api`;
 const PAGE_SIZE = 250;
 
