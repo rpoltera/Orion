@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 
 export function useTranscode() {
   const [sessions, setSessions] = useState({});
@@ -10,7 +10,7 @@ export function useTranscode() {
 
   useEffect(() => {
     // Connect to socket for real-time transcode progress
-    socketRef.current = io('http://localhost:3001');
+    socketRef.current = io(`http://${window.location.hostname}:3001`);
 
     socketRef.current.on('transcode:start', ({ sessionId, encoder, quality }) => {
       setSessions(prev => ({

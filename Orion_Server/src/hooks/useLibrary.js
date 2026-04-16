@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 
-const API = 'http://localhost:3001/api';
+const API = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? `http://${window.location.hostname}:3001/api` : `http://${window.location.hostname}:3001/api`;
 
 export function useLibrary() {
   const [library, setLibrary] = useState({
