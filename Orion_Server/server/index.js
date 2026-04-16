@@ -282,6 +282,25 @@ async function start() {
     } catch(e) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
   });
 
+  // Directory browser — lets the web UI browse server filesystem
+  api.get('/browse', (req, res) => {
+    const dirPath = req.query.path || '/';
+    try {
+      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      const dirs = entries
+        .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+        .map(e => ({
+          name: e.name,
+          path: require('path').join(dirPath, e.name),
+          type: 'directory'
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      res.json({ path: dirPath, dirs, parent: require('path').dirname(dirPath) });
+    } catch(e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   // System stats
   api.get('/system/stats', (_, res) => {
     const os = require('os');
