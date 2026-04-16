@@ -51,6 +51,8 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
   router.post('/scheduler/:id/run', async (req, res) => {
     const task = (db.scheduledTasks||[]).find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
+    task.lastRun = new Date().toISOString();
+    saveDB(false, 'scheduledTasks');
     res.json({ ok: true, message: `${task.name} started` });
 
     // Dispatch task by type/name
@@ -60,7 +62,7 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
       const fsSync = require('fs');
       const pathMod = require('path');
       // Read the installed commit SHA (written at install time)
-      const shaFile = pathMod.join(__dirname, '.git', 'refs', 'heads', 'main');
+      const shaFile = pathMod.join(__dirname, '..', '..', '..', '.git', 'refs', 'heads', 'main');
       const currentSha = fsSync.existsSync(shaFile)
         ? fsSync.readFileSync(shaFile, 'utf8').trim().slice(0,7)
         : 'unknown';
@@ -79,7 +81,8 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
               const t = (db.scheduledTasks||[]).find(t => t.id === task.id);
               if (t) {
                 t.lastResult = { currentSha, latestCommit: latest, message: msg, date, upToDate };
-                saveDB(false, 'scheduledTasks');
+                t.lastRun = new Date().toISOString();
+                saveDB(true, 'scheduledTasks');
               }
               if (io) io.emit('update:checked', { currentSha, latestCommit: latest, message: msg, date, upToDate });
             } catch(e) { console.error('[Scheduler] update check parse error:', e.message); }
