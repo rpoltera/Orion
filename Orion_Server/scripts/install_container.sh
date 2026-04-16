@@ -74,6 +74,37 @@ ENVEOF
 chown orion:orion "$ORION_DIR/.env"
 msg_ok ".env written"
 
+msg_info "Fixing any hardcoded localhost references..."
+python3 << 'PYEOF'
+import os, re
+def fix(content):
+    content = re.sub(
+        r"(const\s+(?:API|BASE|API_BASE)\s*=\s*)'http://localhost:3001(/api)?'",
+        lambda m: f"{m.group(1)}(window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://localhost:3001{m.group(2) or ''}' : `http://${{window.location.hostname}}:3001{m.group(2) or ''}`",
+        content
+    )
+    content = re.sub(
+        r'(const\s+(?:API|BASE|API_BASE)\s*=\s*)"http://localhost:3001(/api)?"',
+        lambda m: f"{m.group(1)}(window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://localhost:3001{m.group(2) or ''}' : `http://${{window.location.hostname}}:3001{m.group(2) or ''}`",
+        content
+    )
+    content = content.replace('`http://localhost:3001', '`http://${window.location.hostname}:3001')
+    content = re.sub(r"'http://localhost:3001([^']*)'", lambda m: f"`http://${{window.location.hostname}}:3001{m.group(1)}`", content)
+    content = re.sub(r'"http://localhost:3001([^"]*)"', lambda m: f"`http://${{window.location.hostname}}:3001{m.group(1)}`", content)
+    return content
+src = '/opt/orion/Orion_Server/src'
+for root, dirs, files in os.walk(src):
+    for f in files:
+        if not (f.endswith('.jsx') or f.endswith('.js')): continue
+        path = os.path.join(root, f)
+        orig = open(path).read()
+        if 'localhost:3001' not in orig: continue
+        fixed = fix(orig)
+        open(path, 'w').write(fixed)
+        print(f'Fixed: {path}')
+PYEOF
+msg_ok "Localhost references fixed"
+
 msg_info "Building React frontend (2-3 min)..."
 cd "$ORION_DIR"
 sudo -u orion npm run react-build 2>&1 | tail -5
@@ -107,6 +138,28 @@ ENVEOF
 CFGEOF
 chown orion:orion "$ORION_DATA/config.json" 2>/dev/null || true
 msg_ok "Config ready"
+
+msg_info "Seeding scheduled tasks..."
+python3 << 'PYEOF'
+import json, subprocess, uuid
+tasks = [
+    {"id": str(uuid.uuid4()), "name": "Scan Libraries", "description": "Scan all library folders for new or removed media", "icon": "📁", "type": "scan", "schedule": "daily", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Refresh Metadata", "description": "Re-fetch metadata for items missing posters/info", "icon": "🎭", "type": "metadata", "schedule": "daily", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Build Collections", "description": "Rebuild auto genre, decade and franchise collections", "icon": "📁", "type": "collections", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Database Backup", "description": "Backup the library database to a .bak file", "icon": "💾", "type": "backup", "schedule": "weekly", "scheduleTime": "01:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Database Optimize", "description": "Remove orphaned entries and compact the database", "icon": "🔧", "type": "optimize", "schedule": "weekly", "scheduleTime": "01:30", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Clear Debug Log", "description": "Automatically clear the debug log", "icon": "🗑", "type": "clearlog", "schedule": "daily", "scheduleTime": "06:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Check for Updates", "description": "Check if a new version of Orion is available", "icon": "🔄", "type": "checkupdate", "schedule": "daily", "scheduleTime": "07:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Download Trailers", "description": "Download and cache trailers for all movies from TMDB/YouTube", "icon": "🎬", "type": "trailers", "schedule": "weekly", "scheduleTime": "02:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Download TV Trailers", "description": "Download and cache trailers for all TV shows from TMDB/YouTube", "icon": "📺", "type": "tv-trailers", "schedule": "weekly", "scheduleTime": "03:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Generate Missing Thumbnails", "description": "Auto-generate video screenshots for items with no poster art", "icon": "🖼", "type": "thumbnails", "schedule": "daily", "scheduleTime": "05:00", "enabled": True, "lastRun": None},
+    {"id": str(uuid.uuid4()), "name": "Fetch Music Video Metadata", "description": "Fetch album art and artist info for music videos via iTunes/Last.fm", "icon": "🎵", "type": "musicvideo-meta", "schedule": "daily", "scheduleTime": "04:00", "enabled": True, "lastRun": None},
+]
+val = json.dumps(tasks).replace("'", "''")
+subprocess.run(["sqlite3", "/var/lib/orion/orion.db", f"INSERT OR REPLACE INTO kv_arrays (key, value) VALUES ('scheduledTasks', '{val}');"])
+print("Scheduled tasks seeded")
+PYEOF
+msg_ok "Scheduled tasks seeded"
 
 msg_info "Creating systemd service..."
 cat > /etc/systemd/system/orion.service << SERVICEEOF
@@ -157,6 +210,22 @@ systemctl start orion
 echo "Orion updated and restarted."
 UPDATEEOF
 chmod +x /usr/local/bin/orion-update
+
+# Quick update — server only, no React rebuild (much faster)
+cat > /usr/local/bin/orion-update-server << 'UPDATEEOF'
+#!/bin/bash
+set -e
+git config --global --add safe.directory /opt/orion
+systemctl stop orion
+cd /opt/orion
+git pull
+cd /opt/orion/Orion_Server
+npm install --ignore-scripts --quiet
+npm rebuild better-sqlite3 --quiet
+systemctl start orion
+echo "Server updated and restarted (no React rebuild)."
+UPDATEEOF
+chmod +x /usr/local/bin/orion-update-server
 
 IP=$(hostname -I | awk '{print $1}')
 echo ""
