@@ -6,7 +6,7 @@ const AppContext = createContext(null);
 const API = process.env.REACT_APP_API_URL
   ? process.env.REACT_APP_API_URL
   : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? `http://${window.location.hostname}:3001/api`
+    ? 'http://localhost:3001/api'
     : `http://${window.location.hostname}:3001/api`;
 const PAGE_SIZE = 250;
 
@@ -70,11 +70,12 @@ export function AppProvider({ children }) {
       const BATCH = 5;
       const first = await fetch(`${endpoint}?page=0&limit=${PAGE_SIZE}${userParam}`).then(r=>r.json());
       const total = first.total || 0;
+      const totalEpisodes = first.totalEpisodes || 0;
       let items = first.items || [];
 
       // Update UI immediately with first page
       setLibrary(prev => ({ ...prev, [type]: items }));
-      setLibraryCounts(prev => ({ ...prev, [type]: total }));
+      setLibraryCounts(prev => ({ ...prev, [type]: total, ...(totalEpisodes ? { [`${type}_episodes`]: totalEpisodes } : {}) }));
 
       if (total > PAGE_SIZE) {
         const pages = Math.ceil(total / PAGE_SIZE);
