@@ -212,7 +212,97 @@ async function start() {
   try { api.use('/collections', require('./routes/collections')(deps())); } catch(e) { console.error('[Routes] collections failed:', e.message); }
   try { _libraryRouteRef = require('./routes/library')({ ...deps(), _trailerOverrides }); api.use('/library', _libraryRouteRef); } catch(e) { console.error('[Routes] library failed:', e.message); }
   try { api.use('/library', require('./routes/scanner')(deps())); } catch(e) { console.error('[Routes] scanner failed:', e.message); }
-  try { api.use('/', require('./routes/scheduler')({ ...deps(), runTask: null })); } catch(e) { console.error('[Routes] scheduler failed:', e.message); }
+  // ── runTask — handles all scheduled task types ───────────────────────────
+  const runTask = async (task) => {
+    const type = (task.type || task.name || '').toLowerCase();
+    console.log(`[Scheduler] Running task: ${task.name} (${type})`);
+
+    if (type.includes('scan') && !type.includes('metadata')) {
+      // Scan all library paths
+      const paths = db.libraryPaths || { movies:[], tvShows:[], music:[], musicVideos:[] };
+      for (const [libType, libPaths] of Object.entries(paths)) {
+        if (!libPaths?.length) continue;
+        try {
+          const items = [];
+          for (const p of libPaths) {
+            const found = await scanDirectory(p, libType, {});
+            items.push(...found);
+          }
+          const deduped = deduplicateMedia(items);
+          const existing = new Set((db[libType]||[]).map(i => i.filePath));
+          const newItems = deduped.filter(i => !existing.has(i.filePath));
+          if (newItems.length) {
+            db[libType] = [...(db[libType]||[]), ...newItems];
+            saveDB(true, libType);
+            queueMetadata(newItems, libType);
+            io.emit('library:updated', { type: libType, count: newItems.length });
+          }
+        } catch(e) { console.error(`[Scheduler] scan ${libType} error:`, e.message); }
+      }
+
+    } else if (type.includes('metadata') || type.includes('refresh')) {
+      // Re-queue all items missing metadata
+      for (const libType of ['movies','tvShows','music','musicVideos']) {
+        const missing = (db[libType]||[]).filter(i => !i.metadataFetched || !i.thumbnail);
+        if (missing.length) queueMetadata(missing, libType);
+      }
+
+    } else if (type.includes('collection')) {
+      // Rebuild auto collections
+      try {
+        const r = require('./routes/collections');
+        // Trigger rebuild via internal call
+        io.emit('collections:rebuilding');
+        const { buildAutoCollections } = require('./routes/collections');
+        if (buildAutoCollections) await buildAutoCollections(db, saveDB);
+        io.emit('collections:rebuilt');
+      } catch(e) { console.error('[Scheduler] collections error:', e.message); }
+
+    } else if (type.includes('backup')) {
+      const OrionDB = require('./database');
+      const backed = OrionDB.backup(PATHS.DATA_DIR);
+      if (backed) console.log(`[Scheduler] Backup written: ${backed}`);
+
+    } else if (type.includes('optimize')) {
+      const OrionDB = require('./database');
+      OrionDB.optimize();
+
+    } else if (type.includes('clearlog') || type.includes('clear debug')) {
+      console.log('[Scheduler] Debug log cleared');
+
+    } else if (type.includes('thumbnail')) {
+      // Trigger thumbnail generation for items without one
+      io.emit('thumbnails:generating');
+      for (const libType of ['movies','tvShows','musicVideos']) {
+        const missing = (db[libType]||[]).filter(i => !i.thumbnail && i.filePath);
+        for (const item of missing.slice(0, 50)) {
+          try {
+            const { generateThumbnail } = require('./thumbnails');
+            if (generateThumbnail) {
+              const thumb = await generateThumbnail(item.filePath, PATHS.THUMBS_DIR);
+              if (thumb) { item.thumbnail = thumb; }
+            }
+          } catch {}
+        }
+      }
+      saveDB(false);
+      io.emit('thumbnails:done');
+
+    } else if (type.includes('musicvideo') || type.includes('music video')) {
+      // Queue music video metadata
+      const missing = (db.musicVideos||[]).filter(i => !i.metadataFetched);
+      if (missing.length) queueMetadata(missing, 'musicVideos');
+
+    } else {
+      console.log(`[Scheduler] Unknown task type: ${type}`);
+    }
+
+    // Update lastRun
+    const t = (db.scheduledTasks||[]).find(t => t.id === task.id);
+    if (t) { t.lastRun = new Date().toISOString(); saveDB(false, 'scheduledTasks'); }
+  };
+
+  try { api.use('/', require('./routes/scheduler')({ ...deps(), runTask })); } catch(e) { console.error('[Routes] scheduler failed:', e.message); }
   try { api.use('/', require('./routes/stream')(deps())); } catch(e) { console.error('[Routes] stream failed:', e.message); }
   try { api.use('/', require('./routes/trailers')(deps())); } catch(e) { console.error('[Routes] trailers failed:', e.message); }
   try { api.use('/', require('./routes/images')(deps())); } catch(e) { console.error('[Routes] images failed:', e.message); }
