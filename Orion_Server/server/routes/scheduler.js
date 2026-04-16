@@ -15,6 +15,19 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
   // ── Scheduler ─────────────────────────────────────────────────────────────────
   router.get('/scheduler', (_, res) => res.json({ tasks: db.scheduledTasks || [] }));
 
+  router.post('/scheduler', (req, res) => {
+    const tasks = Array.isArray(req.body) ? req.body : [req.body];
+    if (!db.scheduledTasks) db.scheduledTasks = [];
+    for (const task of tasks) {
+      if (!task.name) continue;
+      // Don't add duplicates
+      if (db.scheduledTasks.find(t => t.name === task.name)) continue;
+      db.scheduledTasks.push({ id: uuidv4(), ...task });
+    }
+    saveDB(true, 'scheduledTasks');
+    res.json({ tasks: db.scheduledTasks });
+  });
+
   router.put('/scheduler/:id', (req, res) => {
     const task = (db.scheduledTasks||[]).find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
@@ -34,8 +47,37 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
 
     // Dispatch task by type/name
     const type = (task.type || task.name || '').toLowerCase();
-    if (type.includes('trailer') || type.includes('tv-trailer')) {
-      // Trigger the batch TV trailer download
+    if (type.includes('update') || type.includes('check for update')) {
+      const https = require('https');
+      const fsSync = require('fs');
+      const pathMod = require('path');
+      // Read the installed commit SHA (written at install time)
+      const shaFile = pathMod.join(__dirname, '.git', 'refs', 'heads', 'main');
+      const currentSha = fsSync.existsSync(shaFile)
+        ? fsSync.readFileSync(shaFile, 'utf8').trim().slice(0,7)
+        : 'unknown';
+      https.get('https://api.github.com/repos/rpoltera/Orion/commits/main',
+        { headers: { 'User-Agent': 'Orion', 'Accept': 'application/vnd.github.v3+json' } },
+        (r) => {
+          let d = ''; r.on('data', c => d += c);
+          r.on('end', () => {
+            try {
+              const commit = JSON.parse(d);
+              const latest = commit?.sha?.slice(0,7) || 'unknown';
+              const msg = commit?.commit?.message?.split('\n')[0] || '';
+              const date = commit?.commit?.author?.date || '';
+              const upToDate = currentSha !== 'unknown' && currentSha === latest;
+              console.log(`[Scheduler] Update check — installed: ${currentSha}, latest: ${latest} — ${upToDate ? 'UP TO DATE' : 'UPDATE AVAILABLE: ' + msg}`);
+              const t = (db.scheduledTasks||[]).find(t => t.id === task.id);
+              if (t) {
+                t.lastResult = { currentSha, latestCommit: latest, message: msg, date, upToDate };
+                saveDB(false, 'scheduledTasks');
+              }
+              if (io) io.emit('update:checked', { currentSha, latestCommit: latest, message: msg, date, upToDate });
+            } catch(e) { console.error('[Scheduler] update check parse error:', e.message); }
+          });
+        }).on('error', e => console.error('[Scheduler] update check error:', e.message));
+    } else if (type.includes('trailer') || type.includes('tv-trailer')) {
       fetch('http://localhost:3001/api/tv-trailers/download-all', { method: 'POST' }).catch(e => {
         console.error('[Scheduler] trailer download-all failed:', e.message);
       });
