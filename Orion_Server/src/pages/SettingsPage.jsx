@@ -2977,12 +2977,11 @@ const TAB_GROUPS = [
           <div style={{ maxWidth: 520 }}>
             <div style={{ textAlign: 'center', marginBottom: 32 }}>
               <img src={`${process.env.PUBLIC_URL}/logo.png`} alt="Orion" style={{ width: 160, height: 160, objectFit: 'contain', marginBottom: 16 }} />
-
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Version 1.0.0 — Alpha</div>
             </div>
             {[
-              { label: 'Developer', value: 'Raymond Poltera' },
-              { label: 'Platform', value: 'Windows (Electron + React)' },
+              { label: 'Developer', value: 'R. Poltera' },
+              { label: 'Platform', value: window.electron ? 'Windows (Electron + React)' : 'Linux (Node.js + React)' },
               { label: 'License', value: 'MIT — Free & Open Source' },
             ].map(({ label, value }) => (
               <div key={label} className="settings-row">
@@ -2990,8 +2989,9 @@ const TAB_GROUPS = [
                 <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{value}</div>
               </div>
             ))}
-            <div style={{ marginTop: 24 }}>
-              <button className="btn btn-secondary" style={{ width: '100%', justifyContent: 'center', gap: 8 }} onClick={() => window.electron?.openExternal('https://github.com/rpoltera/Orion')}>
+            <div style={{ marginTop: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <button className="btn btn-secondary" style={{ width: '100%', justifyContent: 'center', gap: 8 }}
+                onClick={() => window.electron ? window.electron.openExternal('https://github.com/rpoltera/Orion') : window.open('https://github.com/rpoltera/Orion', '_blank')}>
                 <GitBranch size={16} /> View on GitHub
               </button>
             </div>
