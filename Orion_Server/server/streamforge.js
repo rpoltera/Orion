@@ -1194,7 +1194,7 @@ module.exports = function mountStreamForge(app, orion) {
     epgDaysAhead: 7, xcUser:'streamforge', xcPass:'streamforge',
     videoCodec:'h264', videoProfile:'h264', videoBitrate:'4M', videoMaxBitrate:'8M', videoBufferSize:'8M',
     videoCrf:'23', audioCodec:'aac', audioBitrate:'192k', audioChannels:2, audioLanguage:'eng',
-    hlsSegmentSeconds:6, hlsListSize:20, gpuCount:1, hwDecode:false, hlsIdleTimeoutSecs:60,
+    hlsSegmentSeconds:6, hlsListSize:20, gpuCount:1, hwDecode:false, hlsIdleTimeoutSecs:60, prebufferMode:'library',
     aiProvider:'anthropic', anthropicApiKey:'', openaiApiKey:'', openaiModel:'gpt-4o',
     ollamaUrl:'http://localhost:11434/v1', ollamaModel:'llama3.2',
     openwebUIUrl:'', openwebUIKey:'', openwebUIModel:'',
@@ -1241,10 +1241,15 @@ module.exports = function mountStreamForge(app, orion) {
     for (let i = 0; i < channels.length; i += BATCH) {
       const batch = channels.slice(i, i + BATCH);
       batch.forEach(ch => {
-        // Only pre-buffer library-based channels (TV shows, movies, music)
-        // Skip live IPTV streams — they don't need pre-buffering and waste CPU
-        if (!hlsSessions[ch.id] && !ch.liveStreamId) {
-          startHlsSession(ch, { keepAlive: true });
+        const mode = sfConfig.prebufferMode || 'library';
+        const isLive = !!ch.liveStreamId;
+        const shouldPreBuffer =
+          mode === 'all' ? true :
+          mode === 'library' ? !isLive :
+          mode === 'live' ? isLive :
+          false; // 'none'
+        if (!hlsSessions[ch.id] && shouldPreBuffer) {
+          startHlsSession(ch, { keepAlive: !isLive });
         }
       });
       // 2s between batches — lets GPU settle before starting next batch
@@ -1279,7 +1284,7 @@ module.exports = function mountStreamForge(app, orion) {
   // ── Config ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/config', (req, res) => res.json(sfConfig));
   app.put('/api/sf/config', (req, res) => {
-    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
+    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
     allowed.forEach(k => { if (req.body[k] !== undefined) sfConfig[k] = req.body[k]; });
     saveJson(SF_CFG, sfConfig); res.json({ ok:true });
   });
