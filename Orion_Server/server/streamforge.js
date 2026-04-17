@@ -1566,9 +1566,11 @@ module.exports = function mountStreamForge(app, orion) {
     session.lastRequest = Date.now();
     const segPath = path.join(session.dir, req.params.segment);
     if (!fs.existsSync(segPath)) return res.status(404).send('Segment not found');
-    const isMp4 = req.params.segment.endsWith('.mp4');
-    const isM4s = req.params.segment.endsWith('.m4s');
-    const contentType = (isMp4 || isM4s) ? 'video/mp4' : 'video/mp2t';
+    const seg = req.params.segment;
+    const isInit = seg === 'init.mp4';
+    const isMp4 = seg.endsWith('.mp4');
+    const isM4s = seg.endsWith('.m4s');
+    const contentType = isInit ? 'video/mp4' : (isMp4 || isM4s) ? 'video/iso.segment' : 'video/mp2t';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control','no-cache');
     res.setHeader('Access-Control-Allow-Origin','*');
