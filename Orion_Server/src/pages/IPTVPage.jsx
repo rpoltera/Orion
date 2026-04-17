@@ -389,6 +389,23 @@ export default function IPTVPage() {
           <FolderOpen size={14}/> {loading.iptv?'Loading...':'Load M3U File'}
           <input type="file" accept=".m3u,.m3u8,.txt" style={{ display:'none' }} onChange={handleFileChange}/>
         </label>
+        {iptvChannels.length > 0 && (
+          <button onClick={() => {
+            const lines = ['#EXTM3U'];
+            iptvChannels.forEach(ch => {
+              const attrs = [`tvg-id="${ch.tvgId||''}"`, `tvg-name="${ch.name}"`, `tvg-logo="${ch.logo||''}"`, `group-title="${ch.group||''}"`].join(' ');
+              lines.push(`#EXTINF:-1 ${attrs},${ch.name}`);
+              lines.push(ch.url);
+            });
+            const blob = new Blob([lines.join('\n')], { type: 'audio/x-mpegurl' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'orion-iptv.m3u';
+            a.click();
+          }} style={{ display:'flex',alignItems:'center',gap:6,padding:'7px 14px',background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius)',cursor:'pointer',fontSize:13,fontWeight:600,color:'var(--text-primary)' }}>
+            ⬇️ Export M3U ({iptvChannels.length})
+          </button>
+        )}
       </div>
 
       {iptvChannels.length === 0 ? (
