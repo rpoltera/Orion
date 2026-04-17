@@ -29,18 +29,18 @@ const _activeSessions  = new Map();
 const _pendingStreams   = new Map();
 const _transcodeQueue  = [];
 const _sessionGraveyard = new Map();
-const MAX_CONCURRENT_TRANSCODES = 3;
-const GRAVEYARD_TTL = 30000;
+const MAX_CONCURRENT_TRANSCODES = 6; // P40 GPUs can handle many concurrent encodes
+const GRAVEYARD_TTL = 15000; // free GPU resources faster
 
 // Fast codec probe cache — avoids re-probing the same file
 const _probeCache = new Map();
-const PROBE_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const PROBE_CACHE_TTL = 60 * 60 * 1000; // 60 minutes — files don't change codec mid-session
 
 function probeFileCodecs(filePath) {
   const cached = _probeCache.get(filePath);
   if (cached && Date.now() - cached.ts < PROBE_CACHE_TTL) return Promise.resolve(cached.result);
   return new Promise(resolve => {
-    const timer = setTimeout(() => resolve({ video: null, audio: null, channels: 0 }), 8000);
+    const timer = setTimeout(() => resolve({ video: null, audio: null, channels: 0 }), 3000);
     ffmpeg.ffprobe(filePath, (err, meta) => {
       clearTimeout(timer);
       if (err) return resolve({ video: null, audio: null, channels: 0 });
@@ -74,7 +74,7 @@ function processTranscodeQueue() {
 
 // NAS pool tracking
 const _poolReads = {};
-const MAX_READS_PER_POOL = 4;
+const MAX_READS_PER_POOL = 8; // allow more concurrent NAS reads
 function acquirePoolSlot(filePath) {
   const pool = filePath.includes('jbod1') ? 'jbod1' : filePath.includes('media') ? 'media' : 'default';
   _poolReads[pool] = (_poolReads[pool] || 0) + 1;
@@ -288,6 +288,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('Cache-Control', 'no-cache, no-store');
       res.setHeader('X-Accel-Buffering', 'no');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Playback-Session-Id', sessionId);
       if (mediaItem?.runtime > 0) res.setHeader('X-Content-Duration', String(mediaItem.runtime * 60));
 
@@ -310,9 +311,15 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       const tryTranscode = (forceEncode = false) => {
         if (clientClosed) return;
 
-        const inputOptions = ['-fflags', '+genpts+discardcorrupt+igndts', '-err_detect', 'ignore_err'];
-        if (seekTime > 0) inputOptions.push('-ss', String(seekTime));
+        const inputOptions = ['-probesize','200000','-analyzeduration','200000','-fflags', '+genpts+discardcorrupt+igndts+fastseek', '-err_detect', 'ignore_err'];
+        if (seekTime > 10) {
+          // Fast keyframe seek before input, then precise seek after
+          inputOptions.push('-ss', String(Math.max(0, seekTime - 5)));
+        } else if (seekTime > 0) {
+          inputOptions.push('-ss', String(seekTime));
+        }
 
+        const outputSeek = seekTime > 10 ? 5 : 0;
         let videoCodec = 'copy', videoOptions = [], scaleFilter = null;
         if (forceEncode || qualityTier) {
           if (!softwareFallback && encoder.includes('amf')) {
@@ -320,17 +327,17 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
             videoOptions = ['-usage','transcoding','-quality','balanced','-rc','cqp','-qp_i','22','-qp_p','24'];
             if (qualityTier) scaleFilter = qualityTier.scale;
           } else if (!softwareFallback && encoder.includes('nvenc')) {
-            videoCodec = encoder; videoOptions = ['-preset','p2','-rc','vbr','-cq','23','-b:v','0'];
+            videoCodec = encoder; videoOptions = ['-preset','p1','-tune','ull','-rc','vbr','-cq','23','-b:v','0','-zerolatency','1'];
             if (qualityTier) scaleFilter = qualityTier.scale;
           } else if (!softwareFallback && encoder.includes('qsv')) {
-            videoCodec = encoder; videoOptions = ['-preset','veryfast','-global_quality','23'];
+            videoCodec = encoder; videoOptions = ['-preset','veryfast','-global_quality','23','-look_ahead','0'];
             if (qualityTier) scaleFilter = qualityTier.scale;
           } else if (!softwareFallback && encoder.includes('videotoolbox')) {
             videoCodec = encoder; videoOptions = ['-q:v','65'];
             if (qualityTier) scaleFilter = qualityTier.scale;
           } else {
             videoCodec = 'libx264';
-            videoOptions = ['-preset','ultrafast','-crf', String(qualityTier?.crf || 23)];
+            videoOptions = ['-preset','ultrafast','-tune','zerolatency','-crf', String(qualityTier?.crf || 23)];
             if (qualityTier) scaleFilter = qualityTier.scale;
           }
         }
@@ -339,7 +346,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
         const isMultichannel = probeChannels > 2 ||
           (probeAudioCodec && ['ac3','dts','truehd','eac3','dts-hd','dts-x','atmos'].some(c => probeAudioCodec.toLowerCase().includes(c)));
         const audioFilter = isMultichannel
-          ? 'pan=stereo|c0=0.5*c0+0.707*c2+0.707*c4|c1=0.5*c1+0.707*c2+0.707*c5,aresample=48000'
+          ? 'pan=stereo|c0=0.5*c0+0.707*c2+0.707*c4|c1=0.5*c1+0.707*c2+0.707*c5'
           : null;
 
         // For 10-bit source with software encode, add proper pixel format conversion
@@ -352,7 +359,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
           ...(audioFilter ? ['-af', audioFilter] : []),
           '-ac', '2', '-ar', '48000', '-b:a', '192k',
         ];
-        if (videoCodec !== 'copy') outputOptions.push('-pix_fmt', pixFmt, '-threads', '0');
+        if (videoCodec !== 'copy') outputOptions.push('-pix_fmt', pixFmt, '-threads', '0', '-fps_mode', 'cfr');
         if (scaleFilter) outputOptions.push(`-vf scale=${scaleFilter}`);
         if (subtitle && subtitle !== '0') {
           const subIdx = parseInt(subtitle)||0;
@@ -361,7 +368,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
         }
 
         try {
-          const workAheadMB    = parseInt(config.transcoding?.workAheadMB || '20', 10) || 20;
+          const workAheadMB    = parseInt(config.transcoding?.workAheadMB || '8', 10) || 8;
           const workAheadBytes = workAheadMB * 1024 * 1024;
 
           const chunkQueue = [];
@@ -373,7 +380,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
           let lastDataAt = Date.now();
           const stallTimer = setInterval(() => {
             if (clientClosed || res.writableEnded) { clearInterval(stallTimer); return; }
-            if (!ffmpegDone && Date.now() - lastDataAt > 30000) {
+            if (!ffmpegDone && Date.now() - lastDataAt > 15000) {
               clearInterval(stallTimer);
               console.warn(`[Transcode] Stall detected (30s no data) — ending stream for retry: ${path.basename(filePath)}`);
               try { ffmpegCmd?.kill('SIGKILL'); } catch {}
@@ -467,7 +474,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
     } else {
       // Direct file streaming
       const isJbod1 = filePath.includes('jbod1');
-      const HDD_BUFFER = isJbod1 ? 2*1024*1024 : 4*1024*1024;
+      const HDD_BUFFER = isJbod1 ? 8*1024*1024 : 16*1024*1024; // larger buffers for NAS reads
       let fileSize = 0;
       try { fileSize = fs.statSync(filePath).size; } catch {}
 
@@ -552,10 +559,14 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
                  : 'libx264';
 
     const args = [
+      // Fast stream open — don't waste time analyzing the live source
+      '-probesize', '500000',
+      '-analyzeduration', '500000',
       '-user_agent', 'Mozilla/5.0',
-      '-fflags', '+genpts+discardcorrupt',
+      '-fflags', '+genpts+discardcorrupt+nobuffer',
+      '-flags', 'low_delay',
       '-err_detect', 'ignore_err',
-      '-rtbufsize', '50M',
+      '-rtbufsize', '8M',
       '-i', url,
       '-map', '0:v:0', '-map', '0:a:0?',
       '-vcodec', vcodec,
@@ -567,9 +578,13 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
     args.push(
       '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
       '-acodec', 'aac', '-b:a', '192k', '-ac', '2',
+      '-avoid_negative_ts', 'make_zero',
+      '-max_interleave_delta', '0',
       '-f', 'mp4',
-      '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
-      '-frag_duration', '1000000',  // 1-second fragments
+      // delay_moov writes the moov atom once upfront — fixes Chromium stalling every fragment
+      // empty_moov was the root cause of 1-3 second buffering cycles
+      '-movflags', 'frag_keyframe+delay_moov+default_base_moof',
+      '-frag_duration', '2000000',  // 2-second fragments — smooth without adding lag
       'pipe:1'
     );
 
