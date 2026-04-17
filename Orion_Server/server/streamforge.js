@@ -1831,13 +1831,56 @@ module.exports = function mountStreamForge(app, orion) {
       return [];
     };
     (orionDb?.tvShows||[]).forEach(ep => {
-      parseArr(ep.networks).forEach(n => { const s=typeof n==='object'?n.name||n:String(n); if(s) networkSet.add(s); });
+      // 'network' is a single string field in Orion's TV show schema
+      if (ep.network) networkSet.add(ep.network);
       parseArr(ep.watchProviders).forEach(p => { const s=typeof p==='object'?p.name||p:String(p); if(s) networkSet.add(s); });
     });
     (orionDb?.movies||[]).forEach(m => {
       parseArr(m.watchProviders).forEach(p => { const s=typeof p==='object'?p.name||p:String(p); if(s) networkSet.add(s); });
     });
     res.json({ genres: [...genreSet].sort(), networks: [...networkSet].sort() });
+  });
+
+  // Networks endpoint — returns all networks with show counts from Orion library
+  app.get('/api/sf/networks', (req, res) => {
+    const parseArr = v => { if (Array.isArray(v)) return v; if (typeof v==='string') { try { return JSON.parse(v); } catch { return []; } } return []; };
+    const networkMap = new Map(); // network -> Set of showNames
+    const getNetworks = ep => {
+      const nets = [];
+      if (ep.network) nets.push(ep.network);
+      parseArr(ep.watchProviders).forEach(p => { const s=typeof p==='object'?p.name||p:String(p); if(s) nets.push(s); });
+      return nets;
+    };
+    // Group TV episodes by show name per network
+    const showsByNetwork = new Map();
+    (orionDb?.tvShows||[]).forEach(ep => {
+      const show = ep.seriesTitle || ep.title || '';
+      if (ep.network) {
+        if (!showsByNetwork.has(ep.network)) showsByNetwork.set(ep.network, new Set());
+        showsByNetwork.get(ep.network).add(show);
+      }
+    });
+    const networks = [...showsByNetwork.entries()]
+      .map(([name, shows]) => ({ name, showCount: shows.size, shows: [...shows].sort() }))
+      .sort((a,b) => b.showCount - a.showCount);
+    res.json(networks);
+  });
+
+  // Media by network — returns all episodes/movies for a given network
+  app.get('/api/sf/media/by-network', (req, res) => {
+    const network = (req.query.network || '').toLowerCase();
+    if (!network) return res.status(400).json({ error: 'network required' });
+    const parseArr = v => { if (Array.isArray(v)) return v; if (typeof v==='string') { try { return JSON.parse(v); } catch { return []; } } return []; };
+    const items = getMediaCombined().filter(m => {
+      const raw = (orionDb?.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb?.movies||[]).find(mv=>mv.id===m.id);
+      if (!raw) return false;
+      const nets = [
+        ...parseArr(raw.networks),
+        ...parseArr(raw.watchProviders),
+      ].map(n=>typeof n==='object'?n.name||n:String(n)).map(s=>s.toLowerCase());
+      return nets.some(n => n.includes(network) || network.includes(n));
+    });
+    res.json(items);
   });
 
   // Shows search — instant filter of pre-built cache (no per-request 25k scan)
