@@ -39,10 +39,27 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(logger.requestLogger);
 
-// FFmpeg
-if (ffmpegStatic) {
+// FFmpeg — use system ffmpeg on Linux for NVENC/hardware support
+// ffmpeg-static is a static build without GPU encoder support
+if (process.platform !== 'win32') {
+  try {
+    const { execSync } = require('child_process');
+    const sysFfmpeg  = execSync('which ffmpeg').toString().trim();
+    const sysFfprobe = execSync('which ffprobe').toString().trim();
+    if (sysFfmpeg)  ffmpeg.setFfmpegPath(sysFfmpeg);
+    if (sysFfprobe) ffmpeg.setFfprobePath(sysFfprobe);
+    console.log('[FFmpeg] Using system ffmpeg:', sysFfmpeg);
+  } catch(e) {
+    console.warn('[FFmpeg] System ffmpeg not found, falling back to static build');
+    if (ffmpegStatic) {
+      ffmpeg.setFfmpegPath(ffmpegStatic);
+      const ffprobePath = path.join(path.dirname(ffmpegStatic), 'ffprobe');
+      if (fs.existsSync(ffprobePath)) ffmpeg.setFfprobePath(ffprobePath);
+    }
+  }
+} else if (ffmpegStatic) {
   ffmpeg.setFfmpegPath(ffmpegStatic);
-  const ffprobePath = path.join(path.dirname(ffmpegStatic), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+  const ffprobePath = path.join(path.dirname(ffmpegStatic), 'ffprobe.exe');
   if (fs.existsSync(ffprobePath)) ffmpeg.setFfprobePath(ffprobePath);
 }
 
