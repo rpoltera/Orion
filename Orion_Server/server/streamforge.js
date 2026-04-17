@@ -621,7 +621,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       '-re', '-i', src.value,
       '-map','0:v:0','-map','0:a:0?',
       '-vcodec','copy',
-      '-acodec','copy',
+      '-acodec','aac','-b:a','192k','-ac','2',
       '-avoid_negative_ts','make_zero',
       '-f','hls',
       '-hls_time','2','-hls_list_size','10',
