@@ -44,20 +44,29 @@ function invalidateMediaCache() {
 
 function getNetworkIndex() {
   if (_networkIndex.size > 0) return _networkIndex;
-  const media = getMediaCombined();
-  _networkIndex.clear();
   if (!orionDb) return _networkIndex;
-  // Build index from orionDb directly using the 'network' field
-  for (const m of media) {
-    const raw = (orionDb.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb.movies||[]).find(mv=>mv.id===m.id);
-    if (!raw) continue;
-    const net = raw.network;
-    if (net) {
-      const key = net.toLowerCase();
-      if (!_networkIndex.has(key)) _networkIndex.set(key, []);
-      _networkIndex.get(key).push(m);
-    }
+  _networkIndex.clear();
+  // Build a fast id->mediaItem map first
+  const combined = getMediaCombined();
+  const byId = new Map(combined.map(m => [m.id, m]));
+  // Scan orionDb directly — O(n) not O(n²)
+  for (const ep of (orionDb.tvShows||[])) {
+    if (!ep.network) continue;
+    const m = byId.get(ep.id);
+    if (!m) continue;
+    const key = ep.network.toLowerCase();
+    if (!_networkIndex.has(key)) _networkIndex.set(key, []);
+    _networkIndex.get(key).push(m);
   }
+  for (const mv of (orionDb.movies||[])) {
+    if (!mv.network) continue;
+    const m = byId.get(mv.id);
+    if (!m) continue;
+    const key = mv.network.toLowerCase();
+    if (!_networkIndex.has(key)) _networkIndex.set(key, []);
+    _networkIndex.get(key).push(m);
+  }
+  console.log(`[SF] Network index built: ${_networkIndex.size} networks`);
   return _networkIndex;
 }
 
