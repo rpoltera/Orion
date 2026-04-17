@@ -595,6 +595,9 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     args.push('-re');
   } else {
     args.push('-probesize', '200000', '-analyzeduration', '200000');
+    // Large read buffer for NAS files prevents gaps when network hiccups
+    args.push('-rw_timeout', '5000000'); // 5s timeout for NAS reads
+    args.push('-reconnect', '1', '-reconnect_streamed', '1');
   }
 
   // Hardware decode (optional, off by default)
