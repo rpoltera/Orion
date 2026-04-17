@@ -155,7 +155,8 @@ module.exports = function settingsRoutes({ db, io, getConfig, getSettings, updat
       const cmd = 'powershell -Command "& { Invoke-WebRequest -Uri https://ollama.com/download/OllamaSetup.exe -OutFile $env:TEMP\\OllamaSetup.exe; Start-Process $env:TEMP\\OllamaSetup.exe -ArgumentList \'/silent\' -Wait; Write-Host \'Done\' }"';
       proc = spawn('cmd', ['/c', cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
     } else {
-      proc = spawn('bash', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      // Run as root directly — Orion server runs as root on Linux
+      proc = spawn('bash', ['-c', 'curl -fsSL https://ollama.com/install.sh | SUDO_COMMAND=true sh'], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: '/root', PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' } });
     }
     proc.stdout.on('data', d => res.write(d.toString()));
     proc.stderr.on('data', d => res.write(d.toString()));
