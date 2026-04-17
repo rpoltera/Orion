@@ -474,28 +474,30 @@ function getPlayoutNow(ch, nowMs) {
   if (ch.genreLoop?.genre) {
     const { genre, mediaType, matchType } = ch.genreLoop;
     const g = genre.toLowerCase();
-    let items = getMediaCombined().filter(m => {
-      if (m.libraryId === 'orion-music') return false;
-      if (mediaType === 'movie' && m.type !== 'movie') return false;
-      if (mediaType === 'episode' && m.type !== 'episode') return false;
-      if (m.path === '' && !m.jellyfinId && !m.plexKey) return false;
-      if (matchType === 'network') {
-        // Read networks directly from the raw orionDb item via m.id
-        const raw = (orionDb?.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb?.movies||[]).find(mv=>mv.id===m.id);
-        if (!raw) return false;
-        const parseArr = v => { if (Array.isArray(v)) return v; if (typeof v==='string') { try { return JSON.parse(v)||[]; } catch { return []; } } return []; };
-        const nets = [
-          ...parseArr(raw.networks),
-          ...parseArr(raw.watchProviders),
-        ].map(n=>typeof n==='object'?n.name||n:String(n)).map(s=>s.toLowerCase());
-        return nets.some(s => s.includes(g) || g.includes(s));
+    let items;
+    if (matchType === 'network') {
+      const idx = getNetworkIndex();
+      items = idx.get(g) || [];
+      if (!items.length) {
+        const arr = [];
+        for (const [k,v] of idx.entries()) { if (k.includes(g) || g.includes(k)) arr.push(...v); }
+        items = arr;
       }
-      // Default: match genres + title + summary
-      const genres = (m.genres||[]).map(x=>x.toLowerCase());
-      return genres.some(gn => gn.includes(g) || g.includes(gn)) ||
-             m.title?.toLowerCase().includes(g) ||
-             m.summary?.toLowerCase().includes(g);
-    });
+      if (mediaType === 'movie') items = items.filter(m => m.type === 'movie');
+      if (mediaType === 'episode') items = items.filter(m => m.type === 'episode' || m.season != null);
+    } else {
+      items = getMediaCombined().filter(m => {
+        if (m.libraryId === 'orion-music') return false;
+        if (mediaType === 'movie' && m.type !== 'movie') return false;
+        if (mediaType === 'episode' && m.type !== 'episode') return false;
+        if (m.path === '' && !m.jellyfinId && !m.plexKey) return false;
+        const genres = (m.genres||[]).map(x=>x.toLowerCase());
+        return genres.some(gn => gn.includes(g) || g.includes(gn)) ||
+               m.title?.toLowerCase().includes(g) ||
+               m.summary?.toLowerCase().includes(g);
+      });
+    }
+    console.log('[SF/GenreLoop] ch="'+ch.name+'" network="'+genre+'" items='+items.length);
     if (!items.length) return null;
     // Sort episodes by season/episode, movies by year/title
     items = items.sort((a,b) => {
