@@ -32,11 +32,33 @@ let _mediaCombinedDirty = true;
 let _showsCache = null; // pre-built show index, rebuilt when media cache rebuilds
 const _mediaById = new Map(); // id -> item for O(1) lookups
 
+let _networkIndex = new Map(); // network -> [items]
+
 function invalidateMediaCache() {
   _mediaCombinedDirty = true;
   _mediaCombinedCache = null;
   _showsCache = null;
   _mediaById.clear();
+  _networkIndex.clear();
+}
+
+function getNetworkIndex() {
+  if (_networkIndex.size > 0) return _networkIndex;
+  const media = getMediaCombined();
+  _networkIndex.clear();
+  if (!orionDb) return _networkIndex;
+  // Build index from orionDb directly using the 'network' field
+  for (const m of media) {
+    const raw = (orionDb.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb.movies||[]).find(mv=>mv.id===m.id);
+    if (!raw) continue;
+    const net = raw.network;
+    if (net) {
+      const key = net.toLowerCase();
+      if (!_networkIndex.has(key)) _networkIndex.set(key, []);
+      _networkIndex.get(key).push(m);
+    }
+  }
+  return _networkIndex;
 }
 
 function getMediaById(id) {
