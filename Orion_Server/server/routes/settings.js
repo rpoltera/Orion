@@ -76,6 +76,18 @@ module.exports = function settingsRoutes({ db, io, getConfig, getSettings, updat
   });
 
   // ── Hardware info ─────────────────────────────────────────────────────────────
+  router.post('/hardware/detect', (_, res) => {
+    // Force re-detection by clearing cache
+    cachedEncoder = null;
+    detectHardwareAccel().then(encoder => {
+      const typeMap = {
+        'h264_nvenc': 'NVIDIA NVENC (H.264)', 'h264_amf': 'AMD AMF (H.264)',
+        'h264_qsv': 'Intel Quick Sync (H.264)', 'libx264': 'Software (H.264)',
+      };
+      res.json({ encoder, encoderName: typeMap[encoder] || encoder, detected: true });
+    });
+  });
+
   router.get('/hardware', (_, res) => {
     detectHardwareAccel().then(encoder => {
       const typeMap = {
