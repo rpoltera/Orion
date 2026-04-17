@@ -790,6 +790,7 @@ function startHlsSession(ch, opts={}) {
       return null;
     }
     src = resolveSource(now.item);
+    console.log(`[SF/HLS] resolveSource: id=${now.item.id} path="${now.item.path}" src=${JSON.stringify(src)}`);
     if (!src) { console.warn(`[SF/HLS] resolveSource null for item id=${now.item.id} path="${now.item.path}"`); return null; }
     // Pre-check file exists on NAS before starting FFmpeg (avoids crash loop on missing files)
     if (src.type === 'file' && now.item.path) {
