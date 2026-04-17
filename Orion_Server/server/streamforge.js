@@ -722,23 +722,15 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   if (outputFormat === 'hls') {
     const segTime = String(isLiveSrc ? Math.min(segSeconds, 2) : segSeconds);
     const listSz = String(sfConfig.hlsListSize || 30);
-    // Use fMP4 (CMAF) segments for Chrome compatibility + smooth playback
-    // fMP4 is also supported by ExoPlayer on Android (Formuler Z11, etc.)
-    const useFmp4 = true;
-    const segExt = useFmp4 ? 'mp4' : 'ts';
-    const segType = useFmp4 ? 'fmp4' : 'mpegts';
-    const hlsFlags = useFmp4
-      ? 'delete_segments+append_list+independent_segments'
-      : 'delete_segments+append_list+independent_segments';
     args.push('-f', 'hls',
       '-hls_time', segTime,
       '-hls_list_size', listSz,
-      '-hls_flags', hlsFlags,
-      '-hls_segment_type', segType,
+      '-hls_flags', 'delete_segments+append_list+independent_segments',
+      '-hls_segment_type', 'mpegts',
       '-hls_allow_cache', '0',
       '-flush_packets', '1',
       '-hls_init_time', '0',
-      '-hls_segment_filename', path.join(hlsDir, `seg%05d.${segExt}`),
+      '-hls_segment_filename', path.join(hlsDir, 'seg%05d.ts'),
       path.join(hlsDir, 'index.m3u8'));
   } else {
     args.push('-f', 'mpegts', '-mpegts_flags', 'resend_headers', 'pipe:1');
@@ -1567,10 +1559,8 @@ module.exports = function mountStreamForge(app, orion) {
     const segPath = path.join(session.dir, req.params.segment);
     if (!fs.existsSync(segPath)) return res.status(404).send('Segment not found');
     const seg = req.params.segment;
-    const isInit = seg === 'init.mp4';
-    const isMp4 = seg.endsWith('.mp4');
-    const isM4s = seg.endsWith('.m4s');
-    const contentType = isInit ? 'video/mp4' : (isMp4 || isM4s) ? 'video/iso.segment' : 'video/mp2t';
+    const isMp4 = seg.endsWith('.mp4') || seg.endsWith('.m4s');
+    const contentType = isMp4 ? 'video/mp4' : 'video/mp2t';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control','no-cache');
     res.setHeader('Access-Control-Allow-Origin','*');
