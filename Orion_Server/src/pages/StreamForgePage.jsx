@@ -2013,7 +2013,7 @@ function Watch({ call, initialChannelId }) {
           const hls = new window.Hls({
             lowLatencyMode: false,
             liveSyncDurationCount: 8,        // stay 8 segments (16s) behind live edge
-            liveMaxLatencyDurationCount: 20, // jump forward if >40s behind
+            liveMaxLatencyDurationCount: 50, // only jump if >100s behind (prevents mid-show skips)
             maxBufferLength: 60,             // buffer up to 60s
             maxBufferSize: 120 * 1000 * 1000,// 120MB buffer
             maxMaxBufferLength: 120,
@@ -2332,6 +2332,14 @@ function SFSettings({ call }) {
           <Field label="Segment Length (seconds)"><input style={inp} type="number" value={config.hlsSegmentSeconds||4} onChange={e=>update('hlsSegmentSeconds',+e.target.value)} min={1} max={30}/></Field>
           <Field label="Playlist Size (segments)"><input style={inp} type="number" value={config.hlsListSize||6} onChange={e=>update('hlsListSize',+e.target.value)} min={2} max={20}/></Field>
           <Field label="Idle Timeout (seconds)"><input style={inp} type="number" value={config.hlsIdleTimeoutSecs||60} onChange={e=>update('hlsIdleTimeoutSecs',+e.target.value)} min={10}/></Field>
+          <Field label="Pre-buffer Mode" hint="Controls which channels are pre-buffered on server startup for instant playback">
+            <select style={inp} value={config.prebufferMode||'library'} onChange={e=>update('prebufferMode',e.target.value)}>
+              <option value="library">Library Only (TV shows, movies — recommended)</option>
+              <option value="all">All Channels (library + live streams)</option>
+              <option value="live">Live Streams Only</option>
+              <option value="none">None (start on demand)</option>
+            </select>
+          </Field>
         </div>
       </div>
       <div style={{ display:'flex',justifyContent:'flex-end',marginTop:20 }}>
