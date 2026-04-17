@@ -2313,8 +2313,8 @@ function SFSettings({ call }) {
               <input style={inp} type="number" min={1} max={16} value={config.gpuCount||1} onChange={e=>update('gpuCount',parseInt(e.target.value)||1)}/>
             </Field>
           </>}
-          <Field label="Video Resolution" hint="Output resolution. 'Source' keeps the original.">
-            <select style={inp} value={config.videoResolution||''} onChange={e=>update('videoResolution',e.target.value)}>
+          <Field label="Maximum Resolution" hint="The highest resolution to encode. When adaptive quality is enabled this is the ceiling.">
+            <select style={inp} value={config.maxResolution||config.videoResolution||''} onChange={e=>update('maxResolution',e.target.value)}>
               <option value="">Source (keep original)</option>
               <option value="3840x2160">4K UHD — 3840×2160</option>
               <option value="2560x1440">2K QHD — 2560×1440</option>
@@ -2324,6 +2324,12 @@ function SFSettings({ call }) {
               <option value="640x360">360p — 640×360</option>
               <option value="426x240">240p — 426×240</option>
             </select>
+          </Field>
+          <Field label="Adaptive Quality" hint="Automatically reduce resolution when server load is high (like Netflix). Drops to 720p then 480p as needed, restores when load drops.">
+            <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer' }}>
+              <input type="checkbox" checked={!!config.adaptiveQuality} onChange={e=>update('adaptiveQuality', e.target.checked)} />
+              <span style={{ fontSize:13 }}>Enable adaptive quality (auto-reduce resolution under load)</span>
+            </label>
           </Field>
           <Field label="Audio Language" hint="ISO 639-2 code (e.g. eng, spa)"><input style={inp} value={config.audioLanguage||'eng'} onChange={e=>update('audioLanguage',e.target.value)}/></Field>
         </div>
