@@ -720,18 +720,25 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     '-max_interleave_delta', '500000000');
 
   if (outputFormat === 'hls') {
-    // Live streams use 2s segments so m3u8 appears within 2s instead of 6s
     const segTime = String(isLiveSrc ? Math.min(segSeconds, 2) : segSeconds);
-    const listSz = String(sfConfig.hlsListSize || 10); // 10 × 2s = 20s of rolling buffer
+    const listSz = String(sfConfig.hlsListSize || 30);
+    // Use fMP4 (CMAF) segments for Chrome compatibility + smooth playback
+    // fMP4 is also supported by ExoPlayer on Android (Formuler Z11, etc.)
+    const useFmp4 = true;
+    const segExt = useFmp4 ? 'mp4' : 'ts';
+    const segType = useFmp4 ? 'fmp4' : 'mpegts';
+    const hlsFlags = useFmp4
+      ? 'delete_segments+append_list+independent_segments'
+      : 'delete_segments+append_list+independent_segments';
     args.push('-f', 'hls',
       '-hls_time', segTime,
       '-hls_list_size', listSz,
-      '-hls_flags', 'delete_segments+append_list+independent_segments',
-      '-hls_segment_type', 'mpegts',
+      '-hls_flags', hlsFlags,
+      '-hls_segment_type', segType,
       '-hls_allow_cache', '0',
       '-flush_packets', '1',
       '-hls_init_time', '0',
-      '-hls_segment_filename', path.join(hlsDir, 'seg%05d.ts'),
+      '-hls_segment_filename', path.join(hlsDir, `seg%05d.${segExt}`),
       path.join(hlsDir, 'index.m3u8'));
   } else {
     args.push('-f', 'mpegts', '-mpegts_flags', 'resend_headers', 'pipe:1');
@@ -1559,7 +1566,12 @@ module.exports = function mountStreamForge(app, orion) {
     session.lastRequest = Date.now();
     const segPath = path.join(session.dir, req.params.segment);
     if (!fs.existsSync(segPath)) return res.status(404).send('Segment not found');
-    res.setHeader('Content-Type','video/mp2t'); res.setHeader('Cache-Control','no-cache'); res.setHeader('Access-Control-Allow-Origin','*');
+    const isMp4 = req.params.segment.endsWith('.mp4');
+    const isM4s = req.params.segment.endsWith('.m4s');
+    const contentType = (isMp4 || isM4s) ? 'video/mp4' : 'video/mp2t';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control','no-cache');
+    res.setHeader('Access-Control-Allow-Origin','*');
     res.sendFile(segPath);
   });
 
