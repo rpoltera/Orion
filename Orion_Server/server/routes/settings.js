@@ -142,6 +142,28 @@ module.exports = function settingsRoutes({ db, io, getConfig, getSettings, updat
   });
 
   // ── Local AI (Ollama) proxy ───────────────────────────────────────────────────
+  router.post('/ai/install-ollama', (req, res) => {
+    if (process.platform === 'win32') return res.status(400).json({ error: 'Ollama installation is only supported on Linux.' });
+    const { spawn } = require('child_process');
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.write('Starting Ollama installation...\n');
+    const proc = spawn('bash', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    proc.stdout.on('data', d => res.write(d.toString()));
+    proc.stderr.on('data', d => res.write(d.toString()));
+    proc.on('close', code => {
+      if (code === 0) {
+        res.write('\n✅ Ollama installed successfully!\n');
+        spawn('systemctl', ['enable', '--now', 'ollama'], { stdio: 'ignore' });
+      } else {
+        res.write(`\n❌ Installation failed with code ${code}\n`);
+      }
+      res.end();
+    });
+    proc.on('error', err => { res.write(`\n❌ Error: ${err.message}\n`); res.end(); });
+  });
+
   router.get('/ai/status', async (req, res) => {
     const url = (req.query.url || 'http://localhost:11434').replace(/\/+$/, '').replace(/\/v1$/, '');
     try {
