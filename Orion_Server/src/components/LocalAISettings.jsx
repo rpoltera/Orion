@@ -1,7 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 export default function LocalAISettings({ API }) {
-  const [ollamaUrl, setOllamaUrl]   = useState('http://localhost:11434');
+  const [installing, setInstalling] = useState(false);
+  const [installLog, setInstallLog]  = useState('');
+  const [ollamaUrl, setOllamaUrl]   = useState(
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+      ? 'http://localhost:11434'
+      : `http://${window.location.hostname}:11434`
+  );
   const [status, setStatus]         = useState(null);   // { ok, version, error }
   const [models, setModels]         = useState([]);
   const [loadingModels, setLM]      = useState(false);
@@ -103,6 +109,25 @@ export default function LocalAISettings({ API }) {
 
   const card = { background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 20, marginBottom: 16 };
   const inp  = { width: '100%', padding: '8px 12px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box' };
+  const installOllama = async () => {
+    setInstalling(true);
+    setInstallLog('');
+    try {
+      const res = await fetch(`${API}/ai/install-ollama`, { method: 'POST' });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        setInstallLog(prev => prev + decoder.decode(value));
+      }
+    } catch(e) {
+      setInstallLog(prev => prev + '\n❌ ' + e.message);
+    }
+    setInstalling(false);
+    checkStatus();
+  };
+
   const btn  = (extra = {}) => ({ padding: '8px 16px', borderRadius: 'var(--radius)', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600, ...extra });
 
   return (
@@ -111,6 +136,18 @@ export default function LocalAISettings({ API }) {
       {/* Connection */}
       <div style={card}>
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14 }}>🦙 Ollama Connection</div>
+        <div style={{ marginBottom: 14, padding: '12px 14px', background: 'rgba(255,255,255,0.04)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>Install Ollama directly on this server:</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button style={btn({ background: '#ff6600', color: 'white' })} onClick={installOllama} disabled={installing}>
+                {installing ? '⏳ Installing…' : '⬇️ Install Ollama on Server'}
+              </button>
+              {!installing && !installLog && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Installs via official install.sh script</span>}
+            </div>
+            {installLog && (
+              <pre style={{ marginTop: 10, padding: '10px 12px', background: 'rgba(0,0,0,0.3)', borderRadius: 'var(--radius)', fontSize: 11, color: '#10b981', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{installLog}</pre>
+            )}
+          </div>
         <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
           <input style={{ ...inp, flex: 1 }} value={ollamaUrl} onChange={e => setOllamaUrl(e.target.value)}
             placeholder="http://localhost:11434" onKeyDown={e => e.key === 'Enter' && checkStatus()} />
