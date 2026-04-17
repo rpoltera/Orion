@@ -558,7 +558,8 @@ function assignGpu() {
 // ── FFmpeg args builder ───────────────────────────────────────────────────────
 function buildFfArgs(src, offsetSeconds, opts={}) {
   const { outputFormat='hls', hlsDir, gpuId=0, quickStart=false, liveSource=false, swFallback=false } = opts;
-  const hw = sfConfig.hwAccel || 'amf';
+  // Derive hw from hwEncoder if hwAccel not explicitly set in config
+  const hw = sfConfig.hwAccel || (hwEncoder.includes('nvenc') ? 'nvenc' : hwEncoder.includes('amf') ? 'amf' : hwEncoder.includes('qsv') ? 'qsv' : 'cpu');
   const isLiveSrc = src.type === 'http';
   // For file sources: ALWAYS transcode — copy mode breaks HLS timestamps and causes playback issues.
   // For live HTTP sources: copy is handled by the live proxy endpoint; here we still transcode.
@@ -1156,12 +1157,20 @@ module.exports = function mountStreamForge(app, orion) {
     customAiUrl:'', customAiKey:'', customAiModel:'',
   }, loadJson(SF_CFG, {}));
 
-  // Auto-fill hardware from Orion's detection
-  if (hwEncoder && hwEncoder !== 'libx264') {
-    if (hwEncoder.includes('amf'))   sfConfig.hwAccel = 'amf';
-    else if (hwEncoder.includes('nvenc')) sfConfig.hwAccel = 'nvenc';
-    else if (hwEncoder.includes('qsv'))   sfConfig.hwAccel = 'qsv';
+  // Auto-fill hardware from Orion's detection — also re-check after 5s in case detection wasn't done yet
+  function applyHwEncoder() {
+    if (hwEncoder && hwEncoder !== 'libx264') {
+      if (hwEncoder.includes('amf'))        sfConfig.hwAccel = 'amf';
+      else if (hwEncoder.includes('nvenc')) sfConfig.hwAccel = 'nvenc';
+      else if (hwEncoder.includes('qsv'))   sfConfig.hwAccel = 'qsv';
+      console.log(`[SF] hwAccel set to: ${sfConfig.hwAccel} from encoder: ${hwEncoder}`);
+    }
   }
+  applyHwEncoder();
+  setTimeout(() => {
+    hwEncoder = orion.getEncoder ? orion.getEncoder() : hwEncoder;
+    applyHwEncoder();
+  }, 5000);
 
   rebuildSfIndexes();
   sfDb = {
