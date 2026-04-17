@@ -382,7 +382,14 @@ function getPlayoutNow(ch, nowMs) {
 
     // Total duration of this season (loop within the day)
     const seasonDurMs = seasonEps.reduce((s, ep) => {
-      const item = getMediaById(ep.mediaId);
+      let item = getMediaById(ep.mediaId);
+      if (!item && ep.season != null && ep.episode != null) {
+        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase();
+        item = getMediaCombined().find(m =>
+          m.season === ep.season && m.episode === ep.episode &&
+          (m.seriesTitle||m.showName||m.title||'').toLowerCase().includes(showTitle)
+        );
+      }
       return s + ((item?.duration || ep.duration || 1800) * 1000);
     }, 0);
     if (!seasonDurMs) return null;
@@ -390,7 +397,15 @@ function getPlayoutNow(ch, nowMs) {
     const timeInCycle = timeInDay % seasonDurMs;
     let cursor = 0;
     for (const ep of seasonEps) {
-      const item = getMediaById(ep.mediaId);
+      let item = getMediaById(ep.mediaId);
+      // Fallback: find by show title + season + episode if ID changed after DB rebuild
+      if (!item && ep.season != null && ep.episode != null) {
+        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase();
+        item = getMediaCombined().find(m =>
+          m.season === ep.season && m.episode === ep.episode &&
+          (m.seriesTitle||m.showName||m.title||'').toLowerCase().includes(showTitle)
+        );
+      }
       const dur = (item?.duration || ep.duration || 1800) * 1000;
       if (timeInCycle < cursor + dur) {
         const loopStart = dayStart + Math.floor(timeInDay / seasonDurMs) * seasonDurMs;
