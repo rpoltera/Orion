@@ -153,7 +153,7 @@ User=orion
 WorkingDirectory=${ORION_DIR}
 EnvironmentFile=/etc/default/orion
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/node server/index.js
+ExecStart=/usr/bin/node --max-old-space-size=8192 server/index.js
 Restart=always
 RestartSec=10
 StandardOutput=journal
