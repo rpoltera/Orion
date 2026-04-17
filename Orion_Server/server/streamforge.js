@@ -503,7 +503,18 @@ function getPlayoutNow(ch, nowMs) {
     if (block.streamId) { const stream = getSfStream(block.streamId); const dur=(block.duration||3600)*1000; if (elapsed < cursor+dur) { const st = anchor+Math.floor((nowMs-anchor)/(totalDuration*1000))*totalDuration*1000+cursor; return { item:null, stream, block, offsetSeconds:0, startTime:st, endTime:st+dur, isLive:true }; } cursor+=dur; continue; }
     let item = getMediaById(block.mediaId);
     // Fallback: search by title if ID lookup fails (IDs can change after DB rebuild)
-    if (!item && block.title) { item = getMediaCombined().find(m => (m.episodeTitle||m.title) === block.title); }
+    if (!item && block.title) {
+      const bt = block.title.toLowerCase();
+      // Try exact episode/movie title match first
+      item = getMediaCombined().find(m => (m.episodeTitle||m.title||'').toLowerCase() === bt);
+      // Then try series title match — picks first episode of matching show
+      if (!item) item = getMediaCombined().find(m => (m.seriesTitle||m.showName||m.series||'').toLowerCase() === bt);
+      // Then try partial match
+      if (!item) item = getMediaCombined().find(m =>
+        (m.title||'').toLowerCase().includes(bt) ||
+        (m.seriesTitle||m.showName||'').toLowerCase().includes(bt)
+      );
+    }
     if (!item) { cursor += 1800*1000; continue; }
     const dur = (item.duration||1800)*1000;
     if (elapsed < cursor+dur) { const ofs=Math.floor((elapsed-cursor)/1000); const st=anchor+Math.floor((nowMs-anchor)/(totalDuration*1000))*totalDuration*1000+cursor; return { item, block, offsetSeconds:ofs, startTime:st, endTime:st+dur }; }
@@ -1165,6 +1176,23 @@ module.exports = function mountStreamForge(app, orion) {
   console.log(`[SF] Using ffmpeg: ${ffmpegExe}`);
   console.log(`[SF] Hardware encoder: ${hwEncoder}`);
 
+  // Pre-buffer all channels on startup so playback is instant (like Plex)
+  // Delay 15s to let Orion DB and library fully load first
+  setTimeout(() => {
+    const channels = sfDb.channels || [];
+    let started = 0;
+    channels.forEach((ch, i) => {
+      // Stagger starts by 2s each to avoid GPU/NAS overload
+      setTimeout(() => {
+        if (!hlsSessions[ch.id]) {
+          const s = startHlsSession(ch, { keepAlive: true });
+          if (s) { started++; console.log(`[SF/Prebuffer] Pre-buffered "${ch.name}" (${started}/${channels.length})`); }
+        }
+      }, i * 2000);
+    });
+    console.log(`[SF/Prebuffer] Pre-buffering ${channels.length} channels...`);
+  }, 15000);
+
   const multerUpload = multer({ dest: path.join(SF_DIR,'uploads'), limits:{fileSize:Infinity} });
 
   // ── Status ──────────────────────────────────────────────────────────────────
@@ -1457,7 +1485,12 @@ module.exports = function mountStreamForge(app, orion) {
       existing.lastRequest = Date.now();
       return res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8`, reused:true });
     }
-    const session = startHlsSession(ch, { keepAlive: false });
+    // If pre-buffered session already running, reuse it immediately — instant start
+    if (hlsSessions[ch.id]) {
+      hlsSessions[ch.id].lastRequest = Date.now();
+      return res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8`, reused:true });
+    }
+    const session = startHlsSession(ch, { keepAlive: true });
     if (!session) return res.status(404).json({ error:'Nothing scheduled on this channel' });
     res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8` });
   });
