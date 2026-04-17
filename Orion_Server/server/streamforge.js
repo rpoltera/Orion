@@ -688,7 +688,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   const maxBitrate = sfConfig.videoMaxBitrate || '8M';
   const bufSize    = sfConfig.videoBufferSize || '8M';
   const crf = String(sfConfig.videoCrf || 23);
-  const res = quickStart ? '854x480' : (sfConfig.videoResolution || null);
+  const res = quickStart ? '854x480' : getAdaptiveResolution();
   const scaleFilter = res && res !== 'source'
     ? (() => { const [w, h] = res.split('x'); return `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`; })()
     : null;
@@ -865,6 +865,32 @@ function startHlsSession(ch, opts={}) {
     }
   });
   return session;
+}
+
+// Adaptive quality monitor — runs every 30s, drops resolution if too many sessions are crashing
+let _adaptiveLevel = 0; // 0=max, 1=720p, 2=480p
+const RESOLUTION_TIERS = ['', '1280x720', '854x480'];
+setInterval(() => {
+  if (!sfConfig.adaptiveQuality) { _adaptiveLevel = 0; return; }
+  const activeSessions = Object.keys(hlsSessions).length;
+  const gpuCount = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
+  const load = activeSessions / (gpuCount * 3); // load factor
+  if (load > 0.9 && _adaptiveLevel < 2) {
+    _adaptiveLevel++;
+    const res = RESOLUTION_TIERS[_adaptiveLevel];
+    console.log(`[SF/Adaptive] High load (${activeSessions} sessions) — dropping to ${res || 'source'}`);
+  } else if (load < 0.5 && _adaptiveLevel > 0) {
+    _adaptiveLevel--;
+    const res = RESOLUTION_TIERS[_adaptiveLevel] || sfConfig.maxResolution || 'source';
+    console.log(`[SF/Adaptive] Load normal — restoring to ${res}`);
+  }
+}, 30000);
+
+function getAdaptiveResolution() {
+  if (!sfConfig.adaptiveQuality) return sfConfig.videoResolution || null;
+  const override = RESOLUTION_TIERS[_adaptiveLevel];
+  if (override) return override;
+  return sfConfig.maxResolution || sfConfig.videoResolution || null;
 }
 
 setInterval(() => {
@@ -1194,7 +1220,7 @@ module.exports = function mountStreamForge(app, orion) {
     epgDaysAhead: 7, xcUser:'streamforge', xcPass:'streamforge',
     videoCodec:'h264', videoProfile:'h264', videoBitrate:'4M', videoMaxBitrate:'8M', videoBufferSize:'8M',
     videoCrf:'23', audioCodec:'aac', audioBitrate:'192k', audioChannels:2, audioLanguage:'eng',
-    hlsSegmentSeconds:6, hlsListSize:20, gpuCount:1, hwDecode:false, hlsIdleTimeoutSecs:60, prebufferMode:'library',
+    hlsSegmentSeconds:6, hlsListSize:20, gpuCount:1, hwDecode:false, hlsIdleTimeoutSecs:60, prebufferMode:'library', adaptiveQuality:false, maxResolution:'1920x1080',
     aiProvider:'anthropic', anthropicApiKey:'', openaiApiKey:'', openaiModel:'gpt-4o',
     ollamaUrl:'http://localhost:11434/v1', ollamaModel:'llama3.2',
     openwebUIUrl:'', openwebUIKey:'', openwebUIModel:'',
@@ -1284,7 +1310,7 @@ module.exports = function mountStreamForge(app, orion) {
   // ── Config ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/config', (req, res) => res.json(sfConfig));
   app.put('/api/sf/config', (req, res) => {
-    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
+    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
     allowed.forEach(k => { if (req.body[k] !== undefined) sfConfig[k] = req.body[k]; });
     saveJson(SF_CFG, sfConfig); res.json({ ok:true });
   });
