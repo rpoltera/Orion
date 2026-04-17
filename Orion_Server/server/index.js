@@ -338,8 +338,9 @@ async function start() {
         : path.join(PATHS.DATA_DIR, 'sf');
       require('./streamforge')(app, {
         ffmpegPath:  process.platform !== 'win32' ? '/usr/bin/ffmpeg' : (ffmpegStatic || 'ffmpeg'),
-        ffprobePath: fs.existsSync(ffprobePath) ? ffprobePath : 'ffprobe',
+        ffprobePath: process.platform !== 'win32' ? '/usr/bin/ffprobe' : (fs.existsSync(ffprobePath) ? ffprobePath : 'ffprobe'),
         hwEncoder:   cachedEncoder || 'libx264',
+        getEncoder:  () => cachedEncoder || 'libx264',
         DATA_DIR:    sfDataDir,
         orionDb:     db,
       });
