@@ -17,7 +17,7 @@ apt-get update -qq && apt-get upgrade -y -qq
 msg_ok "System updated"
 
 msg_info "Installing system dependencies..."
-apt-get install -y -qq curl wget git build-essential ffmpeg cifs-utils ca-certificates gnupg python3 sqlite3 unzip
+apt-get install -y -qq curl wget git build-essential ffmpeg cifs-utils ca-certificates gnupg python3 sqlite3 unzip zstd
 msg_ok "Dependencies installed"
 
 msg_info "Installing Node.js 20..."
