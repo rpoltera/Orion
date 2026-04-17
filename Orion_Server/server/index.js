@@ -1016,8 +1016,10 @@ password=${password||''}
     app.get('*', (req, res) => { if (!req.path.startsWith('/api')) res.sendFile(path.join(buildPath, 'index.html')); });
   }
 
-  // Hardware detection (background)
-  detectHardwareAccel().then(enc => { cachedEncoder = enc; console.log('[Server] Hardware encoder:', enc); });
+  // Hardware detection (background) — delay to let NVIDIA drivers initialize
+  setTimeout(() => {
+    detectHardwareAccel().then(enc => { cachedEncoder = enc; console.log('[Server] Hardware encoder:', enc); });
+  }, 3000);
 
   // Queue missing metadata
   setTimeout(async () => {
