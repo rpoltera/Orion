@@ -143,19 +143,26 @@ module.exports = function settingsRoutes({ db, io, getConfig, getSettings, updat
 
   // ── Local AI (Ollama) proxy ───────────────────────────────────────────────────
   router.post('/ai/install-ollama', (req, res) => {
-    if (process.platform === 'win32') return res.status(400).json({ error: 'Ollama installation is only supported on Linux.' });
     const { spawn } = require('child_process');
+    const isWin = process.platform === 'win32';
     res.setHeader('Content-Type', 'text/plain');
     res.setHeader('Transfer-Encoding', 'chunked');
     res.setHeader('Cache-Control', 'no-cache');
-    res.write('Starting Ollama installation...\n');
-    const proc = spawn('bash', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    res.write(`Starting Ollama installation on ${isWin ? 'Windows' : 'Linux'}...\n`);
+    let proc;
+    if (isWin) {
+      // Windows: download and run the official installer silently
+      const cmd = 'powershell -Command "& { Invoke-WebRequest -Uri https://ollama.com/download/OllamaSetup.exe -OutFile $env:TEMP\\OllamaSetup.exe; Start-Process $env:TEMP\\OllamaSetup.exe -ArgumentList \'/silent\' -Wait; Write-Host \'Done\' }"';
+      proc = spawn('cmd', ['/c', cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } else {
+      proc = spawn('bash', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    }
     proc.stdout.on('data', d => res.write(d.toString()));
     proc.stderr.on('data', d => res.write(d.toString()));
     proc.on('close', code => {
       if (code === 0) {
         res.write('\n✅ Ollama installed successfully!\n');
-        spawn('systemctl', ['enable', '--now', 'ollama'], { stdio: 'ignore' });
+        if (!isWin) spawn('systemctl', ['enable', '--now', 'ollama'], { stdio: 'ignore' });
       } else {
         res.write(`\n❌ Installation failed with code ${code}\n`);
       }
