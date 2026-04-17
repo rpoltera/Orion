@@ -336,7 +336,7 @@ async function start() {
         ? cfg.sfDataDir.trim()
         : path.join(PATHS.DATA_DIR, 'sf');
       require('./streamforge')(app, {
-        ffmpegPath:  ffmpegStatic || 'ffmpeg',
+        ffmpegPath:  process.platform !== 'win32' ? (require('child_process').execSync('which ffmpeg').toString().trim() || ffmpegStatic || 'ffmpeg') : (ffmpegStatic || 'ffmpeg'),
         ffprobePath: fs.existsSync(ffprobePath) ? ffprobePath : 'ffprobe',
         hwEncoder:   cachedEncoder || 'libx264',
         DATA_DIR:    sfDataDir,
