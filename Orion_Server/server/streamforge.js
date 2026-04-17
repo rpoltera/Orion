@@ -826,7 +826,7 @@ function startHlsSession(ch, opts={}) {
       if (crashes >= 10) {
         console.error(`[SF/HLS] "${channelId}" crashed ${crashes} times — giving up`);
       } else {
-        const restartDelay = isError ? Math.min(5000 * Math.pow(2, crashes), 60000) : 1000;
+        const restartDelay = isError ? Math.min(10000 * Math.pow(2, crashes), 300000) : 2000; // longer backoff for dead streams
         setTimeout(() => {
           const stillCh = sfDb.channels.find(c=>c.id===channelId);
           if (stillCh && !hlsSessions[channelId]) {
