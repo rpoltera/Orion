@@ -571,7 +571,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     console.log(`[SF/HLS] Overriding copy→h264 for file source (copy breaks HLS timestamps)`);
   }
   const vProfile = sfConfig.videoProfile || 'h264'; // h264 or hevc
-  const segSeconds = sfConfig.hlsSegmentSeconds || 2;
+  const segSeconds = sfConfig.hlsSegmentSeconds || 1;
   const args = [];
 
   if (isLiveSrc) {
@@ -715,6 +715,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       '-hls_segment_type', 'mpegts',
       '-hls_allow_cache', '0',
       '-flush_packets', '1',
+      '-hls_init_time', '0',
       '-hls_segment_filename', path.join(hlsDir, 'seg%05d.ts'),
       path.join(hlsDir, 'index.m3u8'));
   } else {
@@ -1177,21 +1178,25 @@ module.exports = function mountStreamForge(app, orion) {
   console.log(`[SF] Hardware encoder: ${hwEncoder}`);
 
   // Pre-buffer all channels on startup so playback is instant (like Plex)
-  // Delay 15s to let Orion DB and library fully load first
-  setTimeout(() => {
+  // Delay 12s to let Orion DB and library fully load first
+  setTimeout(async () => {
     const channels = sfDb.channels || [];
-    let started = 0;
-    channels.forEach((ch, i) => {
-      // Stagger starts by 2s each to avoid GPU/NAS overload
-      setTimeout(() => {
+    if (!channels.length) return;
+    const gpuCount = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
+    const BATCH = gpuCount * 2; // start 2 channels per GPU at a time
+    console.log(`[SF/Prebuffer] Pre-buffering ${channels.length} channels in batches of ${BATCH}...`);
+    for (let i = 0; i < channels.length; i += BATCH) {
+      const batch = channels.slice(i, i + BATCH);
+      batch.forEach(ch => {
         if (!hlsSessions[ch.id]) {
-          const s = startHlsSession(ch, { keepAlive: true });
-          if (s) { started++; console.log(`[SF/Prebuffer] Pre-buffered "${ch.name}" (${started}/${channels.length})`); }
+          startHlsSession(ch, { keepAlive: true });
         }
-      }, i * 2000);
-    });
-    console.log(`[SF/Prebuffer] Pre-buffering ${channels.length} channels...`);
-  }, 15000);
+      });
+      // 500ms between batches — just enough to not overload GPU init
+      if (i + BATCH < channels.length) await new Promise(r => setTimeout(r, 500));
+    }
+    console.log(`[SF/Prebuffer] All ${channels.length} channels pre-buffered`);
+  }, 12000);
 
   const multerUpload = multer({ dest: path.join(SF_DIR,'uploads'), limits:{fileSize:Infinity} });
 
@@ -1516,8 +1521,8 @@ module.exports = function mountStreamForge(app, orion) {
     let waited = 0;
     const tryServe = () => {
       if (fs.existsSync(m3u8)) { res.setHeader('Content-Type','application/vnd.apple.mpegurl'); res.setHeader('Cache-Control','no-cache'); res.setHeader('Access-Control-Allow-Origin','*'); return res.sendFile(m3u8); }
-      waited+=100; if(waited>8000) return res.status(503).send('HLS not ready — startup timeout');
-      setTimeout(tryServe, 100);
+      waited+=50; if(waited>5000) return res.status(503).send('HLS not ready — startup timeout');
+      setTimeout(tryServe, 50);
     };
     tryServe();
   });
