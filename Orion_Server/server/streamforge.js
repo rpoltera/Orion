@@ -595,7 +595,6 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     args.push('-re');
   } else {
     args.push('-probesize', '200000', '-analyzeduration', '200000');
-    args.push('-readrate', '2.0');
   }
 
   // Hardware decode (optional, off by default)
