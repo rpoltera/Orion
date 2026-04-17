@@ -176,8 +176,8 @@ function Dashboard({ call, onTabChange }) {
         <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius-lg)',padding:20 }}>
           <div style={{ fontWeight:700,fontSize:14,marginBottom:16 }}>🔗 Output URLs</div>
           {[
-            { label:'M3U Playlist', url:`http://${window.location.hostname}:3001/sf/iptv.m3u` },
-            { label:'XMLTV EPG',    url:`http://${window.location.hostname}:3001/sf/xmltv.xml` },
+            { label:'M3U Playlist', url:'http://localhost:3001/sf/iptv.m3u' },
+            { label:'XMLTV EPG',    url:'http://localhost:3001/sf/xmltv.xml' },
           ].map(u=>(
             <div key={u.label} style={{ marginBottom:14 }}>
               <div style={{ fontSize:11,color:'var(--text-muted)',fontWeight:700,letterSpacing:0.5,marginBottom:4 }}>{u.label}</div>
@@ -2010,7 +2010,21 @@ function Watch({ call, initialChannelId }) {
         }
 
         if (window.Hls && window.Hls.isSupported()) {
-          const hls = new window.Hls({ lowLatencyMode: false });
+          const hls = new window.Hls({
+            lowLatencyMode: false,
+            liveSyncDurationCount: 3,        // stay 3 segments behind live edge
+            liveMaxLatencyDurationCount: 10, // max 10 segments behind before jumping
+            maxBufferLength: 30,             // buffer up to 30s
+            maxBufferSize: 60 * 1000 * 1000, // 60MB buffer
+            maxMaxBufferLength: 60,
+            backBufferLength: 30,            // keep 30s of back buffer
+            manifestLoadingTimeOut: 10000,
+            manifestLoadingMaxRetry: 3,
+            fragLoadingTimeOut: 10000,
+            fragLoadingMaxRetry: 3,
+            levelLoadingTimeOut: 10000,
+            levelLoadingMaxRetry: 3,
+          });
           hlsRef.current = hls;
           hls.loadSource(hlsUrl);
           hls.attachMedia(video);
