@@ -886,7 +886,6 @@ async function callAI(systemPrompt, userMessage, { retries = 2 } = {}) {
         temperature:0.3,
         max_tokens:2048,
         stream: false,  // CRITICAL: prevent Ollama returning streaming NDJSON
-        options: { num_ctx: 8192 }, // Request larger context window from Ollama
       }),
     });
     // Read body as text first to handle any encoding issues
