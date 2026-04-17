@@ -1947,7 +1947,7 @@ function Watch({ call, initialChannelId }) {
         const hasContent = np && np.title && np.title !== 'Nothing scheduled';
         return { ...ch, nowPlaying: hasContent ? np : null };
       });
-      setChannels(withNp);
+      setChannels(withNp.sort((a,b)=>(a.num||0)-(b.num||0)));
     } catch {}
   }, [call]);
 
@@ -2089,7 +2089,14 @@ function Watch({ call, initialChannelId }) {
 
       {/* ── Channel list ── */}
       <div style={{ borderRight:'1px solid rgba(255,255,255,0.06)', overflowY:'auto', background:'#0d0d14' }}>
-        <div style={{ padding:'14px 16px', borderBottom:'1px solid rgba(255,255,255,0.06)', fontSize:11, fontWeight:700, color:'var(--text-muted)', letterSpacing:1.5 }}>CHANNELS</div>
+        <div style={{ padding:'10px 16px', borderBottom:'1px solid rgba(255,255,255,0.06)', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+          <span style={{ fontSize:11, fontWeight:700, color:'var(--text-muted)', letterSpacing:1.5 }}>CHANNELS</span>
+          <button onClick={() => setChannels(prev => [...prev].sort((a,b)=>(a.num||0)-(b.num||0)))}
+            title="Sort by channel number"
+            style={{ background:'none', border:'none', color:'var(--text-muted)', cursor:'pointer', fontSize:11, padding:'2px 6px', borderRadius:4 }}>
+            # ↑
+          </button>
+        </div>
         {channels.length === 0 && <div style={{ padding:24, color:'var(--text-muted)', fontSize:13, textAlign:'center' }}>No channels yet</div>}
         {channels.map(ch => (
           <div key={ch.id}
