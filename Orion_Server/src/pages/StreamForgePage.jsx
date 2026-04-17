@@ -2012,18 +2012,21 @@ function Watch({ call, initialChannelId }) {
         if (window.Hls && window.Hls.isSupported()) {
           const hls = new window.Hls({
             lowLatencyMode: false,
-            liveSyncDurationCount: 3,        // stay 3 segments behind live edge
-            liveMaxLatencyDurationCount: 10, // max 10 segments behind before jumping
-            maxBufferLength: 30,             // buffer up to 30s
-            maxBufferSize: 60 * 1000 * 1000, // 60MB buffer
-            maxMaxBufferLength: 60,
-            backBufferLength: 30,            // keep 30s of back buffer
-            manifestLoadingTimeOut: 10000,
-            manifestLoadingMaxRetry: 3,
-            fragLoadingTimeOut: 10000,
-            fragLoadingMaxRetry: 3,
-            levelLoadingTimeOut: 10000,
-            levelLoadingMaxRetry: 3,
+            liveSyncDurationCount: 4,        // stay 4 segments (8s) behind live edge
+            liveMaxLatencyDurationCount: 12, // jump forward if >24s behind
+            maxBufferLength: 60,             // buffer up to 60s
+            maxBufferSize: 120 * 1000 * 1000,// 120MB buffer
+            maxMaxBufferLength: 120,
+            backBufferLength: 60,            // keep 60s of back buffer
+            enableWorker: true,
+            manifestLoadingTimeOut: 15000,
+            manifestLoadingMaxRetry: 5,
+            fragLoadingTimeOut: 15000,
+            fragLoadingMaxRetry: 5,
+            levelLoadingTimeOut: 15000,
+            levelLoadingMaxRetry: 5,
+            startPosition: -1,               // start at live edge
+            nudgeMaxRetry: 5,
           });
           hlsRef.current = hls;
           hls.loadSource(hlsUrl);
