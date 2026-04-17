@@ -254,6 +254,7 @@ async function start() {
             saveDB(true, libType);
             queueMetadata(newItems, libType);
             io.emit('library:updated', { type: libType, count: newItems.length });
+            if (global._sfInvalidateMedia) global._sfInvalidateMedia(); // refresh SF media cache
           }
         } catch(e) { console.error(`[Scheduler] scan ${libType} error:`, e.message); }
       }
@@ -328,6 +329,8 @@ async function start() {
   try {
     const sfFile = path.join(__dirname, 'streamforge.js');
     if (fs.existsSync(sfFile)) {
+      // Expose invalidateMediaCache so scanner can call it after scans
+      global._sfInvalidateMedia = () => { try { require('./streamforge').invalidateMediaCache(); } catch {} };
       const ffprobePath = ffmpegStatic
         ? path.join(path.dirname(ffmpegStatic), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe')
         : 'ffprobe';

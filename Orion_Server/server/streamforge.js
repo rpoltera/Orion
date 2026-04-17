@@ -1130,7 +1130,12 @@ function buildAIPrompt(epgChannelName, programs, showMap, movieList, userPrompt,
 
 
 // ── Module export — call with (app, { ffmpegPath, ffprobePath, hwEncoder, DATA_DIR }) ──
+// Export invalidateMediaCache so index.js can call it after library scans
+let _externalInvalidate = null;
+module.exports.invalidateMediaCache = () => { if (_externalInvalidate) _externalInvalidate(); };
+
 module.exports = function mountStreamForge(app, orion) {
+  _externalInvalidate = invalidateMediaCache;
   // Use system ffmpeg on Linux for NVENC/GPU support; ffmpeg-static on Windows
   if (process.platform !== 'win32') {
     try {
