@@ -136,8 +136,7 @@ export default function LocalAISettings({ API }) {
       {/* Connection */}
       <div style={card}>
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14 }}>🦙 Ollama Connection</div>
-        {!window.electron && (
-          <div style={{ marginBottom: 14, padding: '12px 14px', background: 'rgba(255,255,255,0.04)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+        <div style={{ marginBottom: 14, padding: '12px 14px', background: 'rgba(255,255,255,0.04)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
             <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>Install Ollama directly on this server:</div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <button style={btn({ background: '#ff6600', color: 'white' })} onClick={installOllama} disabled={installing}>
@@ -149,7 +148,6 @@ export default function LocalAISettings({ API }) {
               <pre style={{ marginTop: 10, padding: '10px 12px', background: 'rgba(0,0,0,0.3)', borderRadius: 'var(--radius)', fontSize: 11, color: '#10b981', maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{installLog}</pre>
             )}
           </div>
-        )}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
           <input style={{ ...inp, flex: 1 }} value={ollamaUrl} onChange={e => setOllamaUrl(e.target.value)}
             placeholder="http://localhost:11434" onKeyDown={e => e.key === 'Enter' && checkStatus()} />
