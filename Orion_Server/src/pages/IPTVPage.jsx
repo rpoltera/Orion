@@ -9,7 +9,7 @@ const SORT_OPTIONS = [
   { value: 'group-desc', label: 'Group Z–A' },
 ];
 
-const CONCURRENCY = 8;
+const CONCURRENCY = 3; // Reduced to avoid CPU spikes during playback
 
 const ENGLISH_COUNTRIES = new Set([
   'US','GB','CA','AU','NZ','IE','ZA','JM','TT','BB','GH','NG','KE','SG','PH','IN','PK','MY'
@@ -215,7 +215,7 @@ export default function IPTVPage() {
     const workers = Array.from({ length: CONCURRENCY }, async () => {
       while (queue.length > 0 && !scanAbortRef.current) {
         const ch = queue.shift();
-        if (ch) await checkOne(ch);
+        if (ch) { await checkOne(ch); await new Promise(r => setTimeout(r, 50)); } // 50ms pause between checks
       }
     });
     await Promise.all(workers);
