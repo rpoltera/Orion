@@ -598,9 +598,9 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   }
 
   // Hardware decode (optional, off by default)
-  // Enable hw decode by default for nvenc (P40 has dedicated decode engines)
+  // Disable hw decode for file sources — filter reinit errors when episodes change resolution
   const isNvenc = hw === 'nvenc' || hwEncoder.includes('nvenc');
-  const useHwDecode = (sfConfig.hwDecode !== false && isNvenc) && vCodec !== 'copy';
+  const useHwDecode = (sfConfig.hwDecode === true && isLiveSrc && isNvenc) && vCodec !== 'copy';
   if (useHwDecode) {
     if (hw === 'nvenc' || hwEncoder.includes('nvenc')) {
       args.push('-hwaccel', 'cuda', '-hwaccel_device', String(gpuId), '-hwaccel_output_format', 'cuda');
