@@ -46,27 +46,21 @@ function getNetworkIndex() {
   if (_networkIndex.size > 0) return _networkIndex;
   if (!orionDb) return _networkIndex;
   _networkIndex.clear();
-  // Build a fast id->mediaItem map first
-  const combined = getMediaCombined();
-  const byId = new Map(combined.map(m => [m.id, m]));
-  // Scan orionDb directly — O(n) not O(n²)
+  // Build directly from orionDb mapped to SF media format — same as getMediaCombined() but indexed by network
   for (const ep of (orionDb.tvShows||[])) {
-    if (!ep.network) continue;
-    const m = byId.get(ep.id);
-    if (!m) continue;
+    if (!ep.network || !ep.filePath) continue;
     const key = ep.network.toLowerCase();
     if (!_networkIndex.has(key)) _networkIndex.set(key, []);
-    _networkIndex.get(key).push(m);
+    _networkIndex.get(key).push({
+      id: ep.id, path: ep.filePath, filename: ep.fileName||'',
+      title: ep.title||'', seriesTitle: ep.seriesTitle||'',
+      season: ep.seasonNum||null, episode: ep.episode||null,
+      type: 'episode', duration: ep.runtime ? ep.runtime*60 : 1800,
+      thumb: ep.thumbnail||null, summary: ep.overview||'',
+      genres: ep.genres||[], libraryId: 'orion-tvShows', sourceType: 'orion',
+    });
   }
-  for (const mv of (orionDb.movies||[])) {
-    if (!mv.network) continue;
-    const m = byId.get(mv.id);
-    if (!m) continue;
-    const key = mv.network.toLowerCase();
-    if (!_networkIndex.has(key)) _networkIndex.set(key, []);
-    _networkIndex.get(key).push(m);
-  }
-  console.log(`[SF] Network index built: ${_networkIndex.size} networks`);
+  console.log(`[SF] Network index built: ${_networkIndex.size} networks, e.g. HGTV=${(_networkIndex.get('hgtv')||[]).length} items`);
   return _networkIndex;
 }
 
