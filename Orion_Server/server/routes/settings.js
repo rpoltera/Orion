@@ -6,7 +6,7 @@
 
 const express = require('express');
 
-module.exports = function settingsRoutes({ db, io, getConfig, getSettings, updateConfig, updateSettings, saveConfig, OrionDB, PATHS, detectHardwareAccel }) {
+module.exports = function settingsRoutes({ db, io, getConfig, getSettings, updateConfig, updateSettings, saveConfig, OrionDB, PATHS, detectHardwareAccel, resetEncoder }) {
   const router = express.Router();
 
   // ── Config ──────────────────────────────────────────────────────────────────
@@ -77,15 +77,15 @@ module.exports = function settingsRoutes({ db, io, getConfig, getSettings, updat
 
   // ── Hardware info ─────────────────────────────────────────────────────────────
   router.post('/hardware/detect', (_, res) => {
-    // Force re-detection by clearing cache
-    cachedEncoder = null;
+    // Force re-detection — resetEncoder clears the cache in index.js
+    if (typeof resetEncoder === 'function') resetEncoder();
     detectHardwareAccel().then(encoder => {
       const typeMap = {
         'h264_nvenc': 'NVIDIA NVENC (H.264)', 'h264_amf': 'AMD AMF (H.264)',
         'h264_qsv': 'Intel Quick Sync (H.264)', 'libx264': 'Software (H.264)',
       };
       res.json({ encoder, encoderName: typeMap[encoder] || encoder, detected: true });
-    });
+    }).catch(e => res.status(500).json({ error: e.message }));
   });
 
   router.get('/hardware', (_, res) => {
