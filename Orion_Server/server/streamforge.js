@@ -52,7 +52,7 @@ function getNetworkIndex() {
     const key = ep.network.toLowerCase();
     if (!_networkIndex.has(key)) _networkIndex.set(key, []);
     _networkIndex.get(key).push({
-      id: ep.id, path: ep.filePath, filename: ep.fileName||'',
+      id: ep.id, path: ep.filePath, filePath: ep.filePath, filename: ep.fileName||'',
       title: ep.title||'', seriesTitle: ep.seriesTitle||'',
       season: ep.seasonNum||null, episode: ep.episode||null,
       type: 'episode', duration: ep.runtime ? ep.runtime*60 : 1800,
@@ -790,7 +790,6 @@ function startHlsSession(ch, opts={}) {
       return null;
     }
     src = resolveSource(now.item);
-    console.log(`[SF/HLS] resolveSource: id=${now.item.id} path="${now.item.path}" src=${JSON.stringify(src)}`);
     if (!src) { console.warn(`[SF/HLS] resolveSource null for item id=${now.item.id} path="${now.item.path}"`); return null; }
     // Pre-check file exists on NAS before starting FFmpeg (avoids crash loop on missing files)
     if (src.type === 'file' && now.item.path) {
@@ -1237,17 +1236,19 @@ module.exports = function mountStreamForge(app, orion) {
     const channels = sfDb.channels || [];
     if (!channels.length) return;
     const gpuCount = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
-    const BATCH = gpuCount * 2; // start 2 channels per GPU at a time
+    const BATCH = gpuCount; // 1 channel per GPU — prevents CPU overload during pre-buffer
     console.log(`[SF/Prebuffer] Pre-buffering ${channels.length} channels in batches of ${BATCH}...`);
     for (let i = 0; i < channels.length; i += BATCH) {
       const batch = channels.slice(i, i + BATCH);
       batch.forEach(ch => {
-        if (!hlsSessions[ch.id]) {
+        // Only pre-buffer library-based channels (TV shows, movies, music)
+        // Skip live IPTV streams — they don't need pre-buffering and waste CPU
+        if (!hlsSessions[ch.id] && !ch.liveStreamId) {
           startHlsSession(ch, { keepAlive: true });
         }
       });
-      // 500ms between batches — just enough to not overload GPU init
-      if (i + BATCH < channels.length) await new Promise(r => setTimeout(r, 500));
+      // 2s between batches — lets GPU settle before starting next batch
+      if (i + BATCH < channels.length) await new Promise(r => setTimeout(r, 2000));
     }
     console.log(`[SF/Prebuffer] All ${channels.length} channels pre-buffered`);
   }, 12000);
@@ -1549,7 +1550,8 @@ module.exports = function mountStreamForge(app, orion) {
       hlsSessions[ch.id].lastRequest = Date.now();
       return res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8`, reused:true });
     }
-    const session = startHlsSession(ch, { keepAlive: true });
+    // Live IPTV streams don't need keepAlive — they start on demand
+    const session = startHlsSession(ch, { keepAlive: !ch.liveStreamId });
     if (!session) return res.status(404).json({ error:'Nothing scheduled on this channel' });
     res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8` });
   });
