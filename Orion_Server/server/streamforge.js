@@ -560,19 +560,21 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     console.log(`[SF/HLS] Overriding copy→h264 for file source (copy breaks HLS timestamps)`);
   }
   const vProfile = sfConfig.videoProfile || 'h264'; // h264 or hevc
-  const segSeconds = sfConfig.hlsSegmentSeconds || 6;
+  const segSeconds = sfConfig.hlsSegmentSeconds || 2;
   const args = [];
 
   if (isLiveSrc) {
-    args.push('-probesize', '500000', '-analyzeduration', '500000');
+    args.push('-probesize', '100000', '-analyzeduration', '100000');
     args.push('-re');
   } else {
-    args.push('-probesize', '1000000', '-analyzeduration', '1000000');
-    args.push('-readrate', '1.5');
+    args.push('-probesize', '200000', '-analyzeduration', '200000');
+    args.push('-readrate', '2.0');
   }
 
   // Hardware decode (optional, off by default)
-  const useHwDecode = sfConfig.hwDecode && vCodec !== 'copy';
+  // Enable hw decode by default for nvenc (P40 has dedicated decode engines)
+  const isNvenc = hw === 'nvenc' || hwEncoder.includes('nvenc');
+  const useHwDecode = (sfConfig.hwDecode !== false && isNvenc) && vCodec !== 'copy';
   if (useHwDecode) {
     if (hw === 'nvenc' || hwEncoder.includes('nvenc')) {
       args.push('-hwaccel', 'cuda', '-hwaccel_device', String(gpuId), '-hwaccel_output_format', 'cuda');
@@ -588,7 +590,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   }
 
   // Single -fflags combining all needed flags — duplicate -fflags causes FFmpeg to crash
-  const fflags = isLiveSrc ? '+genpts+discardcorrupt+nobuffer' : '+genpts+discardcorrupt';
+  const fflags = isLiveSrc ? '+genpts+discardcorrupt+nobuffer+fastseek' : '+genpts+discardcorrupt+fastseek';
   args.push('-fflags', fflags, '-err_detect', 'ignore_err');
   if (!isLiveSrc && offsetSeconds > 10) {
     // Two-pass seek: fast keyframe seek to near target, then short decode-seek
@@ -619,10 +621,10 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       '-re', '-i', src.value,
       '-map','0:v:0','-map','0:a:0?',
       '-vcodec','copy',
-      '-acodec','aac','-b:a','192k','-ac','2',
+      '-acodec','copy',
       '-avoid_negative_ts','make_zero',
       '-f','hls',
-      '-hls_time','4','-hls_list_size','30',
+      '-hls_time','2','-hls_list_size','10',
       '-hls_flags','delete_segments+omit_endlist',
       '-hls_allow_cache','0',
       '-hls_segment_filename',path.join(hlsDir,'seg%05d.ts'),
@@ -647,9 +649,10 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     args.push('-vcodec', 'copy', '-bsf:v', 'h264_mp4toannexb');
   } else if (vCodec === 'libx264') {
     // Software fallback — ultrafast preset for minimal startup delay
-    args.push('-vcodec', 'libx264', '-crf', '26', '-preset', 'ultrafast', '-maxrate', maxBitrate, '-bufsize', bufSize);
+    args.push('-vcodec', 'libx264', '-crf', '26', '-preset', 'ultrafast', '-tune', 'zerolatency',
+      '-maxrate', maxBitrate, '-bufsize', bufSize, '-threads', '0');
     if (scaleFilter) args.push('-vf', scaleFilter);
-    args.push('-g', '30', '-threads', '0');
+    args.push('-g', '48', '-keyint_min', '48');
   } else if (hw === 'amf' || hwEncoder.includes('amf')) {
     const enc = vProfile === 'hevc' ? 'hevc_amf' : 'h264_amf';
     if (scaleFilter) args.push('-vf', `${scaleFilter},format=yuv420p`); else args.push('-pix_fmt', 'yuv420p');
@@ -667,12 +670,14 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     }
     args.push('-vcodec', enc,
       '-gpu', String(gpuId),              // which P40 to use
-      '-preset', 'p2',                    // fast encode (p1=fastest, p7=slowest)
-      '-tune', 'hq',                      // quality tuning
+      '-preset', 'p1',                    // p1=absolute fastest NVENC preset
+      '-tune', 'ull',                     // ultra low latency tuning
       '-rc:v', 'vbr',
       '-cq:v', crf,
       '-b:v', bitrate, '-maxrate:v', maxBitrate, '-bufsize:v', bufSize,
-      '-g', String(gopSize), '-keyint_min', String(gopSize), '-sc_threshold', '0',
+      '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
+      '-zerolatency', '1',               // reduce encoder buffer delay
+      '-threads', '0',                   // auto-thread
       '-force_key_frames', forceKf);
     if (vProfile === 'hevc') args.push('-tag:v', 'hvc1'); // Apple/Plex compat
   } else {
@@ -691,12 +696,14 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   if (outputFormat === 'hls') {
     // Live streams use 2s segments so m3u8 appears within 2s instead of 6s
     const segTime = String(isLiveSrc ? Math.min(segSeconds, 2) : segSeconds);
-    const listSz = String(sfConfig.hlsListSize || 20); // 20 × 6s = 120s of buffer
+    const listSz = String(sfConfig.hlsListSize || 10); // 10 × 2s = 20s of rolling buffer
     args.push('-f', 'hls',
       '-hls_time', segTime,
       '-hls_list_size', listSz,
       '-hls_flags', 'delete_segments+append_list+independent_segments',
       '-hls_segment_type', 'mpegts',
+      '-hls_allow_cache', '0',
+      '-flush_packets', '1',
       '-hls_segment_filename', path.join(hlsDir, 'seg%05d.ts'),
       path.join(hlsDir, 'index.m3u8'));
   } else {
@@ -813,7 +820,7 @@ setInterval(() => {
     if (sess.keepAlive) return; // never idle-kill always-on channels
     if(now-sess.lastRequest>idleMs) { try{sess.proc.kill('SIGKILL');}catch{} delete hlsSessions[id]; }
   });
-}, 10000);
+}, 5000);
 
 // ── Fetch helper (uses built-in https/http since node-fetch may not be present) ─
 function fetchUrl(url, opts={}) {
@@ -1098,8 +1105,17 @@ function buildAIPrompt(epgChannelName, programs, showMap, movieList, userPrompt,
 
 // ── Module export — call with (app, { ffmpegPath, ffprobePath, hwEncoder, DATA_DIR }) ──
 module.exports = function mountStreamForge(app, orion) {
-  ffmpegExe  = orion.ffmpegPath  || 'ffmpeg';
-  ffprobeExe = orion.ffprobePath || 'ffprobe';
+  // Use system ffmpeg on Linux for NVENC/GPU support; ffmpeg-static on Windows
+  if (process.platform !== 'win32') {
+    try {
+      const { execSync: es } = require('child_process');
+      ffmpegExe  = es('which ffmpeg').toString().trim()  || orion.ffmpegPath  || 'ffmpeg';
+      ffprobeExe = es('which ffprobe').toString().trim() || orion.ffprobePath || 'ffprobe';
+    } catch { ffmpegExe = orion.ffmpegPath || 'ffmpeg'; ffprobeExe = orion.ffprobePath || 'ffprobe'; }
+  } else {
+    ffmpegExe  = orion.ffmpegPath  || 'ffmpeg';
+    ffprobeExe = orion.ffprobePath || 'ffprobe';
+  }
   hwEncoder  = orion.hwEncoder   || 'libx264';
   orionDb    = orion.orionDb     || null;
 
@@ -1435,10 +1451,12 @@ module.exports = function mountStreamForge(app, orion) {
   app.post('/api/sf/channels/:id/watch', (req, res) => {
     const ch = sfDb.channels.find(c=>c.id===req.params.id);
     if (!ch) return res.status(404).json({ error:'not found' });
-    // Always restart at the correct current offset — this is what makes channels
-    // behave like live TV (10 min into a show at 7:40 regardless of when server started)
+    // Reuse existing session if already running — avoids restart delay
     const existing = hlsSessions[req.params.id];
-    if (existing) { try { existing.proc.kill('SIGKILL'); } catch {} delete hlsSessions[req.params.id]; }
+    if (existing) {
+      existing.lastRequest = Date.now();
+      return res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8`, reused:true });
+    }
     const session = startHlsSession(ch, { keepAlive: false });
     if (!session) return res.status(404).json({ error:'Nothing scheduled on this channel' });
     res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8` });
@@ -1465,8 +1483,8 @@ module.exports = function mountStreamForge(app, orion) {
     let waited = 0;
     const tryServe = () => {
       if (fs.existsSync(m3u8)) { res.setHeader('Content-Type','application/vnd.apple.mpegurl'); res.setHeader('Cache-Control','no-cache'); res.setHeader('Access-Control-Allow-Origin','*'); return res.sendFile(m3u8); }
-      waited+=200; if(waited>20000) return res.status(503).send('HLS not ready — GPU startup timeout');
-      setTimeout(tryServe, 200);
+      waited+=100; if(waited>8000) return res.status(503).send('HLS not ready — startup timeout');
+      setTimeout(tryServe, 100);
     };
     tryServe();
   });
