@@ -659,14 +659,23 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       ], { timeout: 5000, encoding: 'utf8' });
       const fileDuration = parseFloat(probeResult.stdout);
       if (fileDuration > 0 && offsetSeconds >= fileDuration - 30) {
-        console.warn(`[SF/HLS] Offset ${offsetSeconds}s >= file duration ${Math.round(fileDuration)}s for "${src.value.split('/').pop()}" — recalculating with actual duration`);
-        // Replace the stored duration with actual file duration so next getPlayoutNow picks correct episode
-        if (ch) {
-          // Update the item duration in media cache so future calculations are correct
-          const cachedItem = _mediaById.get(now?.item?.id);
-          if (cachedItem) cachedItem.duration = Math.floor(fileDuration);
+        const actualDur = Math.floor(fileDuration);
+        console.warn(`[SF/HLS] Offset ${offsetSeconds}s >= file duration ${actualDur}s for "${src.value.split('/').pop()}" — updating duration cache`);
+        // Update media cache with actual duration
+        const cachedItem = _mediaById.get(now?.item?.id);
+        if (cachedItem) cachedItem.duration = actualDur;
+        // Update seriesSchedule episode duration in DB so future calculations are correct
+        if (ch?.seriesSchedule?.episodes && now?.item?.id) {
+          const ep = ch.seriesSchedule.episodes.find(e => e.mediaId === now.item.id);
+          if (ep && ep.duration > actualDur) {
+            ep.duration = actualDur;
+            // Persist to DB
+            const chIdx = sfDb.channels.findIndex(c => c.id === ch.id);
+            if (chIdx >= 0) { sfDb.channels[chIdx] = ch; saveAll(); }
+          }
         }
-        offsetSeconds = 0; // start from beginning as fallback
+        // Calculate corrected offset within actual file duration
+        offsetSeconds = offsetSeconds % actualDur;
       }
     } catch {}
   }
