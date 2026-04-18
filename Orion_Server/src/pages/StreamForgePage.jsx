@@ -1456,7 +1456,11 @@ function AIScheduler({ call }) {
   const [buildAllDone,setBuildAllDone]=useState(null); // final summary
 
   // Build mode
-  const [buildMode,setBuildMode]=useState('epg'); // 'epg' | 'network'
+  const [buildMode,setBuildMode]=useState('epg'); // 'epg' | 'network' | 'template'
+  const [templateNetworks,setTemplateNetworks]=useState('');
+  const [templatePrompt,setTemplatePrompt]=useState('Disney Channel schedule: morning animated cartoons, afternoon live action, prime time movies 7-10pm, late night animation. Each show gets ONE permanent time slot, rotate episodes in order.');
+  const [buildingTemplate,setBuildingTemplate]=useState(false);
+  const [templateResult,setTemplateResult]=useState(null);
   const [networkDesc,setNetworkDesc]=useState('');
   const [buildingNetwork,setBuildingNetwork]=useState(false);
   const [networkResults,setNetworkResults]=useState(null);
@@ -1671,6 +1675,7 @@ You can run again to continue where it left off.`)) return;
           <div style={{ display:'flex',gap:4,marginBottom:16,borderRadius:'var(--radius)',overflow:'hidden',border:'1px solid var(--border)',alignSelf:'flex-start',width:'fit-content' }}>
             <button onClick={()=>setBuildMode('epg')} style={{ padding:'8px 20px',background:buildMode==='epg'?'var(--accent)':'var(--bg-card)',color:buildMode==='epg'?'white':'var(--text-secondary)',border:'none',cursor:'pointer',fontSize:12,fontWeight:600 }}>📅 EPG Based</button>
             <button onClick={()=>setBuildMode('network')} style={{ padding:'8px 20px',background:buildMode==='network'?'var(--accent)':'var(--bg-card)',color:buildMode==='network'?'white':'var(--text-secondary)',border:'none',borderLeft:'1px solid var(--border)',cursor:'pointer',fontSize:12,fontWeight:600 }}>📡 Network Based</button>
+            <button onClick={()=>setBuildMode('template')} style={{ padding:'8px 20px',background:buildMode==='template'?'var(--accent)':'var(--bg-card)',color:buildMode==='template'?'white':'var(--text-secondary)',border:'none',borderLeft:'1px solid var(--border)',cursor:'pointer',fontSize:12,fontWeight:600 }}>📺 Channel Template</button>
           </div>
 
           {/* EPG Reference */}
@@ -1752,6 +1757,64 @@ You can run again to continue where it left off.`)) return;
                 {channels.filter(c=>!c.liveStreamId).map(c=><option key={c.id} value={c.id}>{c.num} — {c.name}</option>)}
               </select>
             </div>
+          </div>}
+
+          {/* Channel Template Build — ErsatzTV style */}
+          {buildMode==='template'&&<div style={card}>
+            <span style={sectionLabel}>Channel Template (ErsatzTV Style)</span>
+            <div style={{ fontSize:12,color:'var(--text-muted)',marginBottom:12,lineHeight:1.6 }}>
+              AI assigns each show a permanent time slot. Episodes play in order every day — just like ErsatzTV.
+              Movies rotate in prime time. Shows never repeat in the same day.
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ ...sectionLabel,marginBottom:5 }}>Networks to Include (comma separated)</label>
+              <input style={inp} value={templateNetworks} onChange={e=>setTemplateNetworks(e.target.value)}
+                placeholder="Disney Channel, Disney+, Disney XD"/>
+              <div style={{ fontSize:11,color:'var(--text-muted)',marginTop:4 }}>Leave blank to use all library content</div>
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ ...sectionLabel,marginBottom:5 }}>EPG Reference Channel (optional)</label>
+              <input type="text" style={inp} value={epgChannelId} onChange={e=>setEpgChannelId(e.target.value)}
+                placeholder="Use EPG channel ID for time slot reference"/>
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ ...sectionLabel,marginBottom:5 }}>Target Channel</label>
+              <select style={inp} value={targetCh} onChange={e=>setTargetCh(e.target.value)}>
+                <option value="">— Select a channel —</option>
+                {channels.filter(c=>!c.liveStreamId).map(c=><option key={c.id} value={c.id}>{c.num} — {c.name}</option>)}
+              </select>
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ ...sectionLabel,marginBottom:5 }}>Scheduling Instructions</label>
+              <textarea style={{ ...inp,minHeight:100,resize:'vertical' }} value={templatePrompt} onChange={e=>setTemplatePrompt(e.target.value)}/>
+            </div>
+            {templateResult&&<div style={{ marginBottom:12,padding:'12px 14px',background:'rgba(16,185,129,0.08)',border:'1px solid rgba(16,185,129,0.25)',borderRadius:'var(--radius)' }}>
+              <div style={{ fontWeight:700,fontSize:13,color:'#10b981',marginBottom:8 }}>✓ Template Built — {templateResult.slots?.length} time slots</div>
+              <div style={{ maxHeight:200,overflowY:'auto',display:'flex',flexDirection:'column',gap:3 }}>
+                {(templateResult.slots||[]).map((s,i)=>(
+                  <div key={i} style={{ fontSize:11,color:'var(--text-secondary)',display:'flex',gap:8 }}>
+                    <span style={{ color:'var(--accent)',fontWeight:700,minWidth:50 }}>{s.time}</span>
+                    <span>{s.showTitle}</span>
+                    <span style={{ color:'var(--text-muted)',fontSize:10 }}>({s.mediaType})</span>
+                  </div>
+                ))}
+              </div>
+            </div>}
+            <button disabled={buildingTemplate||!targetCh} onClick={async()=>{
+              setBuildingTemplate(true); setTemplateResult(null);
+              try {
+                const nets = templateNetworks.split(',').map(n=>n.trim()).filter(Boolean);
+                const r = await call('POST','/api/sf/ai/build-channel-template',{
+                  targetChannelId:targetCh, networks:nets.length?nets:null,
+                  epgChannelId:epgChannelId||null, date:schedDate, userPrompt:templatePrompt
+                });
+                setTemplateResult(r);
+                notify('✅ Channel template built — '+r.slots?.length+' time slots');
+              } catch(e){ notify(e.message,true); }
+              setBuildingTemplate(false);
+            }} style={{ width:'100%',padding:'12px',background:'var(--accent)',color:'white',border:'none',borderRadius:'var(--radius)',fontWeight:700,cursor:'pointer',fontSize:14,display:'flex',alignItems:'center',justifyContent:'center',gap:8 }}>
+              <Bot size={15}/> {buildingTemplate?'Building Template…':'Build Channel Template'}
+            </button>
           </div>}
 
           {/* Target Channel — EPG mode only (Network mode has it inside its own card) */}
