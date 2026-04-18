@@ -453,6 +453,52 @@ function Channels({ call, onWatch, onPlayout }) {
 
 
 // ── Playout Builder ───────────────────────────────────────────────────────────
+
+function CollectionPreview({ call, genreLoops }) {
+  const [items, setItems] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [showAll, setShowAll] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!genreLoops?.length) return;
+    setLoading(true);
+    // Fetch items for each loop and combine
+    Promise.all(genreLoops.map(l =>
+      call('GET', `/api/sf/media/by-network?network=${encodeURIComponent(l.genre)}`).catch(() => [])
+    )).then(results => {
+      const combined = results.flat();
+      // Deduplicate by id
+      const seen = new Set();
+      const unique = combined.filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true; });
+      setItems(unique.sort((a,b) => ((a.season||0)*1000+(a.episode||0)) - ((b.season||0)*1000+(b.episode||0))));
+      setLoading(false);
+    });
+  }, [genreLoops, call]);
+
+  if (loading) return <div style={{fontSize:11,color:'var(--text-muted)',padding:'4px 0'}}>Loading content preview…</div>;
+  if (!items.length) return null;
+
+  const display = showAll ? items : items.slice(0, 10);
+  return (
+    <div>
+      <div style={{fontSize:11,fontWeight:700,color:'var(--text-muted)',marginBottom:4}}>{items.length} ITEMS IN COLLECTION</div>
+      <div style={{maxHeight:showAll?300:120,overflowY:'auto',display:'flex',flexDirection:'column',gap:2}}>
+        {display.map((m,i) => (
+          <div key={m.id||i} style={{fontSize:11,color:'var(--text-secondary)',padding:'2px 0',borderBottom:'1px solid rgba(255,255,255,0.04)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+            {m.seriesTitle||m.title}{m.season!=null?` S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}`:''}
+            {m.episodeTitle?' — '+m.episodeTitle:''}
+          </div>
+        ))}
+      </div>
+      {items.length > 10 && (
+        <button onClick={()=>setShowAll(v=>!v)} style={{marginTop:6,background:'none',border:'none',color:'var(--accent)',cursor:'pointer',fontSize:11,padding:0}}>
+          {showAll ? '▲ Show less' : `▼ Show all ${items.length} items`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function PlayoutBuilder({ call, initialChannelId }) {
   const [channels,setChannels]   = useState([]);
   const [channelId,setChannelId] = useState(initialChannelId||'');
@@ -504,13 +550,14 @@ function PlayoutBuilder({ call, initialChannelId }) {
 
   useEffect(()=>{
     if(!channelId) return;
+    // Only reload queue from server when channelId changes, not on every channels update
     call('GET',`/api/sf/channels/${channelId}/playout`).then(q=>setQueue(q||[])).catch(()=>{});
     const ch = channels.find(c=>c.id===channelId);
     if (ch?.seriesSchedule) { setSeriesInfo(ch.seriesSchedule); setMode('series'); }
     else if (ch?.libraryLoop) { setLibraryInfo(ch.libraryLoop); setMode('library'); }
     else if (ch?.genreLoops?.length || ch?.genreLoop) { const loops = ch.genreLoops?.length ? ch.genreLoops : [ch.genreLoop]; setGenreLoops(loops); setGenreInfo(loops[0]||null); setMode('collection'); }
     else { setSeriesInfo(null); setLibraryInfo(null); setGenreInfo(null); }
-  },[channelId, channels, call]);
+  },[channelId, call]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save=async()=>{
     if(!channelId)return;
@@ -520,7 +567,7 @@ function PlayoutBuilder({ call, initialChannelId }) {
     setSaving(false);
   };
 
-  const addItem=(m)=>setQueue(q=>[...q,{mediaId:m.id,title:m.episodeTitle||m.title}]);
+  const addItem=(m)=>{ console.log('[Queue] addItem', m.id, m.title); setQueue(q=>{ const n=[...q,{mediaId:m.id,title:m.episodeTitle||m.title}]; console.log('[Queue] new length:', n.length); return n; }); };
   const remove=(i)=>setQueue(q=>q.filter((_,j)=>j!==i));
   const move=(i,dir)=>setQueue(q=>{const n=[...q];const j=i+dir;if(j<0||j>=n.length)return q;[n[i],n[j]]=[n[j],n[i]];return n;});
 
@@ -760,13 +807,16 @@ function PlayoutBuilder({ call, initialChannelId }) {
       {channelId&&mode==='collection'&&(
         <div style={{maxWidth:640}}>
           {genreInfo&&(
-            <div style={{marginBottom:14,padding:'12px 16px',background:'rgba(99,102,241,0.1)',border:'1px solid rgba(99,102,241,0.3)',borderRadius:'var(--radius)',display:'flex',alignItems:'center',gap:12}}>
-              <div style={{flex:1}}>
-                <div style={{fontWeight:700,fontSize:13}}>🎭 {genreLoops.length} Collection{genreLoops.length!==1?'s':''} Active</div>
-                <div style={{fontSize:11,color:'var(--text-muted)',marginTop:2}}>{genreLoops.map(l=>l.genre).join(', ')} · loops in order</div>
+            <div style={{marginBottom:14,padding:'12px 16px',background:'rgba(99,102,241,0.1)',border:'1px solid rgba(99,102,241,0.3)',borderRadius:'var(--radius)'}}>
+              <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:8}}>
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:13}}>🎭 {genreLoops.length} Collection{genreLoops.length!==1?'s':''} Active</div>
+                  <div style={{fontSize:11,color:'var(--text-muted)',marginTop:2}}>{genreLoops.map(l=>l.genre).join(', ')} · loops in order</div>
+                </div>
+                <button onClick={async()=>{ if(!window.confirm('Remove all collections?'))return; await call('PUT',`/api/sf/channels/${channelId}`,{genreLoop:null,genreLoops:[]}); setGenreInfo(null); setGenreLoops([]); setMode('queue'); }}
+                  style={{padding:'5px 10px',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.25)',borderRadius:'var(--radius)',color:'#ef4444',fontSize:11,cursor:'pointer'}}>Clear</button>
               </div>
-              <button onClick={async()=>{ if(!window.confirm('Remove all collections?'))return; await call('PUT',`/api/sf/channels/${channelId}`,{genreLoop:null,genreLoops:[]}); setGenreInfo(null); setGenreLoops([]); setMode('queue'); }}
-                style={{padding:'5px 10px',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.25)',borderRadius:'var(--radius)',color:'#ef4444',fontSize:11,cursor:'pointer'}}>Clear</button>
+              <CollectionPreview call={call} genreLoops={genreLoops}/>
             </div>
           )}
           {/* Tab switcher */}
