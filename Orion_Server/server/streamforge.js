@@ -1275,7 +1275,8 @@ module.exports = function mountStreamForge(app, orion) {
           mode === 'live' ? isLive :
           false; // 'none'
         if (!hlsSessions[ch.id] && shouldPreBuffer) {
-          startHlsSession(ch, { keepAlive: !isLive });
+          // keepAlive for all pre-buffered channels so they stay running
+          startHlsSession(ch, { keepAlive: true });
         }
       });
       // 2s between batches — lets GPU settle before starting next batch
@@ -1581,8 +1582,9 @@ module.exports = function mountStreamForge(app, orion) {
       hlsSessions[ch.id].lastRequest = Date.now();
       return res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8`, reused:true });
     }
-    // Live IPTV streams don't need keepAlive — they start on demand
-    const session = startHlsSession(ch, { keepAlive: !ch.liveStreamId });
+    // Use keepAlive for live channels if prebufferMode is 'all'
+    const liveKeepAlive = ch.liveStreamId && (sfConfig.prebufferMode === 'all' || sfConfig.prebufferMode === 'live');
+    const session = startHlsSession(ch, { keepAlive: !ch.liveStreamId || liveKeepAlive });
     if (!session) return res.status(404).json({ error:'Nothing scheduled on this channel' });
     res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8` });
   });
