@@ -454,45 +454,37 @@ function Channels({ call, onWatch, onPlayout }) {
 
 // ── Playout Builder ───────────────────────────────────────────────────────────
 
-function CollectionPreview({ call, genreLoops }) {
-  const [items, setItems] = React.useState([]);
+function CollectionPreview({ call, channelId }) {
+  const [data, setData] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const [showAll, setShowAll] = React.useState(false);
 
   React.useEffect(() => {
-    if (!genreLoops?.length) return;
+    if (!channelId) return;
     setLoading(true);
-    // Fetch items for each loop and combine
-    Promise.all(genreLoops.map(l =>
-      call('GET', `/api/sf/media/by-network?network=${encodeURIComponent(l.genre)}`).catch(() => [])
-    )).then(results => {
-      const combined = results.flat();
-      // Deduplicate by id
-      const seen = new Set();
-      const unique = combined.filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true; });
-      setItems(unique.sort((a,b) => ((a.season||0)*1000+(a.episode||0)) - ((b.season||0)*1000+(b.episode||0))));
-      setLoading(false);
-    });
-  }, [genreLoops, call]);
+    call('GET', `/api/sf/channels/${channelId}/collection-items`)
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [channelId, call]);
 
-  if (loading) return <div style={{fontSize:11,color:'var(--text-muted)',padding:'4px 0'}}>Loading content preview…</div>;
-  if (!items.length) return null;
+  if (loading) return <div style={{fontSize:11,color:'var(--text-muted)',padding:'4px 0'}}>Loading…</div>;
+  if (!data || !data.count) return <div style={{fontSize:11,color:'var(--text-muted)',padding:'4px 0'}}>0 items</div>;
 
-  const display = showAll ? items : items.slice(0, 10);
+  const display = showAll ? data.items : data.items.slice(0, 15);
   return (
     <div>
-      <div style={{fontSize:11,fontWeight:700,color:'var(--text-muted)',marginBottom:4}}>{items.length} ITEMS IN COLLECTION</div>
-      <div style={{maxHeight:showAll?300:120,overflowY:'auto',display:'flex',flexDirection:'column',gap:2}}>
+      <div style={{fontSize:11,fontWeight:700,color:'var(--text-muted)',marginBottom:4}}>{data.count} ITEMS IN COLLECTION</div>
+      <div style={{maxHeight:showAll?300:140,overflowY:'auto',display:'flex',flexDirection:'column',gap:2}}>
         {display.map((m,i) => (
           <div key={m.id||i} style={{fontSize:11,color:'var(--text-secondary)',padding:'2px 0',borderBottom:'1px solid rgba(255,255,255,0.04)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-            {m.seriesTitle||m.title}{m.season!=null?` S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}`:''}
+            {m.title}{m.season!=null?` S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}`:''}
             {m.episodeTitle?' — '+m.episodeTitle:''}
           </div>
         ))}
       </div>
-      {items.length > 10 && (
+      {data.count > 15 && (
         <button onClick={()=>setShowAll(v=>!v)} style={{marginTop:6,background:'none',border:'none',color:'var(--accent)',cursor:'pointer',fontSize:11,padding:0}}>
-          {showAll ? '▲ Show less' : `▼ Show all ${items.length} items`}
+          {showAll ? '▲ Show less' : `▼ Show all ${data.count} items`}
         </button>
       )}
     </div>
@@ -816,7 +808,7 @@ function PlayoutBuilder({ call, initialChannelId }) {
                 <button onClick={async()=>{ if(!window.confirm('Remove all collections?'))return; await call('PUT',`/api/sf/channels/${channelId}`,{genreLoop:null,genreLoops:[]}); setGenreInfo(null); setGenreLoops([]); setMode('queue'); }}
                   style={{padding:'5px 10px',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.25)',borderRadius:'var(--radius)',color:'#ef4444',fontSize:11,cursor:'pointer'}}>Clear</button>
               </div>
-              <CollectionPreview call={call} genreLoops={genreLoops}/>
+              <CollectionPreview call={call} channelId={channelId}/>
             </div>
           )}
           {/* Tab switcher */}
@@ -904,7 +896,10 @@ function PlayoutBuilder({ call, initialChannelId }) {
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
           {/* Queue */}
           <div>
-            <div style={{fontSize:11,fontWeight:700,color:'var(--text-muted)',letterSpacing:1,marginBottom:8}}>QUEUE ({queue.length} items)</div>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--text-muted)',letterSpacing:1,marginBottom:8,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <span>QUEUE ({queue.length} items)</span>
+              {queue.length>0&&<button onClick={()=>{if(window.confirm(`Clear all ${queue.length} items from queue?`))setQueue([]);}} style={{background:'none',border:'1px solid rgba(239,68,68,0.3)',borderRadius:'var(--radius)',color:'#ef4444',cursor:'pointer',fontSize:10,padding:'2px 8px',fontWeight:600}}>Clear All</button>}
+            </div>
             {queue.length===0
               ?<div style={{padding:32,textAlign:'center',color:'var(--text-muted)',fontSize:13,border:'1px dashed var(--border)',borderRadius:'var(--radius)'}}>
                 <div style={{fontSize:28,marginBottom:8}}>📋</div>
