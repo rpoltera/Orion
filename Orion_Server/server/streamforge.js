@@ -434,7 +434,9 @@ function getPlayoutNow(ch, nowMs) {
       const dur = (item?.duration || ep.duration || 1800) * 1000;
       if (timeInCycle < cursor + dur) {
         const loopStart = dayStart + Math.floor(timeInDay / seasonDurMs) * seasonDurMs;
-        const offsetSeconds = Math.floor((timeInCycle - cursor) / 1000);
+        const rawOffset = Math.floor((timeInCycle - cursor) / 1000);
+        const maxOffset = Math.max(0, Math.floor(dur/1000) - 60); // cap 60s before end
+        const offsetSeconds = Math.min(rawOffset, maxOffset);
         return { item, block: ep, offsetSeconds, startTime: loopStart + cursor, endTime: loopStart + cursor + dur };
       }
       cursor += dur;
