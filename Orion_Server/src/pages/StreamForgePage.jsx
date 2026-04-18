@@ -470,7 +470,8 @@ function PlayoutBuilder({ call, initialChannelId }) {
   const [genres,setGenres]         = useState([]);
   const [networks,setNetworks]      = useState([]);
   const [collectionTab,setCollectionTab] = useState('network'); // 'network' | 'genre'
-  const [genreInfo,setGenreInfo]   = useState(null);
+  const [genreInfo,setGenreInfo]   = useState(null); // single legacy
+  const [genreLoops,setGenreLoops]   = useState([]); // new multi-collection
   const [genreSearch,setGenreSearch] = useState('');
   const [savingGenre,setSavingGenre] = useState(false);
 
@@ -507,7 +508,7 @@ function PlayoutBuilder({ call, initialChannelId }) {
     const ch = channels.find(c=>c.id===channelId);
     if (ch?.seriesSchedule) { setSeriesInfo(ch.seriesSchedule); setMode('series'); }
     else if (ch?.libraryLoop) { setLibraryInfo(ch.libraryLoop); setMode('library'); }
-    else if (ch?.genreLoop) { setGenreInfo(ch.genreLoop); setMode('collection'); }
+    else if (ch?.genreLoops?.length || ch?.genreLoop) { const loops = ch.genreLoops?.length ? ch.genreLoops : [ch.genreLoop]; setGenreLoops(loops); setGenreInfo(loops[0]||null); setMode('collection'); }
     else { setSeriesInfo(null); setLibraryInfo(null); setGenreInfo(null); }
   },[channelId, channels, call]);
 
@@ -761,10 +762,10 @@ function PlayoutBuilder({ call, initialChannelId }) {
           {genreInfo&&(
             <div style={{marginBottom:14,padding:'12px 16px',background:'rgba(99,102,241,0.1)',border:'1px solid rgba(99,102,241,0.3)',borderRadius:'var(--radius)',display:'flex',alignItems:'center',gap:12}}>
               <div style={{flex:1}}>
-                <div style={{fontWeight:700,fontSize:13}}>{genreInfo.matchType==='network'?'📡':'🎭'} {genreInfo.genre}</div>
-                <div style={{fontSize:11,color:'var(--text-muted)',marginTop:2}}>{genreInfo.matchType==='network'?'Network':'Genre'} · {genreInfo.mediaType==='episode'?'TV Shows only':genreInfo.mediaType==='movie'?'Movies only':'All content'} · loops in order</div>
+                <div style={{fontWeight:700,fontSize:13}}>🎭 {genreLoops.length} Collection{genreLoops.length!==1?'s':''} Active</div>
+                <div style={{fontSize:11,color:'var(--text-muted)',marginTop:2}}>{genreLoops.map(l=>l.genre).join(', ')} · loops in order</div>
               </div>
-              <button onClick={async()=>{ if(!window.confirm('Remove collection?'))return; await call('PUT',`/api/sf/channels/${channelId}`,{genreLoop:null}); setGenreInfo(null); setMode('queue'); }}
+              <button onClick={async()=>{ if(!window.confirm('Remove all collections?'))return; await call('PUT',`/api/sf/channels/${channelId}`,{genreLoop:null,genreLoops:[]}); setGenreInfo(null); setGenreLoops([]); setMode('queue'); }}
                 style={{padding:'5px 10px',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.25)',borderRadius:'var(--radius)',color:'#ef4444',fontSize:11,cursor:'pointer'}}>Clear</button>
             </div>
           )}
@@ -784,21 +785,37 @@ function PlayoutBuilder({ call, initialChannelId }) {
               const filtered = list.filter(g=>!genreSearch||g.toLowerCase().includes(genreSearch.toLowerCase()));
               if (filtered.length===0) return <div style={{padding:20,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>{list.length===0?`No ${collectionTab}s found — ensure your library has NFO metadata`:`No matches for "${genreSearch}"`}</div>;
               return filtered.map(g=>{
-                const active = genreInfo?.genre===g && genreInfo?.matchType===matchType;
+                const active = genreLoops.some(l=>l.genre===g && l.matchType===matchType);
                 return(
                   <div key={g} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 14px',background:active?'rgba(99,102,241,0.15)':'var(--bg-card)',border:`1px solid ${active?'rgba(99,102,241,0.5)':'var(--border)'}`,borderRadius:'var(--radius)'}}>
                     <span style={{fontSize:15}}>{icon}</span>
                     <span style={{flex:1,fontSize:13,fontWeight:active?700:400,color:active?'var(--accent)':'var(--text-primary)'}}>{g}</span>
                     {active
-                      ? <span style={{fontSize:11,color:'#10b981',fontWeight:700,padding:'3px 8px',background:'rgba(16,185,129,0.1)',borderRadius:'var(--radius)'}}>✓ Active</span>
+                      ? <button disabled={savingGenre} onClick={async()=>{
+                          setSavingGenre(true);
+                          try{
+                            const newLoops = genreLoops.filter(l=>!(l.genre===g&&l.matchType===matchType));
+                            await call('PUT',`/api/sf/channels/${channelId}`,{genreLoops:newLoops,genreLoop:newLoops[0]||null,libraryLoop:null,seriesSchedule:null,liveStreamId:null});
+                            setGenreLoops(newLoops); setGenreInfo(newLoops[0]||null);
+                            if(!newLoops.length) setMode('queue');
+                            notify(`✅ Removed "${g}"`);
+                          }catch(e){notify('Failed: '+e.message,true);}
+                          setSavingGenre(false);
+                        }} style={{fontSize:11,color:'#ef4444',fontWeight:700,padding:'3px 8px',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.3)',borderRadius:'var(--radius)',cursor:'pointer'}}>✕ Remove</button>
                       : <div style={{display:'flex',gap:4,flexShrink:0}}>
                           {['all','episode','movie'].map(mt=>(
                             <button key={mt} disabled={savingGenre} onClick={async()=>{
                               setSavingGenre(true);
                               try{
-                                await call('PUT',`/api/sf/channels/${channelId}`,{genreLoop:{genre:g,mediaType:mt,matchType},libraryLoop:null,seriesSchedule:null,liveStreamId:null});
-                                setGenreInfo({genre:g,mediaType:mt,matchType});
-                                notify(`✅ "${g}" — ${mt==='all'?'All content':mt==='episode'?'TV Shows only':'Movies only'}`);
+                                const newLoop = {genre:g,mediaType:mt,matchType};
+                                const newLoops = [...genreLoops.filter(l=>!(l.genre===g&&l.matchType===matchType)), newLoop];
+                                await call('PUT',`/api/sf/channels/${channelId}`,{genreLoops:newLoops,genreLoop:newLoops[0],libraryLoop:null,seriesSchedule:null,liveStreamId:null});
+                                // Refresh channels so state has updated genreLoops for next selection
+                                const updatedChs = await call('GET','/api/sf/channels').catch(()=>null);
+                                if(updatedChs) setChannels(updatedChs);
+                                setGenreLoops([...newLoops]); setGenreInfo(newLoops[0]);
+                                setMode('collection');
+                                notify(`✅ Added "${g}" — ${mt==='all'?'All content':mt==='episode'?'TV Shows only':'Movies only'} (${newLoops.length} total)`);
                               }catch(e){notify('Failed: '+e.message,true);}
                               setSavingGenre(false);
                             }}
@@ -2027,6 +2044,8 @@ function Watch({ call, initialChannelId }) {
             levelLoadingMaxRetry: 5,
             startPosition: -1,               // start at live edge
             nudgeMaxRetry: 5,
+            highBufferWatchdogPeriod: 3,
+            maxStarvationDelay: 4,
           });
           hlsRef.current = hls;
           hls.loadSource(hlsUrl);
