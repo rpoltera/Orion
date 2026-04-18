@@ -557,7 +557,7 @@ function PlayoutBuilder({ call, initialChannelId }) {
     else if (ch?.libraryLoop) { setLibraryInfo(ch.libraryLoop); setMode('library'); }
     else if (ch?.genreLoops?.length || ch?.genreLoop) { const loops = ch.genreLoops?.length ? ch.genreLoops : [ch.genreLoop]; setGenreLoops(loops); setGenreInfo(loops[0]||null); setMode('collection'); }
     else { setSeriesInfo(null); setLibraryInfo(null); setGenreInfo(null); }
-  },[channelId, call]); // eslint-disable-line react-hooks/exhaustive-deps
+  },[channelId, call]);
 
   const save=async()=>{
     if(!channelId)return;
