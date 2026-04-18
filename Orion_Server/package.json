@@ -1,8 +1,8 @@
 {
   "name": "orion",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Orion Media Server - Self-hosted media server with IPTV, hardware transcoding, and streaming integration",
-  "author": "R. Poltera",
+  "author": "Raynond Poltera",
   "main": "main.js",
   "homepage": "./",
   "scripts": {
@@ -22,10 +22,7 @@
     "extends": null,
     "icon": "assets/icon.ico",
     "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
+      "target": ["nsis","portable"],
       "icon": "assets/icon.ico",
       "requestedExecutionLevel": "requireAdministrator"
     },
@@ -36,32 +33,12 @@
       "createStartMenuShortcut": true,
       "include": "installer.nsh"
     },
-    "files": [
-      "build/**/*",
-      "main.js",
-      "preload.js",
-      "server/**/*",
-      "assets/**/*",
-      "node_modules/**/*"
-    ],
-    "directories": {
-      "output": "dist"
-    },
-    "extraResources": [
-      {
-        "from": "C:/Program Files/nodejs/node.exe",
-        "to": "node/node.exe"
-      }
-    ],
+    "files": ["build/**/*","main.js","preload.js","server/**/*","assets/**/*","node_modules/**/*"],
+    "directories": {"output": "dist"},
+    "extraResources": [{"from": "C:/Program Files/nodejs/node.exe","to": "node/node.exe"}],
     "asar": true,
-    "asarUnpack": [
-      "node_modules/**/*",
-      "server/**/*",
-      "node_modules/better-sqlite3/**/*"
-    ],
-    "extraMetadata": {
-      "main": "main.js"
-    }
+    "asarUnpack": ["node_modules/**/*","server/**/*","node_modules/better-sqlite3/**/*"],
+    "extraMetadata": {"main": "main.js"}
   },
   "dependencies": {
     "@ffprobe-installer/ffprobe": "^1.4.1",
@@ -95,15 +72,7 @@
     "wait-on": "^7.2.0"
   },
   "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+    "production": [">0.2%","not dead","not op_mini all"],
+    "development": ["last 1 chrome version","last 1 firefox version","last 1 safari version"]
   }
 }
