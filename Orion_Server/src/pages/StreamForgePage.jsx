@@ -898,7 +898,7 @@ function PlayoutBuilder({ call, initialChannelId }) {
           <div>
             <div style={{fontSize:11,fontWeight:700,color:'var(--text-muted)',letterSpacing:1,marginBottom:8,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
               <span>QUEUE ({queue.length} items)</span>
-              {queue.length>0&&<button onClick={()=>{if(window.confirm(`Clear all ${queue.length} items from queue?`))setQueue([]);}} style={{background:'none',border:'1px solid rgba(239,68,68,0.3)',borderRadius:'var(--radius)',color:'#ef4444',cursor:'pointer',fontSize:10,padding:'2px 8px',fontWeight:600}}>Clear All</button>}
+              {queue.length>0&&<button onClick={async()=>{if(window.confirm(`Clear all ${queue.length} items?`)){setQueue([]);try{await call('PUT',`/api/sf/channels/${channelId}/playout`,[]);notify('✅ Playout cleared');}catch(e){notify(e.message,true);}}}} style={{background:'none',border:'1px solid rgba(239,68,68,0.3)',borderRadius:'var(--radius)',color:'#ef4444',cursor:'pointer',fontSize:10,padding:'2px 8px',fontWeight:600}}>🗑 Clear Playout</button>}
             </div>
             {queue.length===0
               ?<div style={{padding:32,textAlign:'center',color:'var(--text-muted)',fontSize:13,border:'1px dashed var(--border)',borderRadius:'var(--radius)'}}>
