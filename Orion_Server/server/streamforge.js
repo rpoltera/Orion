@@ -474,33 +474,45 @@ function getPlayoutNow(ch, nowMs) {
   }
 
   // Genre/Network/Collection loop — play all items matching a tag
-  if (ch.genreLoop?.genre) {
-    const { genre, mediaType, matchType } = ch.genreLoop;
-    const g = genre.toLowerCase();
-    let items;
-    if (matchType === 'network') {
-      const idx = getNetworkIndex();
-      items = idx.get(g) || [];
-      if (!items.length) {
-        const arr = [];
-        for (const [k,v] of idx.entries()) { if (k.includes(g) || g.includes(k)) arr.push(...v); }
-        items = arr;
+  // Support both single genreLoop and array genreLoops
+  const genreLoopList = ch.genreLoops?.length ? ch.genreLoops : (ch.genreLoop?.genre ? [ch.genreLoop] : []);
+  if (genreLoopList.length > 0) {
+    const getItemsForLoop = (loop) => {
+      const { genre, mediaType, matchType } = loop;
+      const g = genre.toLowerCase();
+      let items;
+      if (matchType === 'network') {
+        const idx = getNetworkIndex();
+        items = idx.get(g) || [];
+        if (!items.length) {
+          const arr = [];
+          for (const [k,v] of idx.entries()) { if (k.includes(g) || g.includes(k)) arr.push(...v); }
+          items = arr;
+        }
+        if (mediaType === 'movie') items = items.filter(m => m.type === 'movie');
+        if (mediaType === 'episode') items = items.filter(m => m.type === 'episode' || m.season != null);
+      } else {
+        items = getMediaCombined().filter(m => {
+          if (m.libraryId === 'orion-music') return false;
+          if (mediaType === 'movie' && m.type !== 'movie') return false;
+          if (mediaType === 'episode' && m.type !== 'episode') return false;
+          if (m.path === '' && !m.jellyfinId && !m.plexKey) return false;
+          const genres = (m.genres||[]).map(x=>x.toLowerCase());
+          return genres.some(gn => gn.includes(g) || g.includes(gn)) ||
+                 m.title?.toLowerCase().includes(g) || m.summary?.toLowerCase().includes(g);
+        });
       }
-      if (mediaType === 'movie') items = items.filter(m => m.type === 'movie');
-      if (mediaType === 'episode') items = items.filter(m => m.type === 'episode' || m.season != null);
-    } else {
-      items = getMediaCombined().filter(m => {
-        if (m.libraryId === 'orion-music') return false;
-        if (mediaType === 'movie' && m.type !== 'movie') return false;
-        if (mediaType === 'episode' && m.type !== 'episode') return false;
-        if (m.path === '' && !m.jellyfinId && !m.plexKey) return false;
-        const genres = (m.genres||[]).map(x=>x.toLowerCase());
-        return genres.some(gn => gn.includes(g) || g.includes(gn)) ||
-               m.title?.toLowerCase().includes(g) ||
-               m.summary?.toLowerCase().includes(g);
-      });
+      return items;
+    };
+    // Merge items from all loops, deduplicate by id
+    const seenIds = new Set();
+    let items = [];
+    for (const loop of genreLoopList) {
+      for (const item of getItemsForLoop(loop)) {
+        if (!seenIds.has(item.id)) { seenIds.add(item.id); items.push(item); }
+      }
     }
-    console.log('[SF/GenreLoop] ch="'+ch.name+'" network="'+genre+'" items='+items.length);
+    console.log('[SF/GenreLoop] ch="'+ch.name+'" loops='+genreLoopList.length+' items='+items.length);
     if (!items.length) return null;
     // Sort episodes by season/episode, movies by year/title
     items = items.sort((a,b) => {
@@ -573,6 +585,24 @@ function getPlayoutNow(ch, nowMs) {
 
 function buildSchedule(ch, fromMs, toMs) {
   if (ch.liveStreamId) { const s=getSfStream(ch.liveStreamId); return [{start:fromMs,end:toMs,title:s?`🔴 ${s.name}`:'🔴 Live',isLive:true}]; }
+  // GenreLoop/collection and series channels — walk through time slots and get what's playing
+  if (ch.genreLoops?.length || ch.genreLoop || ch.seriesSchedule?.episodes?.length) {
+    const programs = [];
+    let t = fromMs;
+    let safety = 0;
+    while (t < toMs && safety++ < 200) {
+      const now = getPlayoutNow(ch, t);
+      if (!now || !now.item) { t += 3600000; continue; }
+      const start = now.startTime || t;
+      const end = now.endTime || (t + (now.item.duration||1800)*1000);
+      const title = now.item.seriesTitle
+        ? `${now.item.seriesTitle} S${String(now.item.season||0).padStart(2,'0')}E${String(now.item.episode||0).padStart(2,'0')}${now.item.episodeTitle?' — '+now.item.episodeTitle:''}`
+        : now.item.title || ch.name;
+      programs.push({ start, end, title, desc: now.item.summary||'', icon: now.item.thumb||'' });
+      t = end + 1000; // move to next slot
+    }
+    return programs;
+  }
   const playout=ch.playout||[]; if (!playout.length) return [];
   const totalDuration = playout.reduce((s,b)=>{if(b.streamId)return s+(b.duration||3600);const item=getMediaById(b.mediaId);return s+(item?(item.duration||1800):1800);},0);
   if (!totalDuration) return [];
@@ -1427,6 +1457,47 @@ module.exports = function mountStreamForge(app, orion) {
   });
 
   // Now playing
+  // Returns all items in a channel's genreLoop collection — used to show queue count/preview
+  app.get('/api/sf/channels/:id/collection-items', (req, res) => {
+    const ch = sfDb.channels.find(c=>c.id===req.params.id);
+    if (!ch) return res.status(404).json({ error:'not found' });
+    const genreLoopList = ch.genreLoops?.length ? ch.genreLoops : (ch.genreLoop?.genre ? [ch.genreLoop] : []);
+    if (!genreLoopList.length) return res.json({ count:0, items:[] });
+    let allItems = [];
+    const seen = new Set();
+    for (const loop of genreLoopList) {
+      const { genre, mediaType, matchType } = loop;
+      const g = genre.toLowerCase();
+      let items = [];
+      if (matchType === 'network') {
+        const idx = getNetworkIndex();
+        items = idx.get(g) || [];
+        if (!items.length) {
+          const arr = [];
+          for (const [k,v] of idx.entries()) { if (k.includes(g) || g.includes(k)) arr.push(...v); }
+          items = arr;
+        }
+        if (mediaType === 'movie') items = items.filter(m => m.type === 'movie');
+        if (mediaType === 'episode') items = items.filter(m => m.type === 'episode' || m.season != null);
+      } else {
+        items = getMediaCombined().filter(m => {
+          if (mediaType === 'movie' && m.type !== 'movie') return false;
+          if (mediaType === 'episode' && m.type !== 'episode') return false;
+          const genres = (m.genres||[]).map(x=>x.toLowerCase());
+          return genres.some(gn=>gn.includes(g)||g.includes(gn)) || m.title?.toLowerCase().includes(g);
+        });
+      }
+      for (const item of items) {
+        if (!seen.has(item.id)) { seen.add(item.id); allItems.push(item); }
+      }
+    }
+    allItems.sort((a,b)=>((a.season||0)*1000+(a.episode||0))-((b.season||0)*1000+(b.episode||0)));
+    res.json({
+      count: allItems.length,
+      items: allItems.map(m=>({ id:m.id, title:m.seriesTitle||m.title, season:m.season, episode:m.episode, episodeTitle:m.title!==m.seriesTitle?m.title:null }))
+    });
+  });
+
   app.get('/api/sf/channels/:id/now-playing', (req, res) => {
     const ch = sfDb.channels.find(c=>c.id===req.params.id);
     if (!ch) return res.status(404).json({ error:'not found' });
