@@ -822,10 +822,9 @@ function startHlsSession(ch, opts={}) {
     if(line.match(/[Ee]rror|Invalid|No such|fail|Unknown/)) { session._lastError=line.slice(0,200); console.error(`[SF/ffmpeg] stderr: ${line.slice(0,200)}`); }
   });
   proc.on('exit', (code) => {
+    const lastLines = buf.trim().split('\n').filter(Boolean).slice(-5).join(' | ');
+    console.log(`[SF/ffmpeg] exit code=${code} ch=${channelId} gpu=${gpuId}${lastLines?' | '+lastLines.slice(0,300):''}`);
     if(code && code!==0) {
-      console.error(`[SF/ffmpeg] exit code=${code} ch=${channelId} gpu=${gpuId}`);
-      const lastLines = buf.trim().split('\n').filter(Boolean).slice(-3).join(' | ');
-      if(lastLines) console.error(`[SF/ffmpeg] last output: ${lastLines.slice(0,400)}`);
       // AMF crash (Windows 0xC0000005) — switch channel to libx264 permanently
       const isAmfCrash = (code === 3221225477 || code === -1073741819);
       if (isAmfCrash && !swFallbackChannels.has(channelId)) {
