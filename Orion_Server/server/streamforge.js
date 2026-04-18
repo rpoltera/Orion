@@ -415,7 +415,7 @@ function getPlayoutNow(ch, nowMs) {
           (m.seriesTitle||m.showName||m.title||'').toLowerCase().includes(showTitle)
         );
       }
-      return s + ((item?.duration || ep.duration || 1800) * 1000);
+      return s + ((ep.duration || item?.duration || 1800) * 1000);
     }, 0);
     if (!seasonDurMs) return null;
 
@@ -431,7 +431,8 @@ function getPlayoutNow(ch, nowMs) {
           (m.seriesTitle||m.showName||m.title||'').toLowerCase().includes(showTitle)
         );
       }
-      const dur = (item?.duration || ep.duration || 1800) * 1000;
+      // Use ep.duration from schedule as source of truth — item.duration from DB may be wrong
+      const dur = (ep.duration || item?.duration || 1800) * 1000;
       if (timeInCycle < cursor + dur) {
         const loopStart = dayStart + Math.floor(timeInDay / seasonDurMs) * seasonDurMs;
         const rawOffset = Math.floor((timeInCycle - cursor) / 1000);
@@ -647,6 +648,23 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   // Single -fflags combining all needed flags — duplicate -fflags causes FFmpeg to crash
   const fflags = isLiveSrc ? '+genpts+discardcorrupt+nobuffer+fastseek' : '+genpts+discardcorrupt+fastseek';
   args.push('-fflags', fflags, '-err_detect', 'ignore_err');
+
+  // Cap seek offset to actual file duration — prevents FFmpeg exiting with 0 frames
+  // when stored duration in DB is longer than the actual file
+  if (!isLiveSrc && offsetSeconds > 0 && src.value) {
+    try {
+      const probeResult = require('child_process').spawnSync(ffprobeExe, [
+        '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', src.value
+      ], { timeout: 5000, encoding: 'utf8' });
+      const fileDuration = parseFloat(probeResult.stdout);
+      if (fileDuration > 0 && offsetSeconds >= fileDuration - 30) {
+        console.warn(`[SF/HLS] Offset ${offsetSeconds}s >= file duration ${Math.round(fileDuration)}s for "${src.value.split('/').pop()}" — capping to 0`);
+        offsetSeconds = 0; // start from beginning if we'd seek past the end
+      }
+    } catch {}
+  }
+
   if (!isLiveSrc && offsetSeconds > 10) {
     // Two-pass seek: fast keyframe seek to near target, then short decode-seek
     // Minimizes NAS I/O — only reads a few seconds to find the keyframe
