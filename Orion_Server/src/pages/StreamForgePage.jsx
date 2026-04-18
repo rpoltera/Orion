@@ -844,6 +844,17 @@ function PlayoutBuilder({ call, initialChannelId }) {
                 try{
                   await call('PUT',`/api/sf/channels/${channelId}`,{genreLoops,genreLoop:genreLoops[0],libraryLoop:null,seriesSchedule:null,liveStreamId:null});
                   setGenreInfo(genreLoops[0]);
+                  // Populate queue with all matching items so user can see what's in the collection
+                  try {
+                    const results = await Promise.all(genreLoops.map(l =>
+                      call('GET', `/api/sf/media/by-network?network=${encodeURIComponent(l.genre)}`).catch(()=>[])
+                    ));
+                    const combined = results.flat();
+                    const seen = new Set();
+                    const unique = combined.filter(m=>{ if(seen.has(m.id))return false; seen.add(m.id); return true; });
+                    const sorted = unique.sort((a,b)=>((a.season||0)*1000+(a.episode||0))-((b.season||0)*1000+(b.episode||0)));
+                    setQueue(sorted.map(m=>({mediaId:m.id,title:(m.seriesTitle||m.title)+(m.season!=null?` S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}`:'')})));
+                  } catch(qe) { console.warn('queue populate failed', qe); }
                   notify(`✅ Saved ${genreLoops.length} collection${genreLoops.length!==1?'s':''}`);
                 }catch(e){notify('Failed: '+e.message,true);}
                 setSavingGenre(false);
