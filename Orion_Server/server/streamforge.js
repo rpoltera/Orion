@@ -659,8 +659,14 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       ], { timeout: 5000, encoding: 'utf8' });
       const fileDuration = parseFloat(probeResult.stdout);
       if (fileDuration > 0 && offsetSeconds >= fileDuration - 30) {
-        console.warn(`[SF/HLS] Offset ${offsetSeconds}s >= file duration ${Math.round(fileDuration)}s for "${src.value.split('/').pop()}" — capping to 0`);
-        offsetSeconds = 0; // start from beginning if we'd seek past the end
+        console.warn(`[SF/HLS] Offset ${offsetSeconds}s >= file duration ${Math.round(fileDuration)}s for "${src.value.split('/').pop()}" — recalculating with actual duration`);
+        // Replace the stored duration with actual file duration so next getPlayoutNow picks correct episode
+        if (ch) {
+          // Update the item duration in media cache so future calculations are correct
+          const cachedItem = _mediaById.get(now?.item?.id);
+          if (cachedItem) cachedItem.duration = Math.floor(fileDuration);
+        }
+        offsetSeconds = 0; // start from beginning as fallback
       }
     } catch {}
   }
