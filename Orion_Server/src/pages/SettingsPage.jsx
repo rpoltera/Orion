@@ -3059,10 +3059,10 @@ const TAB_GROUPS = [
           <div style={{ maxWidth: 520 }}>
             <div style={{ textAlign: 'center', marginBottom: 32 }}>
               <img src={`${process.env.PUBLIC_URL}/logo.png`} alt="Orion" style={{ width: 160, height: 160, objectFit: 'contain', marginBottom: 16 }} />
-              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Version 1.0.0 — Alpha</div>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Version 1.2.0 — Alpha</div>
             </div>
             {[
-              { label: 'Developer', value: 'R. Poltera' },
+              { label: 'Developer', value: 'Raymond Poltera' },
               { label: 'Platform', value: window.electron ? 'Windows (Electron + React)' : 'Linux (Node.js + React)' },
               { label: 'License', value: 'MIT — Free & Open Source' },
             ].map(({ label, value }) => (
