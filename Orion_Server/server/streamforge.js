@@ -837,7 +837,7 @@ function startHlsSession(ch, opts={}) {
       }
     }
     delete hlsSessions[channelId];
-    // Auto-restart keepAlive channels with crash backoff
+    // Auto-restart keepAlive channels with crash backoff — NEVER gives up permanently
     if (keepAlive) {
       const isError = code && code !== 0;
       const uptime = Date.now() - session._startedAt;
@@ -845,27 +845,43 @@ function startHlsSession(ch, opts={}) {
       if (isError && uptime < 10000) {
         session._crashCount = (session._crashCount || 0) + 1;
       } else {
-        session._crashCount = 0;
+        session._crashCount = 0; // ran for >10s = healthy, reset crash count
       }
-      // Back off exponentially: 5s, 10s, 30s, 60s — stop after 10 consecutive crashes
       const crashes = session._crashCount || 0;
-      if (crashes >= 10) {
-        console.error(`[SF/HLS] "${channelId}" crashed ${crashes} times — giving up`);
-      } else {
-        const restartDelay = isError ? Math.min(10000 * Math.pow(2, crashes), 300000) : 2000; // longer backoff for dead streams
-        setTimeout(() => {
-          const stillCh = sfDb.channels.find(c=>c.id===channelId);
-          if (stillCh && !hlsSessions[channelId]) {
-            console.log(`[SF/HLS] Auto-restarting keepAlive channel "${stillCh.name}" (delay=${restartDelay}ms)`);
-            const s = startHlsSession(stillCh, { keepAlive: true });
-            if (s) s._crashCount = crashes; // carry over crash count
-          }
-        }, restartDelay);
-      }
+      // Exponential backoff: 2s, 5s, 15s, 60s, 5min — but always retry, never give up
+      const restartDelay = isError
+        ? Math.min(2000 * Math.pow(3, Math.min(crashes, 5)), 300000)
+        : 2000;
+      setTimeout(() => {
+        const stillCh = sfDb.channels.find(c=>c.id===channelId);
+        if (stillCh && !hlsSessions[channelId]) {
+          if (crashes > 0) console.log(`[SF/HLS] Auto-restarting keepAlive channel "${stillCh.name}" (delay=${restartDelay}ms, crash #${crashes})`);
+          const s = startHlsSession(stillCh, { keepAlive: true });
+          if (s) s._crashCount = crashes > 5 ? 0 : crashes; // reset after long backoff
+        }
+      }, restartDelay);
     }
   });
   return session;
 }
+
+// Pre-buffer watchdog — checks every 5 minutes and restarts any channel that should be running
+setInterval(() => {
+  const mode = sfConfig.prebufferMode || 'library';
+  if (mode === 'none') return;
+  (sfDb.channels || []).forEach(ch => {
+    if (hlsSessions[ch.id]) return; // already running
+    const isLive = !!ch.liveStreamId;
+    const shouldRun =
+      mode === 'all' ? true :
+      mode === 'library' ? !isLive :
+      mode === 'live' ? isLive : false;
+    if (shouldRun) {
+      console.log(`[SF/Watchdog] Restarting dead channel "${ch.name}"`);
+      startHlsSession(ch, { keepAlive: true });
+    }
+  });
+}, 5 * 60 * 1000); // every 5 minutes
 
 // Adaptive quality monitor — runs every 30s, drops resolution if too many sessions are crashing
 let _adaptiveLevel = 0; // 0=max, 1=720p, 2=480p
