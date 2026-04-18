@@ -777,6 +777,31 @@ function PlayoutBuilder({ call, initialChannelId }) {
           <input value={genreSearch} onChange={e=>setGenreSearch(e.target.value)}
             placeholder={collectionTab==='network'?'Search networks…':'Search genres…'}
             style={{...sm,width:'100%',marginBottom:10,boxSizing:'border-box'}}/>
+          {/* Pending list with save button */}
+          {genreLoops.length>0&&(
+            <div style={{marginBottom:10,padding:'10px 14px',background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius)'}}>
+              <div style={{fontSize:11,fontWeight:700,color:'var(--text-muted)',marginBottom:6}}>SELECTED ({genreLoops.length})</div>
+              <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:8}}>
+                {genreLoops.map((l,i)=>(
+                  <span key={i} style={{display:'flex',alignItems:'center',gap:4,padding:'3px 8px',background:'rgba(99,102,241,0.15)',border:'1px solid rgba(99,102,241,0.4)',borderRadius:12,fontSize:11,fontWeight:600,color:'var(--accent)'}}>
+                    {l.genre} <span style={{fontSize:9,opacity:.7}}>({l.mediaType==='episode'?'TV':l.mediaType==='movie'?'Movies':'All'})</span>
+                    <button onClick={()=>setGenreLoops(genreLoops.filter((_,j)=>j!==i))} style={{background:'none',border:'none',color:'#ef4444',cursor:'pointer',padding:0,fontSize:12,lineHeight:1}}>×</button>
+                  </span>
+                ))}
+              </div>
+              <button disabled={savingGenre} onClick={async()=>{
+                setSavingGenre(true);
+                try{
+                  await call('PUT',`/api/sf/channels/${channelId}`,{genreLoops,genreLoop:genreLoops[0],libraryLoop:null,seriesSchedule:null,liveStreamId:null});
+                  setGenreInfo(genreLoops[0]);
+                  notify(`✅ Saved ${genreLoops.length} collection${genreLoops.length!==1?'s':''}`);
+                }catch(e){notify('Failed: '+e.message,true);}
+                setSavingGenre(false);
+              }} style={{padding:'7px 20px',background:'var(--accent)',color:'white',border:'none',borderRadius:'var(--radius)',fontWeight:700,cursor:'pointer',fontSize:13}}>
+                {savingGenre?'Saving…':'💾 Save Collections'}
+              </button>
+            </div>
+          )}
           <div style={{display:'flex',flexDirection:'column',gap:4,maxHeight:430,overflowY:'auto'}}>
             {(() => {
               const list = collectionTab==='network' ? networks : genres;
@@ -791,36 +816,16 @@ function PlayoutBuilder({ call, initialChannelId }) {
                     <span style={{fontSize:15}}>{icon}</span>
                     <span style={{flex:1,fontSize:13,fontWeight:active?700:400,color:active?'var(--accent)':'var(--text-primary)'}}>{g}</span>
                     {active
-                      ? <button disabled={savingGenre} onClick={async()=>{
-                          setSavingGenre(true);
-                          try{
-                            const newLoops = genreLoops.filter(l=>!(l.genre===g&&l.matchType===matchType));
-                            await call('PUT',`/api/sf/channels/${channelId}`,{genreLoops:newLoops,genreLoop:newLoops[0]||null,libraryLoop:null,seriesSchedule:null,liveStreamId:null});
-                            setGenreLoops(newLoops); setGenreInfo(newLoops[0]||null);
-                            if(!newLoops.length) setMode('queue');
-                            notify(`✅ Removed "${g}"`);
-                          }catch(e){notify('Failed: '+e.message,true);}
-                          setSavingGenre(false);
-                        }} style={{fontSize:11,color:'#ef4444',fontWeight:700,padding:'3px 8px',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.3)',borderRadius:'var(--radius)',cursor:'pointer'}}>✕ Remove</button>
+                      ? <button onClick={()=>setGenreLoops(genreLoops.filter(l=>!(l.genre===g&&l.matchType===matchType)))}
+                          style={{fontSize:11,color:'#ef4444',fontWeight:700,padding:'3px 8px',background:'rgba(239,68,68,0.1)',border:'1px solid rgba(239,68,68,0.3)',borderRadius:'var(--radius)',cursor:'pointer'}}>✕ Remove</button>
                       : <div style={{display:'flex',gap:4,flexShrink:0}}>
                           {['all','episode','movie'].map(mt=>(
-                            <button key={mt} disabled={savingGenre} onClick={async()=>{
-                              setSavingGenre(true);
-                              try{
-                                const newLoop = {genre:g,mediaType:mt,matchType};
-                                const newLoops = [...genreLoops.filter(l=>!(l.genre===g&&l.matchType===matchType)), newLoop];
-                                await call('PUT',`/api/sf/channels/${channelId}`,{genreLoops:newLoops,genreLoop:newLoops[0],libraryLoop:null,seriesSchedule:null,liveStreamId:null});
-                                // Refresh channels so state has updated genreLoops for next selection
-                                const updatedChs = await call('GET','/api/sf/channels').catch(()=>null);
-                                if(updatedChs) setChannels(updatedChs);
-                                setGenreLoops([...newLoops]); setGenreInfo(newLoops[0]);
-                                setMode('collection');
-                                notify(`✅ Added "${g}" — ${mt==='all'?'All content':mt==='episode'?'TV Shows only':'Movies only'} (${newLoops.length} total)`);
-                              }catch(e){notify('Failed: '+e.message,true);}
-                              setSavingGenre(false);
+                            <button key={mt} onClick={()=>{
+                              const newLoop = {genre:g,mediaType:mt,matchType};
+                              setGenreLoops(prev=>[...prev.filter(l=>!(l.genre===g&&l.matchType===matchType)),newLoop]);
                             }}
                             style={{padding:'5px 10px',background:mt==='episode'?'rgba(99,102,241,0.2)':mt==='movie'?'rgba(245,158,11,0.2)':'var(--bg-tertiary)',color:mt==='episode'?'#818cf8':mt==='movie'?'#f59e0b':'var(--text-secondary)',border:'1px solid var(--border)',borderRadius:'var(--radius)',cursor:'pointer',fontSize:11,fontWeight:600,whiteSpace:'nowrap'}}>
-                              {mt==='all'?'All':mt==='episode'?'TV Only':'Movies Only'}
+                              + {mt==='all'?'All':mt==='episode'?'TV Only':'Movies Only'}
                             </button>
                           ))}
                         </div>
