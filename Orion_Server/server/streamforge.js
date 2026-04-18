@@ -513,13 +513,16 @@ function getPlayoutNow(ch, nowMs) {
     const elapsed = (nowMs-anchor) % totalDurMs;
     let cursor = 0;
     for (const item of items) {
-      const dur = (item.duration||1800)*1000;
-      if (elapsed < cursor+dur) {
+      // Use 90% of stored duration as effective duration — guards against DB runtime being longer than actual file
+      const storedDur = (item.duration||1800)*1000;
+      const effectiveDur = Math.floor(storedDur * 0.90); // assume file may be 10% shorter than DB says
+      if (elapsed < cursor+effectiveDur) {
         const loopStart = anchor+Math.floor((nowMs-anchor)/totalDurMs)*totalDurMs;
-        const offsetSeconds = Math.floor((elapsed-cursor)/1000);
-        return { item, block:{mediaId:item.id}, offsetSeconds, startTime:loopStart+cursor, endTime:loopStart+cursor+dur };
+        const rawOfs = Math.floor((elapsed-cursor)/1000);
+        const offsetSeconds = Math.min(rawOfs, Math.floor(effectiveDur/1000) - 30);
+        return { item, block:{mediaId:item.id}, offsetSeconds, startTime:loopStart+cursor, endTime:loopStart+cursor+storedDur };
       }
-      cursor += dur;
+      cursor += effectiveDur;
     }
   }
 
