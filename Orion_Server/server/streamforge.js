@@ -2543,6 +2543,105 @@ ${guideUrl ? 'Match schedule show titles to the closest CANDIDATES.' : `Select $
     }
   });
 
+  // Build ErsatzTV-style channel template: AI assigns shows to time slots, episodes play in order
+  app.post('/api/sf/ai/build-channel-template', async (req, res) => {
+    const { targetChannelId, networks, epgChannelId, date, userPrompt } = req.body;
+    if (!targetChannelId) return res.status(400).json({ error:'targetChannelId required' });
+    const ch = sfDb.channels.find(c=>c.id===targetChannelId);
+    if (!ch) return res.status(404).json({ error:'Channel not found' });
+
+    try {
+      // Get all media from specified networks
+      const parseArr = v => { if(Array.isArray(v))return v; if(typeof v==='string'){try{return JSON.parse(v);}catch{return [];}}return []; };
+      let allMedia = getMediaCombined().filter(m=>m.path||m.jellyfinId||m.plexKey);
+
+      if (networks?.length) {
+        const netLower = networks.map(n=>n.toLowerCase());
+        allMedia = allMedia.filter(m => {
+          const raw = (orionDb?.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb?.movies||[]).find(mv=>mv.id===m.id);
+          if (!raw) return false;
+          const net = (raw.network||'').toLowerCase();
+          return netLower.some(n => net.includes(n) || n.includes(net));
+        });
+      }
+
+      // Group by show title
+      const showMap = {};
+      allMedia.forEach(m => {
+        const key = m.seriesTitle || m.title || 'Unknown';
+        if (!showMap[key]) showMap[key] = { title:key, type:m.type||'episode', episodeCount:0, seasons:new Set(), firstId:m.id };
+        if (m.season) showMap[key].seasons.add(m.season);
+        showMap[key].episodeCount++;
+      });
+      const movies = Object.values(showMap).filter(s=>s.type==='movie').map(s=>s.title);
+      const shows = Object.values(showMap).filter(s=>s.type!=='movie').map(s=>s.title);
+
+      // Get EPG time slots if provided
+      let epgSlots = '';
+      if (epgChannelId) {
+        const dateStr = date || new Date().toISOString().slice(0,10);
+        const from = new Date(dateStr+'T00:00:00Z').getTime();
+        const to = from + 86400000;
+        const progs = sfDb.epg.programs.filter(p=>p.channel===epgChannelId&&p.stop>from&&p.start<to)
+          .sort((a,b)=>a.start-b.start)
+          .map(p => {
+            const t = new Date(p.start).toISOString().slice(11,16);
+            const dur = Math.round((p.stop-p.start)/60000);
+            return `${t} [${dur}min] "${p.title}"`;
+          });
+        epgSlots = progs.length ? ('\nEPG TIME SLOTS FOR REFERENCE:\n' + progs.join('\n')) : '';
+      }
+
+      const systemPrompt = `You are building a weekly TV channel template. 
+Assign ONE show from the SHOWS list to each time slot.
+Movies go ONLY in prime time (7PM-10PM).
+Return ONLY JSON: {"slots":[{"time":"HH:MM","showTitle":"exact title from list","mediaType":"episode|movie","daysOfWeek":"all"}]}
+Rules:
+- Use EXACT titles from SHOWS and MOVIES lists
+- Each show gets exactly ONE permanent time slot
+- Different show for every slot — no repeats
+- Movies in 7PM-10PM slots only
+- Slots run Monday-Sunday (daysOfWeek: "all")`;
+
+      const userMsg = `Channel: "${ch.name}"
+${userPrompt||'Disney Channel schedule: morning cartoons, afternoon live action, prime time movies'}
+${epgSlots}
+
+SHOWS AVAILABLE (${shows.length}):
+${shows.join(', ')}
+
+MOVIES AVAILABLE (${movies.length}):
+${movies.join(', ')}
+
+Create time slots from 6:00 AM to midnight. Assign a DIFFERENT show to each slot.
+Do not repeat any show. Use all available shows spread across the week.`;
+
+      const aiResult = await callAI(systemPrompt, userMsg);
+      const slots = aiResult.slots || [];
+
+      // Save template to channel
+      const template = { slots, networks: networks||[], builtAt: new Date().toISOString() };
+      const idx = sfDb.channels.findIndex(c=>c.id===targetChannelId);
+      sfDb.channels[idx].channelTemplate = template;
+      // Clear genreLoops and playout so template takes over
+      sfDb.channels[idx].genreLoops = null;
+      sfDb.channels[idx].genreLoop = null;
+      sfDb.channels[idx].playout = [];
+      saveAll();
+
+      // Invalidate session so it restarts with new template
+      if (hlsSessions[targetChannelId]) {
+        try { hlsSessions[targetChannelId].proc.kill('SIGTERM'); } catch {}
+        delete hlsSessions[targetChannelId];
+      }
+
+      res.json({ ok:true, slots, showCount:shows.length, movieCount:movies.length });
+    } catch(e) {
+      console.error('[SF/AI/Template]', e.message);
+      res.status(500).json({ error:e.message });
+    }
+  });
+
   app.post('/api/sf/ai/apply-schedule', (req, res) => {
     const { channelId, suggestions } = req.body;
     const ch = sfDb.channels.find(c=>c.id===channelId);
