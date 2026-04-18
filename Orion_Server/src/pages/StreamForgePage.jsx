@@ -1458,6 +1458,7 @@ function AIScheduler({ call }) {
   // Build mode
   const [buildMode,setBuildMode]=useState('epg'); // 'epg' | 'network' | 'template'
   const [templateNetworks,setTemplateNetworks]=useState('');
+  const [templateEpgChannelId,setTemplateEpgChannelId]=useState('');
   const [templatePrompt,setTemplatePrompt]=useState('Disney Channel schedule: morning animated cartoons, afternoon live action, prime time movies 7-10pm, late night animation. Each show gets ONE permanent time slot, rotate episodes in order.');
   const [buildingTemplate,setBuildingTemplate]=useState(false);
   const [templateResult,setTemplateResult]=useState(null);
@@ -1774,7 +1775,7 @@ You can run again to continue where it left off.`)) return;
             </div>
             <div style={{ marginBottom:12 }}>
               <label style={{ ...sectionLabel,marginBottom:5 }}>EPG Reference Channel (optional)</label>
-              <input type="text" style={inp} value={epgChannelId} onChange={e=>setEpgChannelId(e.target.value)}
+              <input type="text" style={inp} value={templateEpgChannelId} onChange={e=>setTemplateEpgChannelId(e.target.value)}
                 placeholder="Use EPG channel ID for time slot reference"/>
             </div>
             <div style={{ marginBottom:12 }}>
@@ -1806,7 +1807,7 @@ You can run again to continue where it left off.`)) return;
                 const nets = templateNetworks.split(',').map(n=>n.trim()).filter(Boolean);
                 const r = await call('POST','/api/sf/ai/build-channel-template',{
                   targetChannelId:targetCh, networks:nets.length?nets:null,
-                  epgChannelId:epgChannelId||null, date:schedDate, userPrompt:templatePrompt
+                  epgChannelId:templateEpgChannelId||null, date:schedDate, userPrompt:templatePrompt
                 });
                 setTemplateResult(r);
                 notify('✅ Channel template built — '+r.slots?.length+' time slots');
