@@ -887,8 +887,10 @@ async function runPreseg({ mediaId, filePath }) {
   try {
     fs.mkdirSync(segDir, { recursive: true });
     const gpuId = assignGpu();
-    const enc = hwEncoder.includes('nvenc') ? 'h264_nvenc' : 'libx264';
-    const isNvenc = enc === 'h264_nvenc';
+    // Use config to determine encoder — hwEncoder may not be set yet at startup
+    const useNvenc = sfConfig.hwAccel === 'nvenc' || hwEncoder.includes('nvenc');
+    const enc = useNvenc ? 'h264_nvenc' : 'libx264';
+    const isNvenc = useNvenc;
 
     // Build encode args — same quality as live but no seek offset
     const args = [
