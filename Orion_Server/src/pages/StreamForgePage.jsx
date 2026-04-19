@@ -2734,6 +2734,10 @@ function PreSegManager({ call }) {
           <button onClick={refresh} style={{ padding:'9px 14px', background:'var(--bg-tertiary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text-secondary)', cursor:'pointer', fontSize:13 }}>
             ↻ Refresh
           </button>
+          <button onClick={async()=>{ if(!window.confirm('Reset all done/error entries so they get re-validated on next queue?')) return; await call('POST','/api/sf/preseg/reset',{}); setMsg('✅ Reset — re-queue channels to re-validate'); refresh(); }}
+            style={{ padding:'9px 14px', background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.3)', borderRadius:'var(--radius)', color:'#ef4444', cursor:'pointer', fontSize:13 }}>
+            🔄 Reset & Re-validate
+          </button>
         </div>
       </div>
 
