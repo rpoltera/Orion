@@ -1584,10 +1584,20 @@ module.exports = function mountStreamForge(app, orion) {
         items.forEach(queueItem);
       });
     } else if (ch.seriesSchedule?.episodes?.length) {
-      ch.seriesSchedule.episodes.forEach(ep => {
-        const item = getMediaById(ep.mediaId);
-        queueItem(item);
-      });
+      // Try by mediaId first, fall back to title search
+      const showTitle = (ch.seriesSchedule.showTitle || ch.name || '').toLowerCase();
+      const allEps = getMediaCombined().filter(m =>
+        (m.seriesTitle||m.title||'').toLowerCase().includes(showTitle) ||
+        showTitle.includes((m.seriesTitle||m.title||'').toLowerCase())
+      );
+      if (allEps.length) {
+        allEps.forEach(queueItem);
+      } else {
+        ch.seriesSchedule.episodes.forEach(ep => {
+          const item = getMediaById(ep.mediaId);
+          queueItem(item);
+        });
+      }
     } else if (ch.playout?.length) {
       ch.playout.forEach(b => {
         const item = getMediaById(b.mediaId);
