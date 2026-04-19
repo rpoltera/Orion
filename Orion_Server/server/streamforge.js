@@ -1556,7 +1556,10 @@ module.exports = function mountStreamForge(app, orion) {
     const error = Object.values(presegDb).filter(v=>v.status==='error').length;
     const queued = presegQueue.length;
     const totalMedia = getMediaCombined().filter(m=>m.path||m.filePath).length;
-    res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers });
+    const currentFiles = Object.entries(presegDb).filter(([,v])=>v.status==='processing').map(([id])=>{
+      const m = getMediaById(id); return m ? (m.seriesTitle||m.title||id) : id;
+    });
+    res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers, currentFiles });
   });
 
   app.post('/api/sf/preseg/queue-channel', (req, res) => {
