@@ -844,7 +844,7 @@ const SF_PRESEG_DIR = () => path.join(SF_DIR, 'presegs');
 let presegDb = {};    // mediaId -> { status:'pending'|'processing'|'done'|'error', segCount, segLength, segDir, duration }
 let presegQueue = []; // { mediaId, filePath, priority }
 let presegWorkers = 0;
-const MAX_PRESEG_WORKERS = 2; // transcode 2 files at a time in background
+const MAX_PRESEG_WORKERS = 4; // one worker per P40 GPU
 
 function loadPresegDb() {
   try {
