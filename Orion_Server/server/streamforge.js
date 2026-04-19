@@ -863,11 +863,23 @@ function checkFileAlreadyPresegged(mediaId, filePath) {
   const segDir = path.join(fileDir, '.hls', fileBase);
   const indexFile = path.join(segDir, 'index.m3u8');
   if (fs.existsSync(indexFile)) {
-    // Restore to presegDb so future calls are faster
-    const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
-    presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen: sfConfig.hlsSegmentSeconds||12, doneAt: Date.now() };
-    savePresegDb();
-    return true;
+    // Verify all segments are present by reading the index.m3u8 and counting expected segments
+    try {
+      const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
+      const indexContent = fs.readFileSync(indexFile, 'utf8');
+      const expectedSegs = (indexContent.match(/#EXTINF/g)||[]).length;
+      if (expectedSegs > 0 && segs < expectedSegs) {
+        console.warn(`[SF/Preseg] Incomplete preseg for ${mediaId} — ${segs}/${expectedSegs} segments — will re-transcode`);
+        // Clean up incomplete segments
+        try { fs.rmSync(segDir, { recursive:true }); } catch {}
+        delete presegDb[mediaId];
+        return false;
+      }
+      // Restore to presegDb so future calls are faster
+      presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen: sfConfig.hlsSegmentSeconds||12, doneAt: Date.now() };
+      savePresegDb();
+      return true;
+    } catch { return false; }
   }
   return false;
 }
