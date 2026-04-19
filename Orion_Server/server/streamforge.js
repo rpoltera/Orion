@@ -851,6 +851,20 @@ function loadPresegDb() {
     const p = path.join(SF_DIR, 'preseg.json');
     if (fs.existsSync(p)) presegDb = JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch {}
+  // Restore pending queue from disk
+  try {
+    const qp = path.join(SF_DIR, 'preseg-queue.json');
+    if (fs.existsSync(qp)) {
+      const saved = JSON.parse(fs.readFileSync(qp, 'utf8'));
+      // Only restore items not already done
+      presegQueue = saved.filter(q => presegDb[q.mediaId]?.status !== 'done' && presegDb[q.mediaId]?.status !== 'processing');
+      console.log(`[SF/Preseg] Restored ${presegQueue.length} queued items from disk`);
+    }
+  } catch {}
+}
+
+function savePresegQueue() {
+  try { fs.writeFileSync(path.join(SF_DIR, 'preseg-queue.json'), JSON.stringify(presegQueue)); } catch {}
 }
 
 // Check if a file has already been pre-segmented by looking for .hls folder on NAS
@@ -865,12 +879,14 @@ function checkFileAlreadyPresegged(mediaId, filePath) {
   if (fs.existsSync(indexFile)) {
     // Verify all segments are present by reading the index.m3u8 and counting expected segments
     try {
-      const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
       const indexContent = fs.readFileSync(indexFile, 'utf8');
+      const isComplete = indexContent.includes('#EXT-X-ENDLIST');
       const expectedSegs = (indexContent.match(/#EXTINF/g)||[]).length;
-      if (expectedSegs > 0 && segs < expectedSegs) {
-        console.warn(`[SF/Preseg] Incomplete preseg for ${mediaId} — ${segs}/${expectedSegs} segments — will re-transcode`);
-        // Clean up incomplete segments
+      const segFiles = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts'));
+      const segs = segFiles.length;
+      const emptySegs = segFiles.filter(f => fs.statSync(path.join(segDir,f)).size === 0).length;
+      if (!isComplete || (expectedSegs > 0 && segs < expectedSegs) || emptySegs > 0) {
+        console.warn(`[SF/Preseg] Incomplete preseg for ${mediaId} — ${segs}/${expectedSegs} segs, complete=${isComplete}, empty=${emptySegs} — will re-transcode`);
         try { fs.rmSync(segDir, { recursive:true }); } catch {}
         delete presegDb[mediaId];
         return false;
@@ -899,12 +915,14 @@ function queuePreseg(mediaId, filePath, priority=false) {
   if (checkFileAlreadyPresegged(mediaId, filePath)) return; // check NAS filesystem
   if (priority) presegQueue.unshift({ mediaId, filePath });
   else presegQueue.push({ mediaId, filePath });
+  savePresegQueue();
   drainPresegQueue();
 }
 
 function drainPresegQueue() {
   while (presegWorkers < MAX_PRESEG_WORKERS() && presegQueue.length > 0) {
     const item = presegQueue.shift();
+    savePresegQueue();
     presegWorkers++;
     runPreseg(item).finally(() => { presegWorkers--; drainPresegQueue(); });
   }
@@ -972,9 +990,12 @@ async function runPreseg({ mediaId, filePath }) {
             const indexContent = fs.existsSync(indexFile) ? fs.readFileSync(indexFile, 'utf8') : '';
             const isComplete = indexContent.includes('#EXT-X-ENDLIST');
             const expectedSegs = (indexContent.match(/#EXTINF/g)||[]).length;
-            const actualSegs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
-            if (!isComplete || actualSegs < expectedSegs) {
-              const err = `Incomplete: ${actualSegs}/${expectedSegs} segments, endlist=${isComplete}`;
+            const segFiles = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts'));
+            const actualSegs = segFiles.length;
+            // Check every segment is non-zero bytes
+            const emptySegs = segFiles.filter(f => fs.statSync(path.join(segDir,f)).size === 0).length;
+            if (!isComplete || actualSegs < expectedSegs || emptySegs > 0) {
+              const err = `Incomplete: ${actualSegs}/${expectedSegs} segments, endlist=${isComplete}, emptySegs=${emptySegs}`;
               console.error(`[SF/Preseg] ${err} for ${mediaId}`);
               presegDb[mediaId] = { status:'error', error: err };
               savePresegDb();
