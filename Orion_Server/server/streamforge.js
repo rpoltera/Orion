@@ -836,7 +836,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
 const hlsSessions = {};
 const swFallbackChannels = new Set(); // channels where AMF crashed — use libx264
 const SF_HLS_DIR = () => path.join(SF_DIR, 'hls');
-const SF_PRESEG_DIR = () => path.join(SF_DIR, 'presegs');
+const SF_PRESEG_DIR = () => sfConfig.presegDir ? sfConfig.presegDir : path.join(SF_DIR, 'presegs');
 
 // ── Pre-segmentation Engine ──────────────────────────────────────────────────
 // Transcodes media files ONCE to permanent HLS segments on disk.
@@ -844,7 +844,7 @@ const SF_PRESEG_DIR = () => path.join(SF_DIR, 'presegs');
 let presegDb = {};    // mediaId -> { status:'pending'|'processing'|'done'|'error', segCount, segLength, segDir, duration }
 let presegQueue = []; // { mediaId, filePath, priority }
 let presegWorkers = 0;
-const MAX_PRESEG_WORKERS = 4; // one worker per P40 GPU
+const MAX_PRESEG_WORKERS = () => Math.max(1, parseInt(sfConfig.presegWorkers) || 4);
 
 function loadPresegDb() {
   try {
@@ -872,7 +872,7 @@ function queuePreseg(mediaId, filePath, priority=false) {
 }
 
 function drainPresegQueue() {
-  while (presegWorkers < MAX_PRESEG_WORKERS && presegQueue.length > 0) {
+  while (presegWorkers < MAX_PRESEG_WORKERS() && presegQueue.length > 0) {
     const item = presegQueue.shift();
     presegWorkers++;
     runPreseg(item).finally(() => { presegWorkers--; drainPresegQueue(); });
@@ -880,9 +880,12 @@ function drainPresegQueue() {
 }
 
 async function runPreseg({ mediaId, filePath }) {
-  const segDir = path.join(SF_PRESEG_DIR(), mediaId);
+  // Store segments alongside the original file on NAS — e.g. /mnt/nas/show/.hls/episodeName/
+  const fileBase = path.basename(filePath, path.extname(filePath));
+  const fileDir = path.dirname(filePath);
+  const segDir = path.join(fileDir, '.hls', fileBase);
   const segLen = sfConfig.hlsSegmentSeconds || 12;
-  presegDb[mediaId] = { status: 'processing', segDir };
+  presegDb[mediaId] = { status: 'processing', segDir, filePath };
 
   try {
     fs.mkdirSync(segDir, { recursive: true });
@@ -974,7 +977,8 @@ function getPresegPlaylist(mediaId, offsetSeconds, channelId) {
     const segPath = path.join(info.segDir, segName);
     if (fs.existsSync(segPath)) {
       lines.push(`#EXTINF:${segLen}.000000,`);
-      lines.push(`/sf/presegs/${mediaId}/${segName}`);
+      // Encode the full path as base64 so the serve endpoint can find it
+    lines.push(`/sf/preseg-file/${Buffer.from(path.join(info.segDir, segName)).toString('base64url')}`);
       count++;
     } else break;
   }
@@ -1522,11 +1526,27 @@ module.exports = function mountStreamForge(app, orion) {
   const multerUpload = multer({ dest: path.join(SF_DIR,'uploads'), limits:{fileSize:Infinity} });
 
   // ── Pre-segmented content serving ───────────────────────────────────────────
-  // Serve pre-segmented TS files directly — zero CPU, just file I/O
+  // Serve pre-segmented TS files — path encoded as base64url
+  app.get('/sf/preseg-file/:encodedPath', (req, res) => {
+    try {
+      const filePath = Buffer.from(req.params.encodedPath, 'base64url').toString('utf8');
+      // Security: must be under known media mounts
+      const allowed = ['/mnt/', '/var/lib/orion/'];
+      if (!allowed.some(p => filePath.startsWith(p))) return res.status(403).end();
+      if (!fs.existsSync(filePath)) return res.status(404).end();
+      const isM3u8 = filePath.endsWith('.m3u8');
+      res.setHeader('Content-Type', isM3u8 ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      fs.createReadStream(filePath).pipe(res);
+    } catch { res.status(400).end(); }
+  });
+
+  // Legacy preseg endpoint for backward compat
   app.get('/sf/presegs/:mediaId/:seg', (req, res) => {
     const { mediaId, seg } = req.params;
-    if (!seg.match(/^seg\d{5}\.ts$/) && seg !== 'index.m3u8') return res.status(400).end();
-    const filePath = path.join(SF_PRESEG_DIR(), mediaId, seg);
+    const info = presegDb[mediaId];
+    if (!info?.segDir) return res.status(404).end();
+    const filePath = path.join(info.segDir, seg);
     if (!fs.existsSync(filePath)) return res.status(404).end();
     res.setHeader('Content-Type', seg.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
     res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -1652,7 +1672,7 @@ module.exports = function mountStreamForge(app, orion) {
   // ── Config ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/config', (req, res) => res.json(sfConfig));
   app.put('/api/sf/config', (req, res) => {
-    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
+    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','presegDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
     allowed.forEach(k => { if (req.body[k] !== undefined) sfConfig[k] = req.body[k]; });
     saveJson(SF_CFG, sfConfig); res.json({ ok:true });
   });
