@@ -658,6 +658,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     args.push('-re');
   } else {
     args.push('-probesize', '200000', '-analyzeduration', '200000');
+    args.push('-re'); // Limit to 1x real-time speed — prevents 2-3x CPU burn on file sources
   }
 
   // Hardware decode (optional, off by default)
@@ -798,7 +799,8 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       '-b:v', bitrate, '-maxrate:v', maxBitrate, '-bufsize:v', bufSize,
       '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
       '-zerolatency', '1',               // reduce encoder buffer delay
-      '-threads', '0',                   // auto-thread
+      '-threads', '4',                   // limit CPU threads per channel
+      '-vsync', 'cfr',                   // constant frame rate — prevents CPU racing ahead
       '-force_key_frames', forceKf);
     if (vProfile === 'hevc') args.push('-tag:v', 'hvc1'); // Apple/Plex compat
   } else {
