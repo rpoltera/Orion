@@ -2740,7 +2740,6 @@ const TABS = [
   { id:'schedule',  icon:<Calendar size={14}/>,     label:'Schedule'        },
   { id:'watch',     icon:<Monitor size={14}/>,      label:'Watch'           },
   { id:'preseg',    icon:<Zap size={14}/>,           label:'Pre-Segment'     },
-  { id:'preseg',    icon:<Zap size={14}/>,           label:'Pre-Segment'     },
   { id:'settings',  icon:<Settings size={14}/>,    label:'Settings'        },
 ];
 
