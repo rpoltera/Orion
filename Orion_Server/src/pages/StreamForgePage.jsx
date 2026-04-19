@@ -2779,8 +2779,9 @@ function PreSegManager({ call }) {
             {doneItems.length===0
               ? <div style={{ color:'var(--text-muted)', fontSize:13 }}>No files completed yet</div>
               : doneItems.map(i => (
-                <div key={i.id} style={{ fontSize:11, color:'#10b981', padding:'3px 6px', borderBottom:'1px solid rgba(255,255,255,0.04)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                  ✓ {i.id}
+                <div key={i.id} style={{ fontSize:11, color:'#10b981', padding:'4px 8px', borderBottom:'1px solid rgba(255,255,255,0.04)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                  <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>✓ {i.name||i.id}</span>
+                  {i.segCount && <span style={{ color:'var(--text-muted)', fontSize:10, marginLeft:8, flexShrink:0 }}>{i.segCount} segs</span>}
                 </div>
               ))
             }
@@ -2796,7 +2797,7 @@ function PreSegManager({ call }) {
               ? <div style={{ color:'var(--text-muted)', fontSize:13 }}>No errors</div>
               : errorItems.map(i => (
                 <div key={i.id} style={{ fontSize:11, padding:'6px 10px', background:'rgba(239,68,68,0.08)', borderRadius:'var(--radius)' }}>
-                  <div style={{ fontWeight:600, color:'#ef4444', marginBottom:2 }}>{i.id}</div>
+                  <div style={{ fontWeight:600, color:'#ef4444', marginBottom:2 }}>{i.name||i.id}</div>
                   <div style={{ color:'var(--text-muted)' }}>{i.error||'Unknown error'}</div>
                 </div>
               ))
