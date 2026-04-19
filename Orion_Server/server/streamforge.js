@@ -914,7 +914,23 @@ function queuePreseg(mediaId, filePath, priority=false) {
   if (presegQueue.find(q=>q.mediaId===mediaId)) return;
   if (checkFileAlreadyPresegged(mediaId, filePath)) return; // check NAS filesystem
   const m = getMediaById(mediaId);
-  const displayName = m ? (m.season != null ? `${m.title} S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}` : m.title||mediaId) : path.basename(filePath||'', path.extname(filePath||''));
+  // Build display name — use media object if available, else parse from filename
+  let displayName;
+  if (m && m.season != null) {
+    displayName = `${m.title} S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}`;
+  } else if (filePath) {
+    // Parse from filename e.g. "Doc Martin_S01E03_Shit Happens.mp4"
+    const base = path.basename(filePath, path.extname(filePath));
+    const seMatch = base.match(/[Ss](\d+)[Ee](\d+)/);
+    if (seMatch) {
+      const showName = base.split(/[_\s-]*[Ss]\d+[Ee]\d+/)[0].replace(/[_]/g,' ').trim();
+      displayName = `${showName} S${seMatch[1].padStart(2,'0')}E${seMatch[2].padStart(2,'0')}`;
+    } else {
+      displayName = base;
+    }
+  } else {
+    displayName = m?.title || mediaId;
+  }
   if (priority) presegQueue.unshift({ mediaId, filePath, displayName });
   else presegQueue.push({ mediaId, filePath, displayName });
   savePresegQueue();
@@ -2087,9 +2103,12 @@ module.exports = function mountStreamForge(app, orion) {
     const liveKeepAlive = ch.liveStreamId && (sfConfig.prebufferMode === 'all' || sfConfig.prebufferMode === 'live');
 
     // If item is pre-segmented, use virtual HLS instead of live FFmpeg
-    if (now?.item && isPresegged(now.item.id)) {
-      const hlsUrl = `/sf/preseg-channel/${ch.id}/index.m3u8`;
-      return res.json({ ok:true, hlsUrl, channelId:ch.id, presegged:true });
+    if (!ch.liveStreamId) {
+      const now = getPlayoutNow(ch);
+      if (now?.item && isPresegged(now.item.id)) {
+        const hlsUrl = `/sf/preseg-channel/${ch.id}/index.m3u8`;
+        return res.json({ ok:true, hlsUrl, channelId:ch.id, presegged:true });
+      }
     }
 
     const session = startHlsSession(ch, { keepAlive: !ch.liveStreamId || liveKeepAlive });
