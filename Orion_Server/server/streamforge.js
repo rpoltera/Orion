@@ -913,8 +913,10 @@ function queuePreseg(mediaId, filePath, priority=false) {
   if (presegDb[mediaId]?.status === 'processing') return;
   if (presegQueue.find(q=>q.mediaId===mediaId)) return;
   if (checkFileAlreadyPresegged(mediaId, filePath)) return; // check NAS filesystem
-  if (priority) presegQueue.unshift({ mediaId, filePath });
-  else presegQueue.push({ mediaId, filePath });
+  const m = getMediaById(mediaId);
+  const displayName = m ? (m.season != null ? `${m.seriesTitle||m.title} S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}` : m.title||mediaId) : path.basename(filePath||'', path.extname(filePath||''));
+  if (priority) presegQueue.unshift({ mediaId, filePath, displayName });
+  else presegQueue.push({ mediaId, filePath, displayName });
   savePresegQueue();
   drainPresegQueue();
 }
@@ -1003,7 +1005,7 @@ async function runPreseg({ mediaId, filePath }) {
               return;
             }
             console.log(`[SF/Preseg] Done ${mediaId} — ${actualSegs} segments`);
-            presegDb[mediaId] = { status:'done', segDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath };
+            presegDb[mediaId] = { status:'done', segDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName || path.basename(filePath||'') };
             savePresegDb();
             resolve();
           } catch(ve) {
@@ -1652,7 +1654,11 @@ module.exports = function mountStreamForge(app, orion) {
     });
     const allItems = Object.entries(presegDb).map(([id,v]) => {
       const m = getMediaById(id);
-      const name = m ? (m.seriesTitle ? `${m.seriesTitle} S${String(m.season||0).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}` : m.title||id) : (v.filePath ? path.basename(v.filePath) : id);
+      const name = m
+        ? (m.seriesTitle
+            ? `${m.seriesTitle} S${String(m.season||0).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}`
+            : m.title||id)
+        : (v.filePath ? path.basename(v.filePath, path.extname(v.filePath)) : id);
       return { id, status:v.status, name, error:v.error||null, segCount:v.segCount||null };
     });
     res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers, maxWorkers: MAX_PRESEG_WORKERS(), items: allItems, currentFiles });
