@@ -3,7 +3,7 @@ import { useApp } from '../contexts/AppContext';
 import {
   Tv2, Radio, Play, Plus, Trash2, Edit2, Save, X, RefreshCw,
   Settings, Library, Calendar, Bot, Monitor, ChevronRight,
-  List, Signal, Film, ExternalLink
+  List, Signal, Film, ExternalLink, Zap
 } from 'lucide-react';
 
 // ── API — always talks to Orion's own server at /api/sf/* ─────────────────────
