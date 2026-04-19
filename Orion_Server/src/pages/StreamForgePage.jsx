@@ -2624,6 +2624,111 @@ function ScheduleGrid({ call }) {
   );
 }
 
+
+function PreSegManager({ call }) {
+  const [status, setStatus] = React.useState(null);
+  const [channels, setChannels] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [msg, setMsg] = React.useState('');
+
+  const refresh = async () => {
+    try {
+      const [s, chs] = await Promise.all([
+        call('GET', '/api/sf/preseg/status'),
+        call('GET', '/api/sf/channels'),
+      ]);
+      setStatus(s);
+      setChannels(chs.filter(c => !c.liveStreamId));
+    } catch(e) { setMsg(e.message); }
+  };
+
+  React.useEffect(() => { refresh(); const t = setInterval(refresh, 5000); return () => clearInterval(t); }, []);
+
+  const queueChannel = async (chId, chName) => {
+    setLoading(true);
+    try {
+      const r = await call('POST', '/api/sf/preseg/queue-channel', { channelId: chId });
+      setMsg('✅ Queued ' + r.queued + ' items for "' + chName + '"');
+      refresh();
+    } catch(e) { setMsg(e.message); }
+    setLoading(false);
+  };
+
+  const queueAll = async () => {
+    if (!window.confirm('Queue ALL library content for pre-segmentation? This will use significant disk space and take a long time.')) return;
+    setLoading(true);
+    try {
+      const r = await call('POST', '/api/sf/preseg/queue-all', {});
+      setMsg('✅ Queued ' + r.queued + ' items for pre-segmentation');
+      refresh();
+    } catch(e) { setMsg(e.message); }
+    setLoading(false);
+  };
+
+  const card = { background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--radius-lg)', padding:20, marginBottom:16 };
+
+  return (
+    <div>
+      {msg && <div style={{ padding:'10px 14px', background:'rgba(99,102,241,0.1)', border:'1px solid rgba(99,102,241,0.3)', borderRadius:'var(--radius)', marginBottom:16, fontSize:13 }}>{msg}</div>}
+      <div style={card}>
+        <div style={{ fontWeight:700, fontSize:14, marginBottom:16 }}>⚡ Pre-Segmentation Engine</div>
+        <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:16, lineHeight:1.6 }}>
+          Pre-segments your media files to HLS once. Playback uses near-zero CPU — just file I/O.
+          Target: 60+ channels with minimal server load.
+        </div>
+        {status && (
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginBottom:16 }}>
+            {[
+              { label:'Done', value:status.done, color:'#10b981' },
+              { label:'Processing', value:status.processing, color:'var(--accent)' },
+              { label:'Queued', value:status.queued, color:'#f59e0b' },
+              { label:'Total Media', value:status.totalMedia, color:'var(--text-secondary)' },
+            ].map(s => (
+              <div key={s.label} style={{ background:'var(--bg-tertiary)', borderRadius:'var(--radius)', padding:'12px 16px', textAlign:'center' }}>
+                <div style={{ fontSize:24, fontWeight:700, color:s.color }}>{(s.value||0).toLocaleString()}</div>
+                <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:4 }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        {status && status.done > 0 && status.totalMedia > 0 && (
+          <div style={{ marginBottom:16 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:'var(--text-muted)', marginBottom:4 }}>
+              <span>Progress</span>
+              <span>{Math.round(status.done/status.totalMedia*100)}%</span>
+            </div>
+            <div style={{ height:6, background:'var(--bg-tertiary)', borderRadius:3, overflow:'hidden' }}>
+              <div style={{ height:'100%', width:(Math.round((status.done||0)/(status.totalMedia||1)*100))+'%', background:'#10b981', borderRadius:3, transition:'width 0.5s' }}/>
+            </div>
+          </div>
+        )}
+        <div style={{ display:'flex', gap:10 }}>
+          <button onClick={queueAll} disabled={loading} style={{ padding:'9px 20px', background:'var(--accent)', color:'white', border:'none', borderRadius:'var(--radius)', fontWeight:700, cursor:'pointer', fontSize:13 }}>
+            ⚡ Queue All Library
+          </button>
+          <button onClick={refresh} style={{ padding:'9px 14px', background:'var(--bg-tertiary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text-secondary)', cursor:'pointer', fontSize:13 }}>
+            ↻ Refresh
+          </button>
+        </div>
+      </div>
+      <div style={card}>
+        <div style={{ fontWeight:700, fontSize:14, marginBottom:12 }}>Queue by Channel</div>
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          {channels.map(ch => (
+            <div key={ch.id} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px', background:'var(--bg-tertiary)', borderRadius:'var(--radius)' }}>
+              <span style={{ fontSize:11, fontWeight:700, color:'var(--accent)', minWidth:24 }}>{ch.num}</span>
+              <span style={{ flex:1, fontSize:13 }}>{ch.name}</span>
+              <button onClick={() => queueChannel(ch.id, ch.name)} disabled={loading} style={{ padding:'5px 14px', background:'rgba(99,102,241,0.15)', border:'1px solid rgba(99,102,241,0.3)', borderRadius:'var(--radius)', color:'#818cf8', cursor:'pointer', fontSize:11, fontWeight:600 }}>
+                Queue Content
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const TABS = [
   { id:'dashboard', icon:<Signal size={14}/>,    label:'Dashboard'       },
   { id:'channels',  icon:<Tv2 size={14}/>,        label:'Channels'        },
@@ -2634,6 +2739,8 @@ const TABS = [
   { id:'libraries', icon:<Library size={14}/>,     label:'Libraries'       },
   { id:'schedule',  icon:<Calendar size={14}/>,     label:'Schedule'        },
   { id:'watch',     icon:<Monitor size={14}/>,      label:'Watch'           },
+  { id:'preseg',    icon:<Zap size={14}/>,           label:'Pre-Segment'     },
+  { id:'preseg',    icon:<Zap size={14}/>,           label:'Pre-Segment'     },
   { id:'settings',  icon:<Settings size={14}/>,    label:'Settings'        },
 ];
 
