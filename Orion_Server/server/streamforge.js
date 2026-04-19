@@ -799,8 +799,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       '-b:v', bitrate, '-maxrate:v', maxBitrate, '-bufsize:v', bufSize,
       '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
       '-zerolatency', '1',               // reduce encoder buffer delay
-      '-threads', '4',                   // limit CPU threads per channel
-      '-vsync', 'cfr',                   // constant frame rate — prevents CPU racing ahead
+      '-threads', '0',                   // auto-thread
       '-force_key_frames', forceKf);
     if (vProfile === 'hevc') args.push('-tag:v', 'hvc1'); // Apple/Plex compat
   } else {
@@ -837,6 +836,154 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
 const hlsSessions = {};
 const swFallbackChannels = new Set(); // channels where AMF crashed — use libx264
 const SF_HLS_DIR = () => path.join(SF_DIR, 'hls');
+const SF_PRESEG_DIR = () => path.join(SF_DIR, 'presegs');
+
+// ── Pre-segmentation Engine ──────────────────────────────────────────────────
+// Transcodes media files ONCE to permanent HLS segments on disk.
+// At playback time: zero FFmpeg, just serve pre-made segments. Near-zero CPU.
+let presegDb = {};    // mediaId -> { status:'pending'|'processing'|'done'|'error', segCount, segLength, segDir, duration }
+let presegQueue = []; // { mediaId, filePath, priority }
+let presegWorkers = 0;
+const MAX_PRESEG_WORKERS = 2; // transcode 2 files at a time in background
+
+function loadPresegDb() {
+  try {
+    const p = path.join(SF_DIR, 'preseg.json');
+    if (fs.existsSync(p)) presegDb = JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {}
+}
+
+function savePresegDb() {
+  try { fs.writeFileSync(path.join(SF_DIR, 'preseg.json'), JSON.stringify(presegDb)); } catch {}
+}
+
+function isPresegged(mediaId) {
+  return presegDb[mediaId]?.status === 'done';
+}
+
+function queuePreseg(mediaId, filePath, priority=false) {
+  if (!mediaId || !filePath) return;
+  if (presegDb[mediaId]?.status === 'done') return;
+  if (presegDb[mediaId]?.status === 'processing') return;
+  if (presegQueue.find(q=>q.mediaId===mediaId)) return;
+  if (priority) presegQueue.unshift({ mediaId, filePath });
+  else presegQueue.push({ mediaId, filePath });
+  drainPresegQueue();
+}
+
+function drainPresegQueue() {
+  while (presegWorkers < MAX_PRESEG_WORKERS && presegQueue.length > 0) {
+    const item = presegQueue.shift();
+    presegWorkers++;
+    runPreseg(item).finally(() => { presegWorkers--; drainPresegQueue(); });
+  }
+}
+
+async function runPreseg({ mediaId, filePath }) {
+  const segDir = path.join(SF_PRESEG_DIR(), mediaId);
+  const segLen = sfConfig.hlsSegmentSeconds || 12;
+  presegDb[mediaId] = { status: 'processing', segDir };
+
+  try {
+    fs.mkdirSync(segDir, { recursive: true });
+    const gpuId = assignGpu();
+    const enc = hwEncoder.includes('nvenc') ? 'h264_nvenc' : 'libx264';
+    const isNvenc = enc === 'h264_nvenc';
+
+    // Build encode args — same quality as live but no seek offset
+    const args = [
+      '-fflags', '+genpts+igndts',
+      '-err_detect', 'ignore_err',
+      '-i', filePath,
+      '-map', '0:v:0', '-map', '0:a:0?',
+    ];
+
+    if (isNvenc) {
+      args.push('-pix_fmt', 'yuv420p',
+        '-vcodec', 'h264_nvenc', '-gpu', String(gpuId),
+        '-preset', 'p2', '-rc:v', 'vbr', '-cq:v', '23',
+        '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
+        '-g', '60', '-keyint_min', '60', '-sc_threshold', '0');
+    } else {
+      args.push('-pix_fmt', 'yuv420p',
+        '-vcodec', 'libx264', '-crf', '23', '-preset', 'fast',
+        '-b:v', '4M', '-maxrate', '8M', '-bufsize', '8M',
+        '-g', '60', '-keyint_min', '60', '-sc_threshold', '0');
+    }
+
+    args.push('-acodec', 'aac', '-b:a', '192k', '-ac', '2',
+      '-avoid_negative_ts', 'make_zero',
+      '-f', 'hls',
+      '-hls_time', String(segLen),
+      '-hls_list_size', '0',           // keep ALL segments
+      '-hls_flags', 'independent_segments',
+      '-hls_segment_type', 'mpegts',
+      '-hls_allow_cache', '1',
+      '-hls_segment_filename', path.join(segDir, 'seg%05d.ts'),
+      path.join(segDir, 'index.m3u8'));
+
+    console.log(`[SF/Preseg] Transcoding ${mediaId} → ${segDir}`);
+
+    await new Promise((resolve, reject) => {
+      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'] });
+      let errBuf = '';
+      proc.stderr.on('data', d => { errBuf += d.toString(); });
+      proc.on('exit', code => {
+        if (code === 0 || code === null) {
+          const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
+          console.log(`[SF/Preseg] Done ${mediaId} — ${segs} segments`);
+          presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen, doneAt: Date.now() };
+          savePresegDb();
+          resolve();
+        } else {
+          const err = errBuf.slice(-300);
+          console.error(`[SF/Preseg] Error ${mediaId}: ${err}`);
+          presegDb[mediaId] = { status:'error', error: err.slice(0,200) };
+          savePresegDb();
+          reject(new Error('preseg failed'));
+        }
+      });
+    });
+  } catch(e) {
+    presegDb[mediaId] = { status:'error', error: e.message };
+    savePresegDb();
+  }
+}
+
+// Generate dynamic HLS playlist from pre-segmented files at a given time offset
+function getPresegPlaylist(mediaId, offsetSeconds, channelId) {
+  const info = presegDb[mediaId];
+  if (!info || info.status !== 'done') return null;
+  const segLen = info.segLen || 12;
+  const startSeg = Math.max(0, Math.floor(offsetSeconds / segLen));
+  const listSize = sfConfig.hlsListSize || 60;
+
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    `#EXT-X-TARGETDURATION:${segLen}`,
+    `#EXT-X-MEDIA-SEQUENCE:${startSeg}`,
+    '#EXT-X-INDEPENDENT-SEGMENTS',
+  ];
+
+  let count = 0;
+  for (let i = startSeg; count < listSize && i < info.segCount; i++) {
+    const segName = 'seg' + String(i).padStart(5,'0') + '.ts';
+    const segPath = path.join(info.segDir, segName);
+    if (fs.existsSync(segPath)) {
+      lines.push(`#EXTINF:${segLen}.000000,`);
+      lines.push(`/sf/presegs/${mediaId}/${segName}`);
+      count++;
+    } else break;
+  }
+
+  // If we've reached end of file, append EXT-X-ENDLIST so player knows
+  if (startSeg + count >= info.segCount) {
+    lines.push('#EXT-X-ENDLIST');
+  }
+
+  return lines.join('\n');
+}
 
 function startHlsSession(ch, opts={}) {
   const channelId = ch.id;
@@ -1372,6 +1519,100 @@ module.exports = function mountStreamForge(app, orion) {
 
   const multerUpload = multer({ dest: path.join(SF_DIR,'uploads'), limits:{fileSize:Infinity} });
 
+  // ── Pre-segmented content serving ───────────────────────────────────────────
+  // Serve pre-segmented TS files directly — zero CPU, just file I/O
+  app.get('/sf/presegs/:mediaId/:seg', (req, res) => {
+    const { mediaId, seg } = req.params;
+    if (!seg.match(/^seg\d{5}\.ts$/) && seg !== 'index.m3u8') return res.status(400).end();
+    const filePath = path.join(SF_PRESEG_DIR(), mediaId, seg);
+    if (!fs.existsSync(filePath)) return res.status(404).end();
+    res.setHeader('Content-Type', seg.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    fs.createReadStream(filePath).pipe(res);
+  });
+
+  // Virtual channel HLS for pre-segmented content — zero FFmpeg serving
+  app.get('/sf/preseg-channel/:channelId/index.m3u8', (req, res) => {
+    const ch = sfDb.channels.find(c=>c.id===req.params.channelId);
+    if (!ch) return res.status(404).end();
+    const now = getPlayoutNow(ch);
+    if (!now?.item) return res.status(404).json({ error:'nothing scheduled' });
+    const playlist = getPresegPlaylist(now.item.id, now.offsetSeconds || 0, ch.id);
+    if (!playlist) {
+      // Fall back to live FFmpeg if not pre-segmented
+      return res.status(404).json({ error:'not pre-segmented', fallback:true });
+    }
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(playlist);
+  });
+
+  // Pre-seg management endpoints
+  app.get('/api/sf/preseg/status', (req, res) => {
+    const done = Object.values(presegDb).filter(v=>v.status==='done').length;
+    const processing = Object.values(presegDb).filter(v=>v.status==='processing').length;
+    const error = Object.values(presegDb).filter(v=>v.status==='error').length;
+    const queued = presegQueue.length;
+    const totalMedia = getMediaCombined().filter(m=>m.path||m.filePath).length;
+    res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers });
+  });
+
+  app.post('/api/sf/preseg/queue-channel', (req, res) => {
+    const { channelId } = req.body;
+    if (!channelId) return res.status(400).json({ error:'channelId required' });
+    const ch = sfDb.channels.find(c=>c.id===channelId);
+    if (!ch) return res.status(404).json({ error:'channel not found' });
+
+    let queued = 0;
+    // Queue all items for this channel's content
+    const queueItem = (item) => {
+      if (!item) return;
+      const filePath = item.path || item.filePath;
+      if (filePath && !isPresegged(item.id)) {
+        queuePreseg(item.id, filePath);
+        queued++;
+      }
+    };
+
+    if (ch.genreLoops?.length || ch.genreLoop) {
+      const idx = getNetworkIndex();
+      const loops = ch.genreLoops?.length ? ch.genreLoops : [ch.genreLoop];
+      loops.forEach(l => {
+        const items = idx.get((l.genre||'').toLowerCase()) || [];
+        items.forEach(queueItem);
+      });
+    } else if (ch.seriesSchedule?.episodes?.length) {
+      ch.seriesSchedule.episodes.forEach(ep => {
+        const item = getMediaById(ep.mediaId);
+        queueItem(item);
+      });
+    } else if (ch.playout?.length) {
+      ch.playout.forEach(b => {
+        const item = getMediaById(b.mediaId);
+        queueItem(item);
+      });
+    }
+
+    res.json({ ok:true, queued });
+  });
+
+  app.post('/api/sf/preseg/queue-all', (req, res) => {
+    const allMedia = getMediaCombined().filter(m=>(m.path||m.filePath)&&!isPresegged(m.id));
+    allMedia.forEach(m => queuePreseg(m.id, m.path||m.filePath));
+    res.json({ ok:true, queued: allMedia.length });
+  });
+
+  app.delete('/api/sf/preseg/:mediaId', (req, res) => {
+    const { mediaId } = req.params;
+    const info = presegDb[mediaId];
+    if (info?.segDir) {
+      try { require('fs').rmSync(info.segDir, { recursive:true }); } catch {}
+    }
+    delete presegDb[mediaId];
+    savePresegDb();
+    res.json({ ok:true });
+  });
+
   // ── Status ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/status', (req, res) => res.json({
     ok: true, version: '2.0.0-orion',
@@ -1710,6 +1951,13 @@ module.exports = function mountStreamForge(app, orion) {
     }
     // Use keepAlive for live channels if prebufferMode is 'all'
     const liveKeepAlive = ch.liveStreamId && (sfConfig.prebufferMode === 'all' || sfConfig.prebufferMode === 'live');
+
+    // If item is pre-segmented, use virtual HLS instead of live FFmpeg
+    if (now?.item && isPresegged(now.item.id)) {
+      const hlsUrl = `/sf/preseg-channel/${ch.id}/index.m3u8`;
+      return res.json({ ok:true, hlsUrl, channelId:ch.id, presegged:true });
+    }
+
     const session = startHlsSession(ch, { keepAlive: !ch.liveStreamId || liveKeepAlive });
     if (!session) return res.status(404).json({ error:'Nothing scheduled on this channel' });
     res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8` });
