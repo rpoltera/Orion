@@ -914,7 +914,7 @@ function queuePreseg(mediaId, filePath, priority=false) {
   if (presegQueue.find(q=>q.mediaId===mediaId)) return;
   if (checkFileAlreadyPresegged(mediaId, filePath)) return; // check NAS filesystem
   const m = getMediaById(mediaId);
-  const displayName = m ? (m.season != null ? `${m.seriesTitle||m.title} S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}` : m.title||mediaId) : path.basename(filePath||'', path.extname(filePath||''));
+  const displayName = m ? (m.season != null ? `${m.title} S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}` : m.title||mediaId) : path.basename(filePath||'', path.extname(filePath||''));
   if (priority) presegQueue.unshift({ mediaId, filePath, displayName });
   else presegQueue.push({ mediaId, filePath, displayName });
   savePresegQueue();
