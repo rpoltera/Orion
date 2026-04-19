@@ -966,11 +966,30 @@ async function runPreseg({ mediaId, filePath }) {
       proc.stderr.on('data', d => { errBuf += d.toString(); });
       proc.on('exit', code => {
         if (code === 0 || code === null) {
-          const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
-          console.log(`[SF/Preseg] Done ${mediaId} — ${segs} segments`);
-          presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen, doneAt: Date.now() };
-          savePresegDb();
-          resolve();
+          // Validate completion — check index.m3u8 has EXT-X-ENDLIST and seg count matches
+          try {
+            const indexFile = path.join(segDir, 'index.m3u8');
+            const indexContent = fs.existsSync(indexFile) ? fs.readFileSync(indexFile, 'utf8') : '';
+            const isComplete = indexContent.includes('#EXT-X-ENDLIST');
+            const expectedSegs = (indexContent.match(/#EXTINF/g)||[]).length;
+            const actualSegs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
+            if (!isComplete || actualSegs < expectedSegs) {
+              const err = `Incomplete: ${actualSegs}/${expectedSegs} segments, endlist=${isComplete}`;
+              console.error(`[SF/Preseg] ${err} for ${mediaId}`);
+              presegDb[mediaId] = { status:'error', error: err };
+              savePresegDb();
+              reject(new Error(err));
+              return;
+            }
+            console.log(`[SF/Preseg] Done ${mediaId} — ${actualSegs} segments`);
+            presegDb[mediaId] = { status:'done', segDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath };
+            savePresegDb();
+            resolve();
+          } catch(ve) {
+            presegDb[mediaId] = { status:'error', error: ve.message };
+            savePresegDb();
+            reject(ve);
+          }
         } else {
           const err = errBuf.slice(-300);
           console.error(`[SF/Preseg] Error ${mediaId}: ${err}`);
@@ -1610,7 +1629,12 @@ module.exports = function mountStreamForge(app, orion) {
     const currentFiles = Object.entries(presegDb).filter(([,v])=>v.status==='processing').map(([id])=>{
       const m = getMediaById(id); return m ? (m.seriesTitle||m.title||id) : id;
     });
-    res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers, currentFiles });
+    const allItems = Object.entries(presegDb).map(([id,v]) => {
+      const m = getMediaById(id);
+      const name = m ? (m.seriesTitle ? `${m.seriesTitle} S${String(m.season||0).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}` : m.title||id) : (v.filePath ? path.basename(v.filePath) : id);
+      return { id, status:v.status, name, error:v.error||null, segCount:v.segCount||null };
+    });
+    res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers, maxWorkers: MAX_PRESEG_WORKERS(), items: allItems, currentFiles });
   });
 
   app.post('/api/sf/preseg/queue-channel', (req, res) => {
