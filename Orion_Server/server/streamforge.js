@@ -853,6 +853,25 @@ function loadPresegDb() {
   } catch {}
 }
 
+// Check if a file has already been pre-segmented by looking for .hls folder on NAS
+// This survives container rebuilds since it checks the actual filesystem
+function checkFileAlreadyPresegged(mediaId, filePath) {
+  if (presegDb[mediaId]?.status === 'done') return true;
+  if (!filePath) return false;
+  const fileBase = path.basename(filePath, path.extname(filePath));
+  const fileDir = path.dirname(filePath);
+  const segDir = path.join(fileDir, '.hls', fileBase);
+  const indexFile = path.join(segDir, 'index.m3u8');
+  if (fs.existsSync(indexFile)) {
+    // Restore to presegDb so future calls are faster
+    const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
+    presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen: sfConfig.hlsSegmentSeconds||12, doneAt: Date.now() };
+    savePresegDb();
+    return true;
+  }
+  return false;
+}
+
 function savePresegDb() {
   try { fs.writeFileSync(path.join(SF_DIR, 'preseg.json'), JSON.stringify(presegDb)); } catch {}
 }
@@ -863,9 +882,9 @@ function isPresegged(mediaId) {
 
 function queuePreseg(mediaId, filePath, priority=false) {
   if (!mediaId || !filePath) return;
-  if (presegDb[mediaId]?.status === 'done') return;
   if (presegDb[mediaId]?.status === 'processing') return;
   if (presegQueue.find(q=>q.mediaId===mediaId)) return;
+  if (checkFileAlreadyPresegged(mediaId, filePath)) return; // check NAS filesystem
   if (priority) presegQueue.unshift({ mediaId, filePath });
   else presegQueue.push({ mediaId, filePath });
   drainPresegQueue();
