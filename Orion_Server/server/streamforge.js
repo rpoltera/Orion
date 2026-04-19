@@ -1637,6 +1637,23 @@ module.exports = function mountStreamForge(app, orion) {
     res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers, maxWorkers: MAX_PRESEG_WORKERS(), items: allItems, currentFiles });
   });
 
+  // Reset presegDb entries so they get re-validated on next queue
+  app.post('/api/sf/preseg/reset', (req, res) => {
+    const { mediaId } = req.body;
+    if (mediaId) {
+      delete presegDb[mediaId];
+    } else {
+      // Reset all done/error entries
+      Object.keys(presegDb).forEach(id => {
+        if (presegDb[id].status === 'done' || presegDb[id].status === 'error') {
+          delete presegDb[id];
+        }
+      });
+    }
+    savePresegDb();
+    res.json({ ok:true });
+  });
+
   app.post('/api/sf/preseg/queue-channel', (req, res) => {
     const { channelId } = req.body;
     if (!channelId) return res.status(400).json({ error:'channelId required' });
