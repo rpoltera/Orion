@@ -1651,11 +1651,11 @@ module.exports = function mountStreamForge(app, orion) {
     if (!now?.item) return res.status(404).json({ error:'nothing scheduled' });
     const playlist = getPresegPlaylist(now.item.id, now.offsetSeconds || 0, ch.id);
     if (!playlist) {
-      // Fall back to live FFmpeg if not pre-segmented
       return res.status(404).json({ error:'not pre-segmented', fallback:true });
     }
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.send(playlist);
   });
 
