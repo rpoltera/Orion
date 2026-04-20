@@ -1005,7 +1005,7 @@ async function runPreseg({ mediaId, filePath }) {
     console.log(`[SF/Preseg] Transcoding ${mediaId} → ${segDir}`);
 
     await new Promise((resolve, reject) => {
-      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'], uid: 0, gid: 0 });
+      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'] });
       let errBuf = '';
       proc.stderr.on('data', d => { errBuf += d.toString(); });
       proc.on('exit', code => {
