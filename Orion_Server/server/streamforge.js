@@ -948,15 +948,33 @@ function drainPresegQueue() {
 }
 
 async function runPreseg({ mediaId, filePath }) {
-  // Store segments alongside the original file on NAS — e.g. /mnt/nas/show/.hls/episodeName/
   const fileBase = path.basename(filePath, path.extname(filePath));
   const fileDir = path.dirname(filePath);
-  const segDir = path.join(fileDir, '.hls', fileBase);
+  const nasSegDir = path.join(fileDir, '.hls', fileBase); // final NAS location
+  const localTempDir = path.join(SF_DIR, 'preseg_temp', mediaId); // fast local write
+  const segDir = localTempDir; // FFmpeg writes here first
   const segLen = sfConfig.hlsSegmentSeconds || 12;
-  presegDb[mediaId] = { status: 'processing', segDir, filePath };
+  presegDb[mediaId] = { status: 'processing', segDir: nasSegDir, filePath };
+
+  const moveToNas = () => {
+    try {
+      fs.mkdirSync(path.dirname(nasSegDir), { recursive: true });
+      if (fs.existsSync(nasSegDir)) fs.rmSync(nasSegDir, { recursive: true });
+      fs.renameSync(localTempDir, nasSegDir);
+      console.log('[SF/Preseg] Moved to NAS: ' + nasSegDir);
+    } catch(me) {
+      console.log('[SF/Preseg] rename failed, copying: ' + me.message);
+      fs.mkdirSync(nasSegDir, { recursive: true });
+      for (const f of fs.readdirSync(localTempDir)) {
+        fs.copyFileSync(path.join(localTempDir, f), path.join(nasSegDir, f));
+      }
+      fs.rmSync(localTempDir, { recursive: true });
+      console.log('[SF/Preseg] Copied to NAS: ' + nasSegDir);
+    }
+  };
 
   try {
-    fs.mkdirSync(segDir, { recursive: true });
+    fs.mkdirSync(localTempDir, { recursive: true });
     const gpuId = assignGpu();
     // Use config to determine encoder — hwEncoder may not be set yet at startup
     const useNvenc = sfConfig.hwAccel === 'nvenc' || hwEncoder.includes('nvenc');
