@@ -2664,7 +2664,7 @@ function PreSegManager({ call }) {
     } catch(e) { setMsg(e.message); }
   };
 
-  React.useEffect(() => { refresh(); const t = setInterval(refresh, 5000); return () => clearInterval(t); }, []);
+  React.useEffect(() => { refresh(); const t = setInterval(refresh, 10000); return () => clearInterval(t); }, []);
 
   const queueChannel = async (chId, chName) => {
     setLoading(true);
