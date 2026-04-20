@@ -1007,8 +1007,39 @@ async function runPreseg({ mediaId, filePath }) {
     await new Promise((resolve, reject) => {
       const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'] });
       let errBuf = '';
+      let settled = false;
+      const settle = (fn) => { if (!settled) { settled = true; fn(); } };
+
+      // Watchdog — poll every 10s for completion in case exit event doesn't fire (NFS hang)
+      const watchdog = setInterval(() => {
+        try {
+          const indexFile = path.join(segDir, 'index.m3u8');
+          if (fs.existsSync(indexFile)) {
+            const content = fs.readFileSync(indexFile, 'utf8');
+            if (content.includes('#EXT-X-ENDLIST')) {
+              const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
+              console.log(`[SF/Preseg] Watchdog detected completion for ${mediaId} — ${segs} segs`);
+              clearInterval(watchdog);
+              proc.kill('SIGKILL');
+              presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen, doneAt:Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName||path.basename(filePath||'') };
+              savePresegDb();
+              settle(resolve);
+            }
+          }
+        } catch {}
+      }, 10000);
+
+      // Timeout after 2 hours
+      const timeout = setTimeout(() => {
+        clearInterval(watchdog);
+        proc.kill('SIGKILL');
+        settle(() => reject(new Error('preseg timeout after 2 hours')));
+      }, 7200000);
+
       proc.stderr.on('data', d => { errBuf += d.toString(); });
       proc.on('exit', code => {
+        clearInterval(watchdog);
+        clearTimeout(timeout);
         if (code === 0 || code === null) {
           // Validate completion — check index.m3u8 has EXT-X-ENDLIST and seg count matches
           try {
@@ -1031,18 +1062,18 @@ async function runPreseg({ mediaId, filePath }) {
             console.log(`[SF/Preseg] Done ${mediaId} — ${actualSegs} segments`);
             presegDb[mediaId] = { status:'done', segDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName || path.basename(filePath||'') };
             savePresegDb();
-            resolve();
+            settle(resolve);
           } catch(ve) {
             presegDb[mediaId] = { status:'error', error: ve.message };
             savePresegDb();
-            reject(ve);
+            settle(() => reject(ve));
           }
         } else {
           const err = errBuf.slice(-300);
           console.error(`[SF/Preseg] Error ${mediaId}: ${err}`);
           presegDb[mediaId] = { status:'error', error: err.slice(0,200) };
           savePresegDb();
-          reject(new Error('preseg failed'));
+          settle(() => reject(new Error('preseg failed')));
         }
       });
     });
