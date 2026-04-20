@@ -956,7 +956,14 @@ async function runPreseg({ mediaId, filePath }) {
   presegDb[mediaId] = { status: 'processing', segDir, filePath };
 
   try {
-    fs.mkdirSync(segDir, { recursive: true });
+    // Create directory using shell as root to handle NFS UID mapping
+    const { execSync } = require('child_process');
+    try {
+      execSync(`mkdir -p "${segDir.replace(/"/g, '\"')}" && chmod 777 "${segDir.replace(/"/g, '\"')}"`, { uid:0, gid:0 });
+    } catch(mkErr) {
+      console.error('[SF/Preseg] mkdir failed:', mkErr.message);
+      throw mkErr;
+    }
     const gpuId = assignGpu();
     // Use config to determine encoder — hwEncoder may not be set yet at startup
     const useNvenc = sfConfig.hwAccel === 'nvenc' || hwEncoder.includes('nvenc');
@@ -998,7 +1005,7 @@ async function runPreseg({ mediaId, filePath }) {
     console.log(`[SF/Preseg] Transcoding ${mediaId} → ${segDir}`);
 
     await new Promise((resolve, reject) => {
-      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'] });
+      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'], uid: 0, gid: 0 });
       let errBuf = '';
       proc.stderr.on('data', d => { errBuf += d.toString(); });
       proc.on('exit', code => {
