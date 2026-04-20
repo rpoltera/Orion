@@ -1016,7 +1016,7 @@ async function runPreseg({ mediaId, filePath }) {
     console.log(`[SF/Preseg] Transcoding ${mediaId} → ${segDir}`);
 
     await new Promise((resolve, reject) => {
-      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'] });
+      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','ignore'] }); // ignore stderr to prevent pipe blocking
       let errBuf = '';
       let settled = false;
       const settle = (fn) => { if (!settled) { settled = true; fn(); } };
@@ -1059,7 +1059,7 @@ async function runPreseg({ mediaId, filePath }) {
         settle(() => reject(new Error('preseg timeout after 2 hours')));
       }, 7200000);
 
-      proc.stderr.on('data', d => { errBuf += d.toString(); });
+      // stderr ignored to prevent pipe buffer blocking FFmpeg exit
       proc.on('exit', code => {
         clearInterval(watchdog);
         clearTimeout(timeout);
