@@ -2154,7 +2154,7 @@ function Watch({ call, initialChannelId }) {
         if (window.Hls && window.Hls.isSupported()) {
           const hls = new window.Hls({
             lowLatencyMode: false,
-            liveSyncDurationCount: 2,        // start playing after just 2 segments
+            liveSyncDurationCount: 1,        // start playing after just 1 segment
             liveMaxLatencyDurationCount: 50, // only jump if >100s behind (prevents mid-show skips)
             maxBufferLength: 60,             // buffer up to 60s
             maxBufferSize: 120 * 1000 * 1000,// 120MB buffer
@@ -2478,7 +2478,22 @@ function SFSettings({ call }) {
           <Field label="Audio Language" hint="ISO 639-2 code (e.g. eng, spa)"><input style={inp} value={config.audioLanguage||'eng'} onChange={e=>update('audioLanguage',e.target.value)}/></Field>
         </div>
         <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius-lg)',padding:20 }}>
-          <div style={{ fontWeight:700,fontSize:14,marginBottom:16 }}>📡 HLS Output</div>
+          <div style={{ fontWeight:700,fontSize:14,marginBottom:16 }}>📡 Streaming Output</div>
+          <Field label={<span style={{display:'flex',alignItems:'center',gap:6}}>Output Protocol <span title={'HLS: Universal, 2-4s start, works everywhere including WiFi and internet.&#10;SRT: Low latency 1-2s, works over WiFi and internet, supported by TiviMate/VLC.&#10;RTSP: Low latency 1-2s, works over WiFi, wide player support.&#10;RTMP: 2-3s latency, universal compatibility, works everywhere.&#10;UDP Multicast: Near-instant &lt;1s, requires wired ethernet, local network only.'} style={{cursor:'help',color:'var(--accent)',fontSize:14}}>ⓘ</span></span>} hint="Choose the streaming protocol for all channels">
+            <select style={inp} value={config.outputProtocol||'hls'} onChange={e=>update('outputProtocol',e.target.value)}>
+              <option value="hls">HLS — Universal, works everywhere, 2-4s start</option>
+              <option value="srt">SRT — Low latency 1-2s, WiFi+internet, TiviMate/VLC</option>
+              <option value="rtsp">RTSP — Low latency 1-2s, WiFi, wide player support</option>
+              <option value="rtmp">RTMP — 2-3s latency, universal, works everywhere</option>
+              <option value="udp">UDP Multicast — Instant &lt;1s, wired ethernet only, local network</option>
+            </select>
+          </Field>
+          {config.outputProtocol==='srt' && <Field label="SRT Port" hint="Base port for SRT streams (each channel gets port + channel number)"><input style={inp} type="number" value={config.srtPort||9000} onChange={e=>update('srtPort',+e.target.value)}/></Field>}
+          {config.outputProtocol==='rtsp' && <Field label="RTSP Port"><input style={inp} type="number" value={config.rtspPort||8554} onChange={e=>update('rtspPort',+e.target.value)}/></Field>}
+          {config.outputProtocol==='rtmp' && <Field label="RTMP Port"><input style={inp} type="number" value={config.rtmpPort||1935} onChange={e=>update('rtmpPort',+e.target.value)}/></Field>}
+          {config.outputProtocol==='udp' && <Field label="Multicast Base Address" hint="e.g. 239.0.0.1 — each channel gets .1, .2, .3 etc"><input style={inp} value={config.udpBase||'239.0.0'} onChange={e=>update('udpBase',e.target.value)}/></Field>}
+          {config.outputProtocol==='udp' && <Field label="Multicast Port"><input style={inp} type="number" value={config.udpPort||1234} onChange={e=>update('udpPort',+e.target.value)}/></Field>}
+          {(!config.outputProtocol||config.outputProtocol==='hls') && <>
           <Field label="Segment Length (seconds)"><input style={inp} type="number" value={config.hlsSegmentSeconds||4} onChange={e=>update('hlsSegmentSeconds',+e.target.value)} min={1} max={30}/></Field>
           <Field label="Playlist Size (segments)"><input style={inp} type="number" value={config.hlsListSize||6} onChange={e=>update('hlsListSize',+e.target.value)} min={2} max={20}/></Field>
           <Field label="Idle Timeout (seconds)"><input style={inp} type="number" value={config.hlsIdleTimeoutSecs||60} onChange={e=>update('hlsIdleTimeoutSecs',+e.target.value)} min={10}/></Field>
@@ -2493,6 +2508,7 @@ function SFSettings({ call }) {
               <option value="none">None (start on demand)</option>
             </select>
           </Field>
+          </>}
         </div>
       </div>
       <div style={{ display:'flex',justifyContent:'flex-end',marginTop:20 }}>
