@@ -32,11 +32,36 @@ let _mediaCombinedDirty = true;
 let _showsCache = null; // pre-built show index, rebuilt when media cache rebuilds
 const _mediaById = new Map(); // id -> item for O(1) lookups
 
+let _networkIndex = new Map(); // network -> [items]
+
 function invalidateMediaCache() {
   _mediaCombinedDirty = true;
   _mediaCombinedCache = null;
   _showsCache = null;
   _mediaById.clear();
+  _networkIndex.clear();
+}
+
+function getNetworkIndex() {
+  if (_networkIndex.size > 0) return _networkIndex;
+  if (!orionDb) return _networkIndex;
+  _networkIndex.clear();
+  // Build directly from orionDb mapped to SF media format — same as getMediaCombined() but indexed by network
+  for (const ep of (orionDb.tvShows||[])) {
+    if (!ep.network || !ep.filePath) continue;
+    const key = ep.network.toLowerCase();
+    if (!_networkIndex.has(key)) _networkIndex.set(key, []);
+    _networkIndex.get(key).push({
+      id: ep.id, path: ep.filePath, filePath: ep.filePath, filename: ep.fileName||'',
+      title: ep.title||'', seriesTitle: ep.seriesTitle||'',
+      season: ep.seasonNum||null, episode: ep.episode||null,
+      type: 'episode', duration: ep.runtime ? ep.runtime*60 : 1800,
+      thumb: ep.thumbnail||null, summary: ep.overview||'',
+      genres: ep.genres||[], libraryId: 'orion-tvShows', sourceType: 'orion',
+    });
+  }
+  console.log(`[SF] Network index built: ${_networkIndex.size} networks, e.g. HGTV=${(_networkIndex.get('hgtv')||[]).length} items`);
+  return _networkIndex;
 }
 
 function getMediaById(id) {
@@ -376,25 +401,44 @@ function getPlayoutNow(ch, nowMs) {
     const seasonIndex = dayOffset % seasonNums.length;
     const currentSeasonNum = seasonNums[seasonIndex];
     const seasonEps = bySeasonMap[currentSeasonNum];
+    if (!seasonEps?.length) return null;
 
     const dayStart = anchor + dayOffset * DAY_MS;
     const timeInDay = nowMs - dayStart;
 
     // Total duration of this season (loop within the day)
     const seasonDurMs = seasonEps.reduce((s, ep) => {
-      const item = getMediaById(ep.mediaId);
-      return s + ((item?.duration || ep.duration || 1800) * 1000);
+      let item = getMediaById(ep.mediaId);
+      if (!item && ep.season != null && ep.episode != null) {
+        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase().replace(/[^a-z0-9]/g,' ').trim();
+        item = getMediaCombined().find(m =>
+          m.season === ep.season && m.episode === ep.episode &&
+          (m.seriesTitle||m.showName||m.title||m.filename||'').toLowerCase().includes(showTitle.split(' ')[0])
+        );
+      }
+      return s + ((ep.duration || item?.duration || 1800) * 1000);
     }, 0);
     if (!seasonDurMs) return null;
 
     const timeInCycle = timeInDay % seasonDurMs;
     let cursor = 0;
     for (const ep of seasonEps) {
-      const item = getMediaById(ep.mediaId);
-      const dur = (item?.duration || ep.duration || 1800) * 1000;
+      let item = getMediaById(ep.mediaId);
+      // Fallback: find by show title + season + episode if ID changed after DB rebuild
+      if (!item && ep.season != null && ep.episode != null) {
+        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase().replace(/[^a-z0-9]/g,' ').trim();
+        item = getMediaCombined().find(m =>
+          m.season === ep.season && m.episode === ep.episode &&
+          (m.seriesTitle||m.showName||m.title||m.filename||'').toLowerCase().includes(showTitle.split(' ')[0])
+        );
+      }
+      // Use ep.duration from schedule as source of truth — item.duration from DB may be wrong
+      const dur = (ep.duration || item?.duration || 1800) * 1000;
       if (timeInCycle < cursor + dur) {
         const loopStart = dayStart + Math.floor(timeInDay / seasonDurMs) * seasonDurMs;
-        const offsetSeconds = Math.floor((timeInCycle - cursor) / 1000);
+        const rawOffset = Math.floor((timeInCycle - cursor) / 1000);
+        const maxOffset = Math.max(0, Math.floor(dur/1000) - 60); // cap 60s before end
+        const offsetSeconds = Math.min(rawOffset, maxOffset);
         return { item, block: ep, offsetSeconds, startTime: loopStart + cursor, endTime: loopStart + cursor + dur };
       }
       cursor += dur;
@@ -431,31 +475,45 @@ function getPlayoutNow(ch, nowMs) {
   }
 
   // Genre/Network/Collection loop — play all items matching a tag
-  if (ch.genreLoop?.genre) {
-    const { genre, mediaType, matchType } = ch.genreLoop;
-    const g = genre.toLowerCase();
-    let items = getMediaCombined().filter(m => {
-      if (m.libraryId === 'orion-music') return false;
-      if (mediaType === 'movie' && m.type !== 'movie') return false;
-      if (mediaType === 'episode' && m.type !== 'episode') return false;
-      if (m.path === '' && !m.jellyfinId && !m.plexKey) return false;
+  // Support both single genreLoop and array genreLoops
+  const genreLoopList = ch.genreLoops?.length ? ch.genreLoops : (ch.genreLoop?.genre ? [ch.genreLoop] : []);
+  if (genreLoopList.length > 0) {
+    const getItemsForLoop = (loop) => {
+      const { genre, mediaType, matchType } = loop;
+      const g = genre.toLowerCase();
+      let items;
       if (matchType === 'network') {
-        // Read networks directly from the raw orionDb item via m.id
-        const raw = (orionDb?.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb?.movies||[]).find(mv=>mv.id===m.id);
-        if (!raw) return false;
-        const parseArr = v => { if (Array.isArray(v)) return v; if (typeof v==='string') { try { return JSON.parse(v)||[]; } catch { return []; } } return []; };
-        const nets = [
-          ...parseArr(raw.networks),
-          ...parseArr(raw.watchProviders),
-        ].map(n=>typeof n==='object'?n.name||n:String(n)).map(s=>s.toLowerCase());
-        return nets.some(s => s.includes(g) || g.includes(s));
+        const idx = getNetworkIndex();
+        items = idx.get(g) || [];
+        if (!items.length) {
+          const arr = [];
+          for (const [k,v] of idx.entries()) { if (k.includes(g) || g.includes(k)) arr.push(...v); }
+          items = arr;
+        }
+        if (mediaType === 'movie') items = items.filter(m => m.type === 'movie');
+        if (mediaType === 'episode') items = items.filter(m => m.type === 'episode' || m.season != null);
+      } else {
+        items = getMediaCombined().filter(m => {
+          if (m.libraryId === 'orion-music') return false;
+          if (mediaType === 'movie' && m.type !== 'movie') return false;
+          if (mediaType === 'episode' && m.type !== 'episode') return false;
+          if (m.path === '' && !m.jellyfinId && !m.plexKey) return false;
+          const genres = (m.genres||[]).map(x=>x.toLowerCase());
+          return genres.some(gn => gn.includes(g) || g.includes(gn)) ||
+                 m.title?.toLowerCase().includes(g) || m.summary?.toLowerCase().includes(g);
+        });
       }
-      // Default: match genres + title + summary
-      const genres = (m.genres||[]).map(x=>x.toLowerCase());
-      return genres.some(gn => gn.includes(g) || g.includes(gn)) ||
-             m.title?.toLowerCase().includes(g) ||
-             m.summary?.toLowerCase().includes(g);
-    });
+      return items;
+    };
+    // Merge items from all loops, deduplicate by id
+    const seenIds = new Set();
+    let items = [];
+    for (const loop of genreLoopList) {
+      for (const item of getItemsForLoop(loop)) {
+        if (!seenIds.has(item.id)) { seenIds.add(item.id); items.push(item); }
+      }
+    }
+    console.log('[SF/GenreLoop] ch="'+ch.name+'" loops='+genreLoopList.length+' items='+items.length);
     if (!items.length) return null;
     // Sort episodes by season/episode, movies by year/title
     items = items.sort((a,b) => {
@@ -468,13 +526,16 @@ function getPlayoutNow(ch, nowMs) {
     const elapsed = (nowMs-anchor) % totalDurMs;
     let cursor = 0;
     for (const item of items) {
-      const dur = (item.duration||1800)*1000;
-      if (elapsed < cursor+dur) {
+      // Use 90% of stored duration as effective duration — guards against DB runtime being longer than actual file
+      const storedDur = (item.duration||1800)*1000;
+      const effectiveDur = Math.floor(storedDur * 0.90); // assume file may be 10% shorter than DB says
+      if (elapsed < cursor+effectiveDur) {
         const loopStart = anchor+Math.floor((nowMs-anchor)/totalDurMs)*totalDurMs;
-        const offsetSeconds = Math.floor((elapsed-cursor)/1000);
-        return { item, block:{mediaId:item.id}, offsetSeconds, startTime:loopStart+cursor, endTime:loopStart+cursor+dur };
+        const rawOfs = Math.floor((elapsed-cursor)/1000);
+        const offsetSeconds = Math.min(rawOfs, Math.floor(effectiveDur/1000) - 30);
+        return { item, block:{mediaId:item.id}, offsetSeconds, startTime:loopStart+cursor, endTime:loopStart+cursor+storedDur };
       }
-      cursor += dur;
+      cursor += effectiveDur;
     }
   }
 
@@ -503,7 +564,18 @@ function getPlayoutNow(ch, nowMs) {
     if (block.streamId) { const stream = getSfStream(block.streamId); const dur=(block.duration||3600)*1000; if (elapsed < cursor+dur) { const st = anchor+Math.floor((nowMs-anchor)/(totalDuration*1000))*totalDuration*1000+cursor; return { item:null, stream, block, offsetSeconds:0, startTime:st, endTime:st+dur, isLive:true }; } cursor+=dur; continue; }
     let item = getMediaById(block.mediaId);
     // Fallback: search by title if ID lookup fails (IDs can change after DB rebuild)
-    if (!item && block.title) { item = getMediaCombined().find(m => (m.episodeTitle||m.title) === block.title); }
+    if (!item && block.title) {
+      const bt = block.title.toLowerCase();
+      // Try exact episode/movie title match first
+      item = getMediaCombined().find(m => (m.episodeTitle||m.title||'').toLowerCase() === bt);
+      // Then try series title match — picks first episode of matching show
+      if (!item) item = getMediaCombined().find(m => (m.seriesTitle||m.showName||m.series||'').toLowerCase() === bt);
+      // Then try partial match
+      if (!item) item = getMediaCombined().find(m =>
+        (m.title||'').toLowerCase().includes(bt) ||
+        (m.seriesTitle||m.showName||'').toLowerCase().includes(bt)
+      );
+    }
     if (!item) { cursor += 1800*1000; continue; }
     const dur = (item.duration||1800)*1000;
     if (elapsed < cursor+dur) { const ofs=Math.floor((elapsed-cursor)/1000); const st=anchor+Math.floor((nowMs-anchor)/(totalDuration*1000))*totalDuration*1000+cursor; return { item, block, offsetSeconds:ofs, startTime:st, endTime:st+dur }; }
@@ -514,6 +586,24 @@ function getPlayoutNow(ch, nowMs) {
 
 function buildSchedule(ch, fromMs, toMs) {
   if (ch.liveStreamId) { const s=getSfStream(ch.liveStreamId); return [{start:fromMs,end:toMs,title:s?`🔴 ${s.name}`:'🔴 Live',isLive:true}]; }
+  // GenreLoop/collection and series channels — walk through time slots and get what's playing
+  if (ch.genreLoops?.length || ch.genreLoop || ch.seriesSchedule?.episodes?.length) {
+    const programs = [];
+    let t = fromMs;
+    let safety = 0;
+    while (t < toMs && safety++ < 200) {
+      const now = getPlayoutNow(ch, t);
+      if (!now || !now.item) { t += 3600000; continue; }
+      const start = now.startTime || t;
+      const end = now.endTime || (t + (now.item.duration||1800)*1000);
+      const title = now.item.seriesTitle
+        ? `${now.item.seriesTitle} S${String(now.item.season||0).padStart(2,'0')}E${String(now.item.episode||0).padStart(2,'0')}${now.item.episodeTitle?' — '+now.item.episodeTitle:''}`
+        : now.item.title || ch.name;
+      programs.push({ start, end, title, desc: now.item.summary||'', icon: now.item.thumb||'' });
+      t = end + 1000; // move to next slot
+    }
+    return programs;
+  }
   const playout=ch.playout||[]; if (!playout.length) return [];
   const totalDuration = playout.reduce((s,b)=>{if(b.streamId)return s+(b.duration||3600);const item=getMediaById(b.mediaId);return s+(item?(item.duration||1800):1800);},0);
   if (!totalDuration) return [];
@@ -547,7 +637,8 @@ function assignGpu() {
 // ── FFmpeg args builder ───────────────────────────────────────────────────────
 function buildFfArgs(src, offsetSeconds, opts={}) {
   const { outputFormat='hls', hlsDir, gpuId=0, quickStart=false, liveSource=false, swFallback=false } = opts;
-  const hw = sfConfig.hwAccel || 'amf';
+  // Derive hw from hwEncoder if hwAccel not explicitly set in config
+  const hw = sfConfig.hwAccel || (hwEncoder.includes('nvenc') ? 'nvenc' : hwEncoder.includes('amf') ? 'amf' : hwEncoder.includes('qsv') ? 'qsv' : 'cpu');
   const isLiveSrc = src.type === 'http';
   // For file sources: ALWAYS transcode — copy mode breaks HLS timestamps and causes playback issues.
   // For live HTTP sources: copy is handled by the live proxy endpoint; here we still transcode.
@@ -560,19 +651,21 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     console.log(`[SF/HLS] Overriding copy→h264 for file source (copy breaks HLS timestamps)`);
   }
   const vProfile = sfConfig.videoProfile || 'h264'; // h264 or hevc
-  const segSeconds = sfConfig.hlsSegmentSeconds || 6;
+  const segSeconds = sfConfig.hlsSegmentSeconds || 1;
   const args = [];
 
   if (isLiveSrc) {
-    args.push('-probesize', '500000', '-analyzeduration', '500000');
+    args.push('-probesize', '100000', '-analyzeduration', '100000');
     args.push('-re');
   } else {
-    args.push('-probesize', '1000000', '-analyzeduration', '1000000');
-    args.push('-readrate', '1.5');
+    args.push('-probesize', '200000', '-analyzeduration', '200000');
+    args.push('-re'); // Limit to 1x real-time speed — prevents 2-3x CPU burn on file sources
   }
 
   // Hardware decode (optional, off by default)
-  const useHwDecode = sfConfig.hwDecode && vCodec !== 'copy';
+  // Disable hw decode for file sources — filter reinit errors when episodes change resolution
+  const isNvenc = hw === 'nvenc' || hwEncoder.includes('nvenc');
+  const useHwDecode = (sfConfig.hwDecode === true && isLiveSrc && isNvenc) && vCodec !== 'copy';
   if (useHwDecode) {
     if (hw === 'nvenc' || hwEncoder.includes('nvenc')) {
       args.push('-hwaccel', 'cuda', '-hwaccel_device', String(gpuId), '-hwaccel_output_format', 'cuda');
@@ -588,8 +681,40 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   }
 
   // Single -fflags combining all needed flags — duplicate -fflags causes FFmpeg to crash
-  const fflags = isLiveSrc ? '+genpts+discardcorrupt+nobuffer' : '+genpts+discardcorrupt';
+  const fflags = isLiveSrc ? '+genpts+discardcorrupt+nobuffer+fastseek' : '+genpts+discardcorrupt+fastseek';
   args.push('-fflags', fflags, '-err_detect', 'ignore_err');
+
+  // Cap seek offset to actual file duration — prevents FFmpeg exiting with 0 frames
+  // when stored duration in DB is longer than the actual file
+  if (!isLiveSrc && offsetSeconds > 0 && src.value) {
+    try {
+      const probeResult = require('child_process').spawnSync(ffprobeExe, [
+        '-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', src.value
+      ], { timeout: 5000, encoding: 'utf8' });
+      const fileDuration = parseFloat(probeResult.stdout);
+      if (fileDuration > 0 && offsetSeconds >= fileDuration - 30) {
+        const actualDur = Math.floor(fileDuration);
+        console.warn(`[SF/HLS] Offset ${offsetSeconds}s >= file duration ${actualDur}s for "${src.value.split('/').pop()}" — updating duration cache`);
+        // Update media cache with actual duration
+        const cachedItem = _mediaById.get(now?.item?.id);
+        if (cachedItem) cachedItem.duration = actualDur;
+        // Update seriesSchedule episode duration in DB so future calculations are correct
+        if (ch?.seriesSchedule?.episodes && now?.item?.id) {
+          const ep = ch.seriesSchedule.episodes.find(e => e.mediaId === now.item.id);
+          if (ep && ep.duration > actualDur) {
+            ep.duration = actualDur;
+            // Persist to DB
+            const chIdx = sfDb.channels.findIndex(c => c.id === ch.id);
+            if (chIdx >= 0) { sfDb.channels[chIdx] = ch; saveAll(); }
+          }
+        }
+        // Calculate corrected offset within actual file duration
+        offsetSeconds = offsetSeconds % actualDur;
+      }
+    } catch {}
+  }
+
   if (!isLiveSrc && offsetSeconds > 10) {
     // Two-pass seek: fast keyframe seek to near target, then short decode-seek
     // Minimizes NAS I/O — only reads a few seconds to find the keyframe
@@ -622,7 +747,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
       '-acodec','aac','-b:a','192k','-ac','2',
       '-avoid_negative_ts','make_zero',
       '-f','hls',
-      '-hls_time','4','-hls_list_size','30',
+      '-hls_time','2','-hls_list_size','10',
       '-hls_flags','delete_segments+omit_endlist',
       '-hls_allow_cache','0',
       '-hls_segment_filename',path.join(hlsDir,'seg%05d.ts'),
@@ -633,7 +758,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   const maxBitrate = sfConfig.videoMaxBitrate || '8M';
   const bufSize    = sfConfig.videoBufferSize || '8M';
   const crf = String(sfConfig.videoCrf || 23);
-  const res = quickStart ? '854x480' : (sfConfig.videoResolution || null);
+  const res = quickStart ? '854x480' : getAdaptiveResolution();
   const scaleFilter = res && res !== 'source'
     ? (() => { const [w, h] = res.split('x'); return `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2`; })()
     : null;
@@ -647,9 +772,10 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     args.push('-vcodec', 'copy', '-bsf:v', 'h264_mp4toannexb');
   } else if (vCodec === 'libx264') {
     // Software fallback — ultrafast preset for minimal startup delay
-    args.push('-vcodec', 'libx264', '-crf', '26', '-preset', 'ultrafast', '-maxrate', maxBitrate, '-bufsize', bufSize);
+    args.push('-vcodec', 'libx264', '-crf', '26', '-preset', 'ultrafast', '-tune', 'zerolatency',
+      '-maxrate', maxBitrate, '-bufsize', bufSize, '-threads', '0');
     if (scaleFilter) args.push('-vf', scaleFilter);
-    args.push('-g', '30', '-threads', '0');
+    args.push('-g', '48', '-keyint_min', '48');
   } else if (hw === 'amf' || hwEncoder.includes('amf')) {
     const enc = vProfile === 'hevc' ? 'hevc_amf' : 'h264_amf';
     if (scaleFilter) args.push('-vf', `${scaleFilter},format=yuv420p`); else args.push('-pix_fmt', 'yuv420p');
@@ -667,12 +793,14 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     }
     args.push('-vcodec', enc,
       '-gpu', String(gpuId),              // which P40 to use
-      '-preset', 'p2',                    // fast encode (p1=fastest, p7=slowest)
-      '-tune', 'hq',                      // quality tuning
+      '-preset', 'p1',                    // p1=absolute fastest NVENC preset
+      '-tune', 'ull',                     // ultra low latency tuning
       '-rc:v', 'vbr',
       '-cq:v', crf,
       '-b:v', bitrate, '-maxrate:v', maxBitrate, '-bufsize:v', bufSize,
-      '-g', String(gopSize), '-keyint_min', String(gopSize), '-sc_threshold', '0',
+      '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
+      '-zerolatency', '1',               // reduce encoder buffer delay
+      '-threads', '0',                   // auto-thread
       '-force_key_frames', forceKf);
     if (vProfile === 'hevc') args.push('-tag:v', 'hvc1'); // Apple/Plex compat
   } else {
@@ -689,14 +817,16 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
     '-max_interleave_delta', '500000000');
 
   if (outputFormat === 'hls') {
-    // Live streams use 2s segments so m3u8 appears within 2s instead of 6s
     const segTime = String(isLiveSrc ? Math.min(segSeconds, 2) : segSeconds);
-    const listSz = String(sfConfig.hlsListSize || 20); // 20 × 6s = 120s of buffer
+    const listSz = String(sfConfig.hlsListSize || 30);
     args.push('-f', 'hls',
       '-hls_time', segTime,
       '-hls_list_size', listSz,
       '-hls_flags', 'delete_segments+append_list+independent_segments',
       '-hls_segment_type', 'mpegts',
+      '-hls_allow_cache', '0',
+      '-flush_packets', '1',
+      '-hls_init_time', '0',
       '-hls_segment_filename', path.join(hlsDir, 'seg%05d.ts'),
       path.join(hlsDir, 'index.m3u8'));
   } else {
@@ -707,6 +837,255 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
 const hlsSessions = {};
 const swFallbackChannels = new Set(); // channels where AMF crashed — use libx264
 const SF_HLS_DIR = () => path.join(SF_DIR, 'hls');
+const SF_PRESEG_DIR = () => sfConfig.presegDir ? sfConfig.presegDir : path.join(SF_DIR, 'presegs');
+
+// ── Pre-segmentation Engine ──────────────────────────────────────────────────
+// Transcodes media files ONCE to permanent HLS segments on disk.
+// At playback time: zero FFmpeg, just serve pre-made segments. Near-zero CPU.
+let presegDb = {};    // mediaId -> { status:'pending'|'processing'|'done'|'error', segCount, segLength, segDir, duration }
+let presegQueue = []; // { mediaId, filePath, priority }
+let presegWorkers = 0;
+const MAX_PRESEG_WORKERS = () => Math.max(1, parseInt(sfConfig.presegWorkers) || 4);
+
+function loadPresegDb() {
+  try {
+    const p = path.join(SF_DIR, 'preseg.json');
+    if (fs.existsSync(p)) presegDb = JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {}
+  // Restore pending queue from disk
+  try {
+    const qp = path.join(SF_DIR, 'preseg-queue.json');
+    if (fs.existsSync(qp)) {
+      const saved = JSON.parse(fs.readFileSync(qp, 'utf8'));
+      // Only restore items not already done
+      presegQueue = saved.filter(q => presegDb[q.mediaId]?.status !== 'done' && presegDb[q.mediaId]?.status !== 'processing');
+      console.log(`[SF/Preseg] Restored ${presegQueue.length} queued items from disk`);
+    }
+  } catch {}
+}
+
+function savePresegQueue() {
+  try { fs.writeFileSync(path.join(SF_DIR, 'preseg-queue.json'), JSON.stringify(presegQueue)); } catch {}
+}
+
+// Check if a file has already been pre-segmented by looking for .hls folder on NAS
+// This survives container rebuilds since it checks the actual filesystem
+function checkFileAlreadyPresegged(mediaId, filePath) {
+  if (presegDb[mediaId]?.status === 'done') return true;
+  if (!filePath) return false;
+  const fileBase = path.basename(filePath, path.extname(filePath));
+  const fileDir = path.dirname(filePath);
+  const segDir = path.join(fileDir, '.hls', fileBase);
+  const indexFile = path.join(segDir, 'index.m3u8');
+  if (fs.existsSync(indexFile)) {
+    // Verify all segments are present by reading the index.m3u8 and counting expected segments
+    try {
+      const indexContent = fs.readFileSync(indexFile, 'utf8');
+      const isComplete = indexContent.includes('#EXT-X-ENDLIST');
+      const expectedSegs = (indexContent.match(/#EXTINF/g)||[]).length;
+      const segFiles = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts'));
+      const segs = segFiles.length;
+      const emptySegs = segFiles.filter(f => fs.statSync(path.join(segDir,f)).size === 0).length;
+      if (!isComplete || (expectedSegs > 0 && segs < expectedSegs) || emptySegs > 0) {
+        console.warn(`[SF/Preseg] Incomplete preseg for ${mediaId} — ${segs}/${expectedSegs} segs, complete=${isComplete}, empty=${emptySegs} — will re-transcode`);
+        try { fs.rmSync(segDir, { recursive:true }); } catch {}
+        delete presegDb[mediaId];
+        return false;
+      }
+      // Restore to presegDb so future calls are faster
+      presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen: sfConfig.hlsSegmentSeconds||12, doneAt: Date.now() };
+      savePresegDb();
+      return true;
+    } catch { return false; }
+  }
+  return false;
+}
+
+function savePresegDb() {
+  try { fs.writeFileSync(path.join(SF_DIR, 'preseg.json'), JSON.stringify(presegDb)); } catch {}
+}
+
+function isPresegged(mediaId) {
+  return presegDb[mediaId]?.status === 'done';
+}
+
+function queuePreseg(mediaId, filePath, priority=false) {
+  if (!mediaId || !filePath) return;
+  if (presegDb[mediaId]?.status === 'processing') return;
+  if (presegQueue.find(q=>q.mediaId===mediaId)) return;
+  if (checkFileAlreadyPresegged(mediaId, filePath)) return; // check NAS filesystem
+  const m = getMediaById(mediaId);
+  // Build display name — use media object if available, else parse from filename
+  let displayName;
+  if (m && m.season != null) {
+    displayName = `${m.title} S${String(m.season).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}`;
+  } else if (filePath) {
+    // Parse from filename e.g. "Doc Martin_S01E03_Shit Happens.mp4"
+    const base = path.basename(filePath, path.extname(filePath));
+    const seMatch = base.match(/[Ss](\d+)[Ee](\d+)/);
+    if (seMatch) {
+      const showName = base.split(/[_\s-]*[Ss]\d+[Ee]\d+/)[0].replace(/[_]/g,' ').trim();
+      displayName = `${showName} S${seMatch[1].padStart(2,'0')}E${seMatch[2].padStart(2,'0')}`;
+    } else {
+      displayName = base;
+    }
+  } else {
+    displayName = m?.title || mediaId;
+  }
+  if (priority) presegQueue.unshift({ mediaId, filePath, displayName });
+  else presegQueue.push({ mediaId, filePath, displayName });
+  savePresegQueue();
+  drainPresegQueue();
+}
+
+function drainPresegQueue() {
+  while (presegWorkers < MAX_PRESEG_WORKERS() && presegQueue.length > 0) {
+    const item = presegQueue.shift();
+    savePresegQueue();
+    presegWorkers++;
+    runPreseg(item).finally(() => { presegWorkers--; drainPresegQueue(); });
+  }
+}
+
+async function runPreseg({ mediaId, filePath }) {
+  // Store segments alongside the original file on NAS — e.g. /mnt/nas/show/.hls/episodeName/
+  const fileBase = path.basename(filePath, path.extname(filePath));
+  const fileDir = path.dirname(filePath);
+  const segDir = path.join(fileDir, '.hls', fileBase);
+  const segLen = sfConfig.hlsSegmentSeconds || 12;
+  presegDb[mediaId] = { status: 'processing', segDir, filePath };
+
+  try {
+    // Create directory as root first to handle NFS permission mapping
+    fs.mkdirSync(segDir, { recursive: true });
+    // Ensure directory is writable
+    try { fs.accessSync(segDir, fs.constants.W_OK); } catch {
+      const { execSync } = require('child_process');
+      try { execSync(`chmod 777 "${segDir}"`); } catch {}
+    }
+    const gpuId = assignGpu();
+    // Use config to determine encoder — hwEncoder may not be set yet at startup
+    const useNvenc = sfConfig.hwAccel === 'nvenc' || hwEncoder.includes('nvenc');
+    const enc = useNvenc ? 'h264_nvenc' : 'libx264';
+    const isNvenc = useNvenc;
+
+    // Build encode args — same quality as live but no seek offset
+    const args = [
+      '-fflags', '+genpts+igndts',
+      '-err_detect', 'ignore_err',
+      '-i', filePath,
+      '-map', '0:v:0', '-map', '0:a:0?',
+    ];
+
+    if (isNvenc) {
+      args.push('-pix_fmt', 'yuv420p',
+        '-vcodec', 'h264_nvenc', '-gpu', String(gpuId),
+        '-preset', 'p2', '-rc:v', 'vbr', '-cq:v', '23',
+        '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
+        '-g', '60', '-keyint_min', '60', '-sc_threshold', '0');
+    } else {
+      args.push('-pix_fmt', 'yuv420p',
+        '-vcodec', 'libx264', '-crf', '23', '-preset', 'fast',
+        '-b:v', '4M', '-maxrate', '8M', '-bufsize', '8M',
+        '-g', '60', '-keyint_min', '60', '-sc_threshold', '0');
+    }
+
+    args.push('-acodec', 'aac', '-b:a', '192k', '-ac', '2',
+      '-avoid_negative_ts', 'make_zero',
+      '-f', 'hls',
+      '-hls_time', String(segLen),
+      '-hls_list_size', '0',           // keep ALL segments
+      '-hls_flags', 'independent_segments',
+      '-hls_segment_type', 'mpegts',
+      '-hls_allow_cache', '1',
+      '-hls_segment_filename', path.join(segDir, 'seg%05d.ts'),
+      path.join(segDir, 'index.m3u8'));
+
+    console.log(`[SF/Preseg] Transcoding ${mediaId} → ${segDir}`);
+
+    await new Promise((resolve, reject) => {
+      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','pipe'], uid: 0, gid: 0 });
+      let errBuf = '';
+      proc.stderr.on('data', d => { errBuf += d.toString(); });
+      proc.on('exit', code => {
+        if (code === 0 || code === null) {
+          // Validate completion — check index.m3u8 has EXT-X-ENDLIST and seg count matches
+          try {
+            const indexFile = path.join(segDir, 'index.m3u8');
+            const indexContent = fs.existsSync(indexFile) ? fs.readFileSync(indexFile, 'utf8') : '';
+            const isComplete = indexContent.includes('#EXT-X-ENDLIST');
+            const expectedSegs = (indexContent.match(/#EXTINF/g)||[]).length;
+            const segFiles = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts'));
+            const actualSegs = segFiles.length;
+            // Check every segment is non-zero bytes
+            const emptySegs = segFiles.filter(f => fs.statSync(path.join(segDir,f)).size === 0).length;
+            if (!isComplete || actualSegs < expectedSegs || emptySegs > 0) {
+              const err = `Incomplete: ${actualSegs}/${expectedSegs} segments, endlist=${isComplete}, emptySegs=${emptySegs}`;
+              console.error(`[SF/Preseg] ${err} for ${mediaId}`);
+              presegDb[mediaId] = { status:'error', error: err };
+              savePresegDb();
+              reject(new Error(err));
+              return;
+            }
+            console.log(`[SF/Preseg] Done ${mediaId} — ${actualSegs} segments`);
+            presegDb[mediaId] = { status:'done', segDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName || path.basename(filePath||'') };
+            savePresegDb();
+            resolve();
+          } catch(ve) {
+            presegDb[mediaId] = { status:'error', error: ve.message };
+            savePresegDb();
+            reject(ve);
+          }
+        } else {
+          const err = errBuf.slice(-300);
+          console.error(`[SF/Preseg] Error ${mediaId}: ${err}`);
+          presegDb[mediaId] = { status:'error', error: err.slice(0,200) };
+          savePresegDb();
+          reject(new Error('preseg failed'));
+        }
+      });
+    });
+  } catch(e) {
+    presegDb[mediaId] = { status:'error', error: e.message };
+    savePresegDb();
+  }
+}
+
+// Generate dynamic HLS playlist from pre-segmented files at a given time offset
+function getPresegPlaylist(mediaId, offsetSeconds, channelId) {
+  const info = presegDb[mediaId];
+  if (!info || info.status !== 'done') return null;
+  const segLen = info.segLen || 12;
+  const startSeg = Math.max(0, Math.floor(offsetSeconds / segLen));
+  const listSize = sfConfig.hlsListSize || 60;
+
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    `#EXT-X-TARGETDURATION:${segLen}`,
+    `#EXT-X-MEDIA-SEQUENCE:${startSeg}`,
+    '#EXT-X-INDEPENDENT-SEGMENTS',
+  ];
+
+  let count = 0;
+  for (let i = startSeg; count < listSize && i < info.segCount; i++) {
+    const segName = 'seg' + String(i).padStart(5,'0') + '.ts';
+    const segPath = path.join(info.segDir, segName);
+    if (fs.existsSync(segPath)) {
+      lines.push(`#EXTINF:${segLen}.000000,`);
+      // Encode the full path as base64 so the serve endpoint can find it
+    lines.push(`/sf/preseg-file/${Buffer.from(path.join(info.segDir, segName)).toString('base64url')}`);
+      count++;
+    } else break;
+  }
+
+  // If we've reached end of file, append EXT-X-ENDLIST so player knows
+  if (startSeg + count >= info.segCount) {
+    lines.push('#EXT-X-ENDLIST');
+  }
+
+  return lines.join('\n');
+}
 
 function startHlsSession(ch, opts={}) {
   const channelId = ch.id;
@@ -762,10 +1141,9 @@ function startHlsSession(ch, opts={}) {
     if(line.match(/[Ee]rror|Invalid|No such|fail|Unknown/)) { session._lastError=line.slice(0,200); console.error(`[SF/ffmpeg] stderr: ${line.slice(0,200)}`); }
   });
   proc.on('exit', (code) => {
+    const lastLines = buf.trim().split('\n').filter(Boolean).slice(-5).join(' | ');
+    console.log(`[SF/ffmpeg] exit code=${code} ch=${channelId} gpu=${gpuId}${lastLines?' | '+lastLines.slice(0,300):''}`);
     if(code && code!==0) {
-      console.error(`[SF/ffmpeg] exit code=${code} ch=${channelId} gpu=${gpuId}`);
-      const lastLines = buf.trim().split('\n').filter(Boolean).slice(-3).join(' | ');
-      if(lastLines) console.error(`[SF/ffmpeg] last output: ${lastLines.slice(0,400)}`);
       // AMF crash (Windows 0xC0000005) — switch channel to libx264 permanently
       const isAmfCrash = (code === 3221225477 || code === -1073741819);
       if (isAmfCrash && !swFallbackChannels.has(channelId)) {
@@ -777,7 +1155,7 @@ function startHlsSession(ch, opts={}) {
       }
     }
     delete hlsSessions[channelId];
-    // Auto-restart keepAlive channels with crash backoff
+    // Auto-restart keepAlive channels with crash backoff — NEVER gives up permanently
     if (keepAlive) {
       const isError = code && code !== 0;
       const uptime = Date.now() - session._startedAt;
@@ -785,26 +1163,68 @@ function startHlsSession(ch, opts={}) {
       if (isError && uptime < 10000) {
         session._crashCount = (session._crashCount || 0) + 1;
       } else {
-        session._crashCount = 0;
+        session._crashCount = 0; // ran for >10s = healthy, reset crash count
       }
-      // Back off exponentially: 5s, 10s, 30s, 60s — stop after 10 consecutive crashes
       const crashes = session._crashCount || 0;
-      if (crashes >= 10) {
-        console.error(`[SF/HLS] "${channelId}" crashed ${crashes} times — giving up`);
-      } else {
-        const restartDelay = isError ? Math.min(5000 * Math.pow(2, crashes), 60000) : 1000;
-        setTimeout(() => {
-          const stillCh = sfDb.channels.find(c=>c.id===channelId);
-          if (stillCh && !hlsSessions[channelId]) {
-            console.log(`[SF/HLS] Auto-restarting keepAlive channel "${stillCh.name}" (delay=${restartDelay}ms)`);
-            const s = startHlsSession(stillCh, { keepAlive: true });
-            if (s) s._crashCount = crashes; // carry over crash count
-          }
-        }, restartDelay);
-      }
+      // Exponential backoff: 2s, 5s, 15s, 60s, 5min — but always retry, never give up
+      const restartDelay = isError
+        ? Math.min(2000 * Math.pow(3, Math.min(crashes, 5)), 300000)
+        : 2000;
+      setTimeout(() => {
+        const stillCh = sfDb.channels.find(c=>c.id===channelId);
+        if (stillCh && !hlsSessions[channelId]) {
+          if (crashes > 0) console.log(`[SF/HLS] Auto-restarting keepAlive channel "${stillCh.name}" (delay=${restartDelay}ms, crash #${crashes})`);
+          const s = startHlsSession(stillCh, { keepAlive: true });
+          if (s) s._crashCount = crashes > 5 ? 0 : crashes; // reset after long backoff
+        }
+      }, restartDelay);
     }
   });
   return session;
+}
+
+// Pre-buffer watchdog — checks every 5 minutes and restarts any channel that should be running
+setInterval(() => {
+  const mode = sfConfig.prebufferMode || 'library';
+  if (mode === 'none') return;
+  (sfDb.channels || []).forEach(ch => {
+    if (hlsSessions[ch.id]) return; // already running
+    const isLive = !!ch.liveStreamId;
+    const shouldRun =
+      mode === 'all' ? true :
+      mode === 'library' ? !isLive :
+      mode === 'live' ? isLive : false;
+    if (shouldRun) {
+      console.log(`[SF/Watchdog] Restarting dead channel "${ch.name}"`);
+      startHlsSession(ch, { keepAlive: true });
+    }
+  });
+}, 5 * 60 * 1000); // every 5 minutes
+
+// Adaptive quality monitor — runs every 30s, drops resolution if too many sessions are crashing
+let _adaptiveLevel = 0; // 0=max, 1=720p, 2=480p
+const RESOLUTION_TIERS = ['', '1280x720', '854x480'];
+setInterval(() => {
+  if (!sfConfig.adaptiveQuality) { _adaptiveLevel = 0; return; }
+  const activeSessions = Object.keys(hlsSessions).length;
+  const gpuCount = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
+  const load = activeSessions / (gpuCount * 3); // load factor
+  if (load > 0.9 && _adaptiveLevel < 2) {
+    _adaptiveLevel++;
+    const res = RESOLUTION_TIERS[_adaptiveLevel];
+    console.log(`[SF/Adaptive] High load (${activeSessions} sessions) — dropping to ${res || 'source'}`);
+  } else if (load < 0.5 && _adaptiveLevel > 0) {
+    _adaptiveLevel--;
+    const res = RESOLUTION_TIERS[_adaptiveLevel] || sfConfig.maxResolution || 'source';
+    console.log(`[SF/Adaptive] Load normal — restoring to ${res}`);
+  }
+}, 30000);
+
+function getAdaptiveResolution() {
+  if (!sfConfig.adaptiveQuality) return sfConfig.videoResolution || null;
+  const override = RESOLUTION_TIERS[_adaptiveLevel];
+  if (override) return override;
+  return sfConfig.maxResolution || sfConfig.videoResolution || null;
 }
 
 setInterval(() => {
@@ -813,7 +1233,7 @@ setInterval(() => {
     if (sess.keepAlive) return; // never idle-kill always-on channels
     if(now-sess.lastRequest>idleMs) { try{sess.proc.kill('SIGKILL');}catch{} delete hlsSessions[id]; }
   });
-}, 10000);
+}, 5000);
 
 // ── Fetch helper (uses built-in https/http since node-fetch may not be present) ─
 function fetchUrl(url, opts={}) {
@@ -852,7 +1272,6 @@ async function callAI(systemPrompt, userMessage, { retries = 2 } = {}) {
         temperature:0.3,
         max_tokens:2048,
         stream: false,  // CRITICAL: prevent Ollama returning streaming NDJSON
-        options: { num_ctx: 8192 }, // Request larger context window from Ollama
       }),
     });
     // Read body as text first to handle any encoding issues
@@ -1097,9 +1516,23 @@ function buildAIPrompt(epgChannelName, programs, showMap, movieList, userPrompt,
 
 
 // ── Module export — call with (app, { ffmpegPath, ffprobePath, hwEncoder, DATA_DIR }) ──
+// Export invalidateMediaCache so index.js can call it after library scans
+let _externalInvalidate = null;
+module.exports.invalidateMediaCache = () => { if (_externalInvalidate) _externalInvalidate(); };
+
 module.exports = function mountStreamForge(app, orion) {
-  ffmpegExe  = orion.ffmpegPath  || 'ffmpeg';
-  ffprobeExe = orion.ffprobePath || 'ffprobe';
+  _externalInvalidate = invalidateMediaCache;
+  // Use system ffmpeg on Linux for NVENC/GPU support; ffmpeg-static on Windows
+  if (process.platform !== 'win32') {
+    try {
+      const { execSync: es } = require('child_process');
+      ffmpegExe  = es('which ffmpeg').toString().trim()  || orion.ffmpegPath  || 'ffmpeg';
+      ffprobeExe = es('which ffprobe').toString().trim() || orion.ffprobePath || 'ffprobe';
+    } catch { ffmpegExe = orion.ffmpegPath || 'ffmpeg'; ffprobeExe = orion.ffprobePath || 'ffprobe'; }
+  } else {
+    ffmpegExe  = orion.ffmpegPath  || 'ffmpeg';
+    ffprobeExe = orion.ffprobePath || 'ffprobe';
+  }
   hwEncoder  = orion.hwEncoder   || 'libx264';
   orionDb    = orion.orionDb     || null;
 
@@ -1121,19 +1554,27 @@ module.exports = function mountStreamForge(app, orion) {
     epgDaysAhead: 7, xcUser:'streamforge', xcPass:'streamforge',
     videoCodec:'h264', videoProfile:'h264', videoBitrate:'4M', videoMaxBitrate:'8M', videoBufferSize:'8M',
     videoCrf:'23', audioCodec:'aac', audioBitrate:'192k', audioChannels:2, audioLanguage:'eng',
-    hlsSegmentSeconds:6, hlsListSize:20, gpuCount:1, hwDecode:false, hlsIdleTimeoutSecs:60,
+    hlsSegmentSeconds:6, hlsListSize:20, gpuCount:1, hwDecode:false, hlsIdleTimeoutSecs:60, prebufferMode:'library', adaptiveQuality:false, maxResolution:'1920x1080',
     aiProvider:'anthropic', anthropicApiKey:'', openaiApiKey:'', openaiModel:'gpt-4o',
     ollamaUrl:'http://localhost:11434/v1', ollamaModel:'llama3.2',
     openwebUIUrl:'', openwebUIKey:'', openwebUIModel:'',
     customAiUrl:'', customAiKey:'', customAiModel:'',
   }, loadJson(SF_CFG, {}));
 
-  // Auto-fill hardware from Orion's detection
-  if (hwEncoder && hwEncoder !== 'libx264') {
-    if (hwEncoder.includes('amf'))   sfConfig.hwAccel = 'amf';
-    else if (hwEncoder.includes('nvenc')) sfConfig.hwAccel = 'nvenc';
-    else if (hwEncoder.includes('qsv'))   sfConfig.hwAccel = 'qsv';
+  // Auto-fill hardware from Orion's detection — also re-check after 5s in case detection wasn't done yet
+  function applyHwEncoder() {
+    if (hwEncoder && hwEncoder !== 'libx264') {
+      if (hwEncoder.includes('amf'))        sfConfig.hwAccel = 'amf';
+      else if (hwEncoder.includes('nvenc')) sfConfig.hwAccel = 'nvenc';
+      else if (hwEncoder.includes('qsv'))   sfConfig.hwAccel = 'qsv';
+      console.log(`[SF] hwAccel set to: ${sfConfig.hwAccel} from encoder: ${hwEncoder}`);
+    }
   }
+  applyHwEncoder();
+  setTimeout(() => {
+    hwEncoder = orion.getEncoder ? orion.getEncoder() : hwEncoder;
+    applyHwEncoder();
+  }, 5000);
 
   rebuildSfIndexes();
   sfDb = {
@@ -1149,7 +1590,185 @@ module.exports = function mountStreamForge(app, orion) {
   console.log(`[SF] Using ffmpeg: ${ffmpegExe}`);
   console.log(`[SF] Hardware encoder: ${hwEncoder}`);
 
+  // Pre-buffer all channels on startup so playback is instant (like Plex)
+  // Delay 12s to let Orion DB and library fully load first
+  setTimeout(async () => {
+    const channels = sfDb.channels || [];
+    if (!channels.length) return;
+    const gpuCount = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
+    const BATCH = gpuCount; // 1 channel per GPU — prevents CPU overload during pre-buffer
+    console.log(`[SF/Prebuffer] Pre-buffering ${channels.length} channels in batches of ${BATCH}...`);
+    for (let i = 0; i < channels.length; i += BATCH) {
+      const batch = channels.slice(i, i + BATCH);
+      batch.forEach(ch => {
+        const mode = sfConfig.prebufferMode || 'library';
+        const isLive = !!ch.liveStreamId;
+        const shouldPreBuffer =
+          mode === 'all' ? true :
+          mode === 'library' ? !isLive :
+          mode === 'live' ? isLive :
+          false; // 'none'
+        if (!hlsSessions[ch.id] && shouldPreBuffer) {
+          // keepAlive for all pre-buffered channels so they stay running
+          startHlsSession(ch, { keepAlive: true });
+        }
+      });
+      // 2s between batches — lets GPU settle before starting next batch
+      if (i + BATCH < channels.length) await new Promise(r => setTimeout(r, 2000));
+    }
+    console.log(`[SF/Prebuffer] All ${channels.length} channels pre-buffered`);
+  }, 12000);
+
   const multerUpload = multer({ dest: path.join(SF_DIR,'uploads'), limits:{fileSize:Infinity} });
+
+  // ── Pre-segmented content serving ───────────────────────────────────────────
+  // Serve pre-segmented TS files — path encoded as base64url
+  app.get('/sf/preseg-file/:encodedPath', (req, res) => {
+    try {
+      const filePath = Buffer.from(req.params.encodedPath, 'base64url').toString('utf8');
+      // Security: must be under known media mounts
+      const allowed = ['/mnt/', '/var/lib/orion/'];
+      if (!allowed.some(p => filePath.startsWith(p))) return res.status(403).end();
+      if (!fs.existsSync(filePath)) return res.status(404).end();
+      const isM3u8 = filePath.endsWith('.m3u8');
+      res.setHeader('Content-Type', isM3u8 ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      fs.createReadStream(filePath).pipe(res);
+    } catch { res.status(400).end(); }
+  });
+
+  // Legacy preseg endpoint for backward compat
+  app.get('/sf/presegs/:mediaId/:seg', (req, res) => {
+    const { mediaId, seg } = req.params;
+    const info = presegDb[mediaId];
+    if (!info?.segDir) return res.status(404).end();
+    const filePath = path.join(info.segDir, seg);
+    if (!fs.existsSync(filePath)) return res.status(404).end();
+    res.setHeader('Content-Type', seg.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    fs.createReadStream(filePath).pipe(res);
+  });
+
+  // Virtual channel HLS for pre-segmented content — zero FFmpeg serving
+  app.get('/sf/preseg-channel/:channelId/index.m3u8', (req, res) => {
+    const ch = sfDb.channels.find(c=>c.id===req.params.channelId);
+    if (!ch) return res.status(404).end();
+    const now = getPlayoutNow(ch);
+    if (!now?.item) return res.status(404).json({ error:'nothing scheduled' });
+    const playlist = getPresegPlaylist(now.item.id, now.offsetSeconds || 0, ch.id);
+    if (!playlist) {
+      return res.status(404).json({ error:'not pre-segmented', fallback:true });
+    }
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(playlist);
+  });
+
+  // Pre-seg management endpoints
+  app.get('/api/sf/preseg/status', (req, res) => {
+    const done = Object.values(presegDb).filter(v=>v.status==='done').length;
+    const processing = Object.values(presegDb).filter(v=>v.status==='processing').length;
+    const error = Object.values(presegDb).filter(v=>v.status==='error').length;
+    const queued = presegQueue.length;
+    const totalMedia = getMediaCombined().filter(m=>m.path||m.filePath).length;
+    const currentFiles = Object.entries(presegDb).filter(([,v])=>v.status==='processing').map(([id])=>{
+      const m = getMediaById(id); return m ? (m.seriesTitle||m.title||id) : id;
+    });
+    const allItems = Object.entries(presegDb).map(([id,v]) => {
+      const m = getMediaById(id);
+      const name = m
+        ? (m.seriesTitle
+            ? `${m.seriesTitle} S${String(m.season||0).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}`
+            : m.title||id)
+        : (v.filePath ? path.basename(v.filePath, path.extname(v.filePath)) : id);
+      return { id, status:v.status, name, error:v.error||null, segCount:v.segCount||null };
+    });
+    res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers, maxWorkers: MAX_PRESEG_WORKERS(), items: allItems, currentFiles });
+  });
+
+  // Reset presegDb entries so they get re-validated on next queue
+  app.post('/api/sf/preseg/reset', (req, res) => {
+    const { mediaId } = req.body;
+    if (mediaId) {
+      delete presegDb[mediaId];
+    } else {
+      // Reset all done/error entries
+      Object.keys(presegDb).forEach(id => {
+        if (presegDb[id].status === 'done' || presegDb[id].status === 'error') {
+          delete presegDb[id];
+        }
+      });
+    }
+    savePresegDb();
+    res.json({ ok:true });
+  });
+
+  app.post('/api/sf/preseg/queue-channel', (req, res) => {
+    const { channelId } = req.body;
+    if (!channelId) return res.status(400).json({ error:'channelId required' });
+    const ch = sfDb.channels.find(c=>c.id===channelId);
+    if (!ch) return res.status(404).json({ error:'channel not found' });
+
+    let queued = 0;
+    // Queue all items for this channel's content
+    const queueItem = (item) => {
+      if (!item) return;
+      const filePath = item.path || item.filePath;
+      if (filePath && !isPresegged(item.id)) {
+        queuePreseg(item.id, filePath);
+        queued++;
+      }
+    };
+
+    if (ch.genreLoops?.length || ch.genreLoop) {
+      const idx = getNetworkIndex();
+      const loops = ch.genreLoops?.length ? ch.genreLoops : [ch.genreLoop];
+      loops.forEach(l => {
+        const items = idx.get((l.genre||'').toLowerCase()) || [];
+        items.forEach(queueItem);
+      });
+    } else if (ch.seriesSchedule?.episodes?.length) {
+      // Try by mediaId first, fall back to title search
+      const showTitle = (ch.seriesSchedule.showTitle || ch.name || '').toLowerCase();
+      const allEps = getMediaCombined().filter(m =>
+        (m.seriesTitle||m.title||'').toLowerCase().includes(showTitle) ||
+        showTitle.includes((m.seriesTitle||m.title||'').toLowerCase())
+      );
+      if (allEps.length) {
+        allEps.forEach(queueItem);
+      } else {
+        ch.seriesSchedule.episodes.forEach(ep => {
+          const item = getMediaById(ep.mediaId);
+          queueItem(item);
+        });
+      }
+    } else if (ch.playout?.length) {
+      ch.playout.forEach(b => {
+        const item = getMediaById(b.mediaId);
+        queueItem(item);
+      });
+    }
+
+    res.json({ ok:true, queued });
+  });
+
+  app.post('/api/sf/preseg/queue-all', (req, res) => {
+    const allMedia = getMediaCombined().filter(m=>(m.path||m.filePath)&&!isPresegged(m.id));
+    allMedia.forEach(m => queuePreseg(m.id, m.path||m.filePath));
+    res.json({ ok:true, queued: allMedia.length });
+  });
+
+  app.delete('/api/sf/preseg/:mediaId', (req, res) => {
+    const { mediaId } = req.params;
+    const info = presegDb[mediaId];
+    if (info?.segDir) {
+      try { require('fs').rmSync(info.segDir, { recursive:true }); } catch {}
+    }
+    delete presegDb[mediaId];
+    savePresegDb();
+    res.json({ ok:true });
+  });
 
   // ── Status ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/status', (req, res) => res.json({
@@ -1175,7 +1794,7 @@ module.exports = function mountStreamForge(app, orion) {
   // ── Config ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/config', (req, res) => res.json(sfConfig));
   app.put('/api/sf/config', (req, res) => {
-    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
+    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','outputProtocol','srtPort','rtspPort','rtmpPort','udpBase','udpPort','presegDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
     allowed.forEach(k => { if (req.body[k] !== undefined) sfConfig[k] = req.body[k]; });
     saveJson(SF_CFG, sfConfig); res.json({ ok:true });
   });
@@ -1238,6 +1857,47 @@ module.exports = function mountStreamForge(app, orion) {
   });
 
   // Now playing
+  // Returns all items in a channel's genreLoop collection — used to show queue count/preview
+  app.get('/api/sf/channels/:id/collection-items', (req, res) => {
+    const ch = sfDb.channels.find(c=>c.id===req.params.id);
+    if (!ch) return res.status(404).json({ error:'not found' });
+    const genreLoopList = ch.genreLoops?.length ? ch.genreLoops : (ch.genreLoop?.genre ? [ch.genreLoop] : []);
+    if (!genreLoopList.length) return res.json({ count:0, items:[] });
+    let allItems = [];
+    const seen = new Set();
+    for (const loop of genreLoopList) {
+      const { genre, mediaType, matchType } = loop;
+      const g = genre.toLowerCase();
+      let items = [];
+      if (matchType === 'network') {
+        const idx = getNetworkIndex();
+        items = idx.get(g) || [];
+        if (!items.length) {
+          const arr = [];
+          for (const [k,v] of idx.entries()) { if (k.includes(g) || g.includes(k)) arr.push(...v); }
+          items = arr;
+        }
+        if (mediaType === 'movie') items = items.filter(m => m.type === 'movie');
+        if (mediaType === 'episode') items = items.filter(m => m.type === 'episode' || m.season != null);
+      } else {
+        items = getMediaCombined().filter(m => {
+          if (mediaType === 'movie' && m.type !== 'movie') return false;
+          if (mediaType === 'episode' && m.type !== 'episode') return false;
+          const genres = (m.genres||[]).map(x=>x.toLowerCase());
+          return genres.some(gn=>gn.includes(g)||g.includes(gn)) || m.title?.toLowerCase().includes(g);
+        });
+      }
+      for (const item of items) {
+        if (!seen.has(item.id)) { seen.add(item.id); allItems.push(item); }
+      }
+    }
+    allItems.sort((a,b)=>((a.season||0)*1000+(a.episode||0))-((b.season||0)*1000+(b.episode||0)));
+    res.json({
+      count: allItems.length,
+      items: allItems.map(m=>({ id:m.id, title:m.seriesTitle||m.title, season:m.season, episode:m.episode, episodeTitle:m.title!==m.seriesTitle?m.title:null }))
+    });
+  });
+
   app.get('/api/sf/channels/:id/now-playing', (req, res) => {
     const ch = sfDb.channels.find(c=>c.id===req.params.id);
     if (!ch) return res.status(404).json({ error:'not found' });
@@ -1435,11 +2095,30 @@ module.exports = function mountStreamForge(app, orion) {
   app.post('/api/sf/channels/:id/watch', (req, res) => {
     const ch = sfDb.channels.find(c=>c.id===req.params.id);
     if (!ch) return res.status(404).json({ error:'not found' });
-    // Always restart at the correct current offset — this is what makes channels
-    // behave like live TV (10 min into a show at 7:40 regardless of when server started)
+    // Reuse existing session if already running — avoids restart delay
     const existing = hlsSessions[req.params.id];
-    if (existing) { try { existing.proc.kill('SIGKILL'); } catch {} delete hlsSessions[req.params.id]; }
-    const session = startHlsSession(ch, { keepAlive: false });
+    if (existing) {
+      existing.lastRequest = Date.now();
+      return res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8`, reused:true });
+    }
+    // If pre-buffered session already running, reuse it immediately — instant start
+    if (hlsSessions[ch.id]) {
+      hlsSessions[ch.id].lastRequest = Date.now();
+      return res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8`, reused:true });
+    }
+    // Use keepAlive for live channels if prebufferMode is 'all'
+    const liveKeepAlive = ch.liveStreamId && (sfConfig.prebufferMode === 'all' || sfConfig.prebufferMode === 'live');
+
+    // If item is pre-segmented, use virtual HLS instead of live FFmpeg
+    if (!ch.liveStreamId) {
+      const now = getPlayoutNow(ch);
+      if (now?.item && isPresegged(now.item.id)) {
+        const hlsUrl = `/sf/preseg-channel/${ch.id}/index.m3u8`;
+        return res.json({ ok:true, hlsUrl, channelId:ch.id, presegged:true });
+      }
+    }
+
+    const session = startHlsSession(ch, { keepAlive: !ch.liveStreamId || liveKeepAlive });
     if (!session) return res.status(404).json({ error:'Nothing scheduled on this channel' });
     res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8` });
   });
@@ -1465,8 +2144,8 @@ module.exports = function mountStreamForge(app, orion) {
     let waited = 0;
     const tryServe = () => {
       if (fs.existsSync(m3u8)) { res.setHeader('Content-Type','application/vnd.apple.mpegurl'); res.setHeader('Cache-Control','no-cache'); res.setHeader('Access-Control-Allow-Origin','*'); return res.sendFile(m3u8); }
-      waited+=200; if(waited>20000) return res.status(503).send('HLS not ready — GPU startup timeout');
-      setTimeout(tryServe, 200);
+      waited+=50; if(waited>5000) return res.status(503).send('HLS not ready — startup timeout');
+      setTimeout(tryServe, 50);
     };
     tryServe();
   });
@@ -1476,7 +2155,12 @@ module.exports = function mountStreamForge(app, orion) {
     session.lastRequest = Date.now();
     const segPath = path.join(session.dir, req.params.segment);
     if (!fs.existsSync(segPath)) return res.status(404).send('Segment not found');
-    res.setHeader('Content-Type','video/mp2t'); res.setHeader('Cache-Control','no-cache'); res.setHeader('Access-Control-Allow-Origin','*');
+    const seg = req.params.segment;
+    const isMp4 = seg.endsWith('.mp4') || seg.endsWith('.m4s');
+    const contentType = isMp4 ? 'video/mp4' : 'video/mp2t';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control','no-cache');
+    res.setHeader('Access-Control-Allow-Origin','*');
     res.sendFile(segPath);
   });
 
@@ -1506,20 +2190,65 @@ module.exports = function mountStreamForge(app, orion) {
 
   // ── M3U / XMLTV output ───────────────────────────────────────────────────────
   app.get('/sf/iptv.m3u', (req, res) => {
-    // Use request host as base URL — works on any device on the network
     const rawIp = req.socket.localAddress || req.headers.host?.split(':')[0] || 'localhost';
-    const cleanIp = rawIp.replace(/^::ffff:/,''); // strip IPv6-mapped IPv4 prefix
+    const cleanIp = rawIp.replace(/^::ffff:/,'');
     const base = sfConfig.baseUrl && !sfConfig.baseUrl.includes('localhost')
       ? sfConfig.baseUrl
       : `http://${cleanIp}:${req.socket.localPort||3001}`;
+    const protocol = sfConfig.outputProtocol || 'hls';
+    const serverIp = cleanIp === '127.0.0.1' ? 'localhost' : cleanIp;
+
     res.setHeader('Content-Type','audio/x-mpegurl; charset=utf-8');
     let m3u = `#EXTM3U x-tvg-url="${base}/sf/xmltv.xml"\n\n`;
-    sfDb.channels.filter(c=>c.active).sort((a,b)=>(a.num||0)-(b.num||0)).forEach(ch => {
+    sfDb.channels.filter(c=>c.active).sort((a,b)=>(a.num||0)-(b.num||0)).forEach((ch, idx) => {
       m3u += `#EXTINF:-1 tvg-id="${ch.id}" tvg-name="${ch.name}" tvg-chno="${ch.num||''}" group-title="${ch.group||''}" tvg-logo="${ch.logo||''}",${ch.name}\n`;
-      // Use MPEG-TS for everything — most compatible with IPTV players on Android TV
-      m3u += `${base}/sf/stream/${ch.id}\n\n`;
+      let streamUrl;
+      switch(protocol) {
+        case 'srt': {
+          const port = (sfConfig.srtPort||9000) + (ch.num||idx+1);
+          streamUrl = `srt://${serverIp}:${port}`;
+          break;
+        }
+        case 'rtsp': {
+          const port = sfConfig.rtspPort||8554;
+          streamUrl = `rtsp://${serverIp}:${port}/${ch.id}`;
+          break;
+        }
+        case 'rtmp': {
+          const port = sfConfig.rtmpPort||1935;
+          streamUrl = `rtmp://${serverIp}:${port}/live/${ch.id}`;
+          break;
+        }
+        case 'udp': {
+          const base_addr = sfConfig.udpBase||'239.0.0';
+          const octet = (ch.num||idx+1) % 255;
+          const port = sfConfig.udpPort||1234;
+          streamUrl = `udp://@${base_addr}.${octet}:${port}`;
+          break;
+        }
+        default:
+          streamUrl = `${base}/sf/stream/${ch.id}`;
+      }
+      m3u += `${streamUrl}\n\n`;
     });
     res.send(m3u);
+  });
+
+  // ── Alternative protocol stream endpoints ──────────────────────────────────
+  // SRT output — FFmpeg sends SRT stream on per-channel port
+  app.post('/api/sf/channels/:id/start-srt', async (req, res) => {
+    const ch = sfDb.channels.find(c=>c.id===req.params.id);
+    if (!ch) return res.status(404).json({ error:'not found' });
+    const port = (sfConfig.srtPort||9000) + (ch.num||1);
+    const now = getPlayoutNow(ch);
+    if (!now?.item && !ch.liveStreamId) return res.status(404).json({ error:'nothing scheduled' });
+    const src = ch.liveStreamId ? getSfStream(ch.liveStreamId)?.url : now.item.path;
+    if (!src) return res.status(404).json({ error:'no source' });
+    const args = ['-re', '-ss', String(now?.offsetSeconds||0), '-i', src,
+      '-vcodec', 'copy', '-acodec', 'aac', '-b:a', '192k',
+      '-f', 'mpegts', `srt://0.0.0.0:${port}?mode=listener`];
+    const proc = spawn(ffmpegExe, args, { stdio:'ignore' });
+    res.json({ ok:true, port, url:`srt://SERVER_IP:${port}` });
   });
 
   // ── Stalker Middleware — MAG device support ──────────────────────────────────
@@ -1744,13 +2473,56 @@ module.exports = function mountStreamForge(app, orion) {
       return [];
     };
     (orionDb?.tvShows||[]).forEach(ep => {
-      parseArr(ep.networks).forEach(n => { const s=typeof n==='object'?n.name||n:String(n); if(s) networkSet.add(s); });
+      // 'network' is a single string field in Orion's TV show schema
+      if (ep.network) networkSet.add(ep.network);
       parseArr(ep.watchProviders).forEach(p => { const s=typeof p==='object'?p.name||p:String(p); if(s) networkSet.add(s); });
     });
     (orionDb?.movies||[]).forEach(m => {
       parseArr(m.watchProviders).forEach(p => { const s=typeof p==='object'?p.name||p:String(p); if(s) networkSet.add(s); });
     });
     res.json({ genres: [...genreSet].sort(), networks: [...networkSet].sort() });
+  });
+
+  // Networks endpoint — returns all networks with show counts from Orion library
+  app.get('/api/sf/networks', (req, res) => {
+    const parseArr = v => { if (Array.isArray(v)) return v; if (typeof v==='string') { try { return JSON.parse(v); } catch { return []; } } return []; };
+    const networkMap = new Map(); // network -> Set of showNames
+    const getNetworks = ep => {
+      const nets = [];
+      if (ep.network) nets.push(ep.network);
+      parseArr(ep.watchProviders).forEach(p => { const s=typeof p==='object'?p.name||p:String(p); if(s) nets.push(s); });
+      return nets;
+    };
+    // Group TV episodes by show name per network
+    const showsByNetwork = new Map();
+    (orionDb?.tvShows||[]).forEach(ep => {
+      const show = ep.seriesTitle || ep.title || '';
+      if (ep.network) {
+        if (!showsByNetwork.has(ep.network)) showsByNetwork.set(ep.network, new Set());
+        showsByNetwork.get(ep.network).add(show);
+      }
+    });
+    const networks = [...showsByNetwork.entries()]
+      .map(([name, shows]) => ({ name, showCount: shows.size, shows: [...shows].sort() }))
+      .sort((a,b) => b.showCount - a.showCount);
+    res.json(networks);
+  });
+
+  // Media by network — returns all episodes/movies for a given network
+  app.get('/api/sf/media/by-network', (req, res) => {
+    const network = (req.query.network || '').toLowerCase();
+    if (!network) return res.status(400).json({ error: 'network required' });
+    const parseArr = v => { if (Array.isArray(v)) return v; if (typeof v==='string') { try { return JSON.parse(v); } catch { return []; } } return []; };
+    const items = getMediaCombined().filter(m => {
+      const raw = (orionDb?.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb?.movies||[]).find(mv=>mv.id===m.id);
+      if (!raw) return false;
+      const nets = [
+        ...parseArr(raw.networks),
+        ...parseArr(raw.watchProviders),
+      ].map(n=>typeof n==='object'?n.name||n:String(n)).map(s=>s.toLowerCase());
+      return nets.some(n => n.includes(network) || network.includes(n));
+    });
+    res.json(items);
   });
 
   // Shows search — instant filter of pre-built cache (no per-request 25k scan)
@@ -2223,6 +2995,105 @@ ${guideUrl ? 'Match schedule show titles to the closest CANDIDATES.' : `Select $
     } catch(e) {
       console.error('[SF/AI/Network]', e.message);
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Build ErsatzTV-style channel template: AI assigns shows to time slots, episodes play in order
+  app.post('/api/sf/ai/build-channel-template', async (req, res) => {
+    const { targetChannelId, networks, epgChannelId, date, userPrompt } = req.body;
+    if (!targetChannelId) return res.status(400).json({ error:'targetChannelId required' });
+    const ch = sfDb.channels.find(c=>c.id===targetChannelId);
+    if (!ch) return res.status(404).json({ error:'Channel not found' });
+
+    try {
+      // Get all media from specified networks
+      const parseArr = v => { if(Array.isArray(v))return v; if(typeof v==='string'){try{return JSON.parse(v);}catch{return [];}}return []; };
+      let allMedia = getMediaCombined().filter(m=>m.path||m.jellyfinId||m.plexKey);
+
+      if (networks?.length) {
+        const netLower = networks.map(n=>n.toLowerCase());
+        allMedia = allMedia.filter(m => {
+          const raw = (orionDb?.tvShows||[]).find(ep=>ep.id===m.id) || (orionDb?.movies||[]).find(mv=>mv.id===m.id);
+          if (!raw) return false;
+          const net = (raw.network||'').toLowerCase();
+          return netLower.some(n => net.includes(n) || n.includes(net));
+        });
+      }
+
+      // Group by show title
+      const showMap = {};
+      allMedia.forEach(m => {
+        const key = m.seriesTitle || m.title || 'Unknown';
+        if (!showMap[key]) showMap[key] = { title:key, type:m.type||'episode', episodeCount:0, seasons:new Set(), firstId:m.id };
+        if (m.season) showMap[key].seasons.add(m.season);
+        showMap[key].episodeCount++;
+      });
+      const movies = Object.values(showMap).filter(s=>s.type==='movie').map(s=>s.title);
+      const shows = Object.values(showMap).filter(s=>s.type!=='movie').map(s=>s.title);
+
+      // Get EPG time slots if provided
+      let epgSlots = '';
+      if (epgChannelId) {
+        const dateStr = date || new Date().toISOString().slice(0,10);
+        const from = new Date(dateStr+'T00:00:00Z').getTime();
+        const to = from + 86400000;
+        const progs = sfDb.epg.programs.filter(p=>p.channel===epgChannelId&&p.stop>from&&p.start<to)
+          .sort((a,b)=>a.start-b.start)
+          .map(p => {
+            const t = new Date(p.start).toISOString().slice(11,16);
+            const dur = Math.round((p.stop-p.start)/60000);
+            return `${t} [${dur}min] "${p.title}"`;
+          });
+        epgSlots = progs.length ? ('\nEPG TIME SLOTS FOR REFERENCE:\n' + progs.join('\n')) : '';
+      }
+
+      const systemPrompt = `You are building a weekly TV channel template. 
+Assign ONE show from the SHOWS list to each time slot.
+Movies go ONLY in prime time (7PM-10PM).
+Return ONLY JSON: {"slots":[{"time":"HH:MM","showTitle":"exact title from list","mediaType":"episode|movie","daysOfWeek":"all"}]}
+Rules:
+- Use EXACT titles from SHOWS and MOVIES lists
+- Each show gets exactly ONE permanent time slot
+- Different show for every slot — no repeats
+- Movies in 7PM-10PM slots only
+- Slots run Monday-Sunday (daysOfWeek: "all")`;
+
+      const userMsg = `Channel: "${ch.name}"
+${userPrompt||'Disney Channel schedule: morning cartoons, afternoon live action, prime time movies'}
+${epgSlots}
+
+SHOWS AVAILABLE (${shows.length}):
+${shows.join(', ')}
+
+MOVIES AVAILABLE (${movies.length}):
+${movies.join(', ')}
+
+Create time slots from 6:00 AM to midnight. Assign a DIFFERENT show to each slot.
+Do not repeat any show. Use all available shows spread across the week.`;
+
+      const aiResult = await callAI(systemPrompt, userMsg);
+      const slots = aiResult.slots || [];
+
+      // Save template to channel
+      const template = { slots, networks: networks||[], builtAt: new Date().toISOString() };
+      const idx = sfDb.channels.findIndex(c=>c.id===targetChannelId);
+      sfDb.channels[idx].channelTemplate = template;
+      // Clear genreLoops and playout so template takes over
+      sfDb.channels[idx].genreLoops = null;
+      sfDb.channels[idx].genreLoop = null;
+      sfDb.channels[idx].playout = [];
+      saveAll();
+
+      // Invalidate session so it restarts with new template
+      if (hlsSessions[targetChannelId]) {
+        try { hlsSessions[targetChannelId].proc.kill('SIGTERM'); } catch {}
+        delete hlsSessions[targetChannelId];
+      }
+
+      res.json({ ok:true, slots, showCount:shows.length, movieCount:movies.length });
+    } catch(e) {
+      console.error('[SF/AI/Template]', e.message);
+      res.status(500).json({ error:e.message });
     }
   });
 
