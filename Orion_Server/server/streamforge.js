@@ -956,14 +956,7 @@ async function runPreseg({ mediaId, filePath }) {
   presegDb[mediaId] = { status: 'processing', segDir, filePath };
 
   try {
-    // Create directory using shell as root to handle NFS UID mapping
-    const { execSync } = require('child_process');
-    try {
-      execSync(`mkdir -p "${segDir.replace(/"/g, '\"')}" && chmod 777 "${segDir.replace(/"/g, '\"')}"`, { uid:0, gid:0 });
-    } catch(mkErr) {
-      console.error('[SF/Preseg] mkdir failed:', mkErr.message);
-      throw mkErr;
-    }
+    fs.mkdirSync(segDir, { recursive: true });
     const gpuId = assignGpu();
     // Use config to determine encoder — hwEncoder may not be set yet at startup
     const useNvenc = sfConfig.hwAccel === 'nvenc' || hwEncoder.includes('nvenc');
@@ -1021,7 +1014,19 @@ async function runPreseg({ mediaId, filePath }) {
               console.log(`[SF/Preseg] Watchdog detected completion for ${mediaId} — ${segs} segs`);
               clearInterval(watchdog);
               proc.kill('SIGKILL');
-              presegDb[mediaId] = { status:'done', segDir, segCount:segs, segLen, doneAt:Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName||path.basename(filePath||'') };
+              // Move from local temp to NAS
+              try {
+                fs.mkdirSync(path.dirname(nasSegDir), { recursive: true });
+                if (fs.existsSync(nasSegDir)) fs.rmSync(nasSegDir, { recursive: true });
+                fs.renameSync(localTempDir, nasSegDir);
+              } catch(me) {
+                try {
+                  fs.mkdirSync(nasSegDir, { recursive: true });
+                  for (const f of fs.readdirSync(localTempDir)) fs.copyFileSync(path.join(localTempDir,f), path.join(nasSegDir,f));
+                  fs.rmSync(localTempDir, { recursive:true });
+                } catch {}
+              }
+              presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:segs, segLen, doneAt:Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName||path.basename(filePath||'') };
               savePresegDb();
               settle(resolve);
             }
@@ -1059,8 +1064,24 @@ async function runPreseg({ mediaId, filePath }) {
               reject(new Error(err));
               return;
             }
-            console.log(`[SF/Preseg] Done ${mediaId} — ${actualSegs} segments`);
-            presegDb[mediaId] = { status:'done', segDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName || path.basename(filePath||'') };
+            console.log(`[SF/Preseg] Done ${mediaId} — ${actualSegs} segments, moving to NAS...`);
+            // Move from local temp to NAS
+            try {
+              fs.mkdirSync(path.dirname(nasSegDir), { recursive: true });
+              if (fs.existsSync(nasSegDir)) fs.rmSync(nasSegDir, { recursive: true });
+              fs.renameSync(localTempDir, nasSegDir);
+              console.log(`[SF/Preseg] Moved to NAS: ${nasSegDir}`);
+            } catch(moveErr) {
+              // rename may fail across filesystems — copy instead
+              console.log(`[SF/Preseg] rename failed, copying to NAS: ${moveErr.message}`);
+              fs.mkdirSync(nasSegDir, { recursive: true });
+              for (const f of fs.readdirSync(localTempDir)) {
+                fs.copyFileSync(path.join(localTempDir, f), path.join(nasSegDir, f));
+              }
+              fs.rmSync(localTempDir, { recursive: true });
+              console.log(`[SF/Preseg] Copied to NAS: ${nasSegDir}`);
+            }
+            presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName || path.basename(filePath||'') };
             savePresegDb();
             settle(resolve);
           } catch(ve) {
@@ -1080,6 +1101,8 @@ async function runPreseg({ mediaId, filePath }) {
   } catch(e) {
     presegDb[mediaId] = { status:'error', error: e.message };
     savePresegDb();
+    // Cleanup local temp on error
+    try { if (fs.existsSync(localTempDir)) fs.rmSync(localTempDir, { recursive:true }); } catch {}
   }
 }
 
