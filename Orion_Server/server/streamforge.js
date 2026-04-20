@@ -410,10 +410,10 @@ function getPlayoutNow(ch, nowMs) {
     const seasonDurMs = seasonEps.reduce((s, ep) => {
       let item = getMediaById(ep.mediaId);
       if (!item && ep.season != null && ep.episode != null) {
-        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase();
+        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase().replace(/[^a-z0-9]/g,' ').trim();
         item = getMediaCombined().find(m =>
           m.season === ep.season && m.episode === ep.episode &&
-          (m.seriesTitle||m.showName||m.title||'').toLowerCase().includes(showTitle)
+          (m.seriesTitle||m.showName||m.title||m.filename||'').toLowerCase().includes(showTitle.split(' ')[0])
         );
       }
       return s + ((ep.duration || item?.duration || 1800) * 1000);
@@ -426,10 +426,10 @@ function getPlayoutNow(ch, nowMs) {
       let item = getMediaById(ep.mediaId);
       // Fallback: find by show title + season + episode if ID changed after DB rebuild
       if (!item && ep.season != null && ep.episode != null) {
-        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase();
+        const showTitle = (ch.seriesSchedule?.showTitle || ch.name || '').toLowerCase().replace(/[^a-z0-9]/g,' ').trim();
         item = getMediaCombined().find(m =>
           m.season === ep.season && m.episode === ep.episode &&
-          (m.seriesTitle||m.showName||m.title||'').toLowerCase().includes(showTitle)
+          (m.seriesTitle||m.showName||m.title||m.filename||'').toLowerCase().includes(showTitle.split(' ')[0])
         );
       }
       // Use ep.duration from schedule as source of truth — item.duration from DB may be wrong
