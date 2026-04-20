@@ -401,6 +401,7 @@ function getPlayoutNow(ch, nowMs) {
     const seasonIndex = dayOffset % seasonNums.length;
     const currentSeasonNum = seasonNums[seasonIndex];
     const seasonEps = bySeasonMap[currentSeasonNum];
+    if (!seasonEps?.length) return null;
 
     const dayStart = anchor + dayOffset * DAY_MS;
     const timeInDay = nowMs - dayStart;
