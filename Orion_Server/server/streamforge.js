@@ -1064,6 +1064,8 @@ async function runPreseg({ mediaId, filePath }) {
         clearInterval(watchdog);
         clearTimeout(timeout);
         if (code === 0 || code === null) {
+          // If watchdog already settled this (moved to NAS), skip validation
+          if (settled) return;
           // Validate completion — check index.m3u8 has EXT-X-ENDLIST and seg count matches
           try {
             const indexFile = path.join(segDir, 'index.m3u8');
