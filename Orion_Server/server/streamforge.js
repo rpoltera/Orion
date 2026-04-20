@@ -1788,7 +1788,7 @@ module.exports = function mountStreamForge(app, orion) {
   // ── Config ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/config', (req, res) => res.json(sfConfig));
   app.put('/api/sf/config', (req, res) => {
-    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','presegDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
+    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','outputProtocol','srtPort','rtspPort','rtmpPort','udpBase','udpPort','presegDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
     allowed.forEach(k => { if (req.body[k] !== undefined) sfConfig[k] = req.body[k]; });
     saveJson(SF_CFG, sfConfig); res.json({ ok:true });
   });
@@ -2184,20 +2184,65 @@ module.exports = function mountStreamForge(app, orion) {
 
   // ── M3U / XMLTV output ───────────────────────────────────────────────────────
   app.get('/sf/iptv.m3u', (req, res) => {
-    // Use request host as base URL — works on any device on the network
     const rawIp = req.socket.localAddress || req.headers.host?.split(':')[0] || 'localhost';
-    const cleanIp = rawIp.replace(/^::ffff:/,''); // strip IPv6-mapped IPv4 prefix
+    const cleanIp = rawIp.replace(/^::ffff:/,'');
     const base = sfConfig.baseUrl && !sfConfig.baseUrl.includes('localhost')
       ? sfConfig.baseUrl
       : `http://${cleanIp}:${req.socket.localPort||3001}`;
+    const protocol = sfConfig.outputProtocol || 'hls';
+    const serverIp = cleanIp === '127.0.0.1' ? 'localhost' : cleanIp;
+
     res.setHeader('Content-Type','audio/x-mpegurl; charset=utf-8');
     let m3u = `#EXTM3U x-tvg-url="${base}/sf/xmltv.xml"\n\n`;
-    sfDb.channels.filter(c=>c.active).sort((a,b)=>(a.num||0)-(b.num||0)).forEach(ch => {
+    sfDb.channels.filter(c=>c.active).sort((a,b)=>(a.num||0)-(b.num||0)).forEach((ch, idx) => {
       m3u += `#EXTINF:-1 tvg-id="${ch.id}" tvg-name="${ch.name}" tvg-chno="${ch.num||''}" group-title="${ch.group||''}" tvg-logo="${ch.logo||''}",${ch.name}\n`;
-      // Use MPEG-TS for everything — most compatible with IPTV players on Android TV
-      m3u += `${base}/sf/stream/${ch.id}\n\n`;
+      let streamUrl;
+      switch(protocol) {
+        case 'srt': {
+          const port = (sfConfig.srtPort||9000) + (ch.num||idx+1);
+          streamUrl = `srt://${serverIp}:${port}`;
+          break;
+        }
+        case 'rtsp': {
+          const port = sfConfig.rtspPort||8554;
+          streamUrl = `rtsp://${serverIp}:${port}/${ch.id}`;
+          break;
+        }
+        case 'rtmp': {
+          const port = sfConfig.rtmpPort||1935;
+          streamUrl = `rtmp://${serverIp}:${port}/live/${ch.id}`;
+          break;
+        }
+        case 'udp': {
+          const base_addr = sfConfig.udpBase||'239.0.0';
+          const octet = (ch.num||idx+1) % 255;
+          const port = sfConfig.udpPort||1234;
+          streamUrl = `udp://@${base_addr}.${octet}:${port}`;
+          break;
+        }
+        default:
+          streamUrl = `${base}/sf/stream/${ch.id}`;
+      }
+      m3u += `${streamUrl}\n\n`;
     });
     res.send(m3u);
+  });
+
+  // ── Alternative protocol stream endpoints ──────────────────────────────────
+  // SRT output — FFmpeg sends SRT stream on per-channel port
+  app.post('/api/sf/channels/:id/start-srt', async (req, res) => {
+    const ch = sfDb.channels.find(c=>c.id===req.params.id);
+    if (!ch) return res.status(404).json({ error:'not found' });
+    const port = (sfConfig.srtPort||9000) + (ch.num||1);
+    const now = getPlayoutNow(ch);
+    if (!now?.item && !ch.liveStreamId) return res.status(404).json({ error:'nothing scheduled' });
+    const src = ch.liveStreamId ? getSfStream(ch.liveStreamId)?.url : now.item.path;
+    if (!src) return res.status(404).json({ error:'no source' });
+    const args = ['-re', '-ss', String(now?.offsetSeconds||0), '-i', src,
+      '-vcodec', 'copy', '-acodec', 'aac', '-b:a', '192k',
+      '-f', 'mpegts', `srt://0.0.0.0:${port}?mode=listener`];
+    const proc = spawn(ffmpegExe, args, { stdio:'ignore' });
+    res.json({ ok:true, port, url:`srt://SERVER_IP:${port}` });
   });
 
   // ── Stalker Middleware — MAG device support ──────────────────────────────────
