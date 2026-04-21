@@ -2655,7 +2655,7 @@ function PreSegManager({ call }) {
   const refresh = async () => {
     try {
       const [s, chs] = await Promise.all([
-        call('GET', '/api/sf/preseg/status'),
+        call('GET', '/api/sf/preseg/status?items=1'),
         call('GET', '/api/sf/channels'),
       ]);
       setStatus(s);
@@ -2689,7 +2689,7 @@ function PreSegManager({ call }) {
 
   const saveWorkers = async (n) => {
     try {
-      await call('PUT', '/api/sf/config', { presegWorkers: n });
+      await call('PUT', '/api/sf/config', { presegWorkers: n, gpuCount: n });
       setWorkers(n);
       setMsg('✅ Workers set to ' + n);
     } catch(e) { setMsg(e.message); }
@@ -2736,8 +2736,8 @@ function PreSegManager({ call }) {
         )}
         <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
           <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-            <span style={{ fontSize:12, color:'var(--text-muted)' }}>GPU Workers:</span>
-            {[1,2,3,4].map(n => (
+            <span style={{ fontSize:12, color:'var(--text-muted)' }}>Workers:</span>
+            {[1,2,4,6,8,12,16].map(n => (
               <button key={n} onClick={() => saveWorkers(n)}
                 style={{ padding:'5px 12px', background:workers===n?'var(--accent)':'var(--bg-tertiary)', color:workers===n?'white':'var(--text-secondary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', cursor:'pointer', fontSize:12, fontWeight:600 }}>
                 {n}
