@@ -938,6 +938,50 @@ function queuePreseg(mediaId, filePath, priority=false) {
   drainPresegQueue();
 }
 
+// Independent completion checker — runs every 5s and marks done items regardless of FFmpeg exit
+function startPresegCompletionChecker() {
+  setInterval(() => {
+    Object.entries(presegDb).forEach(([mediaId, info]) => {
+      if (info.status !== 'processing') return;
+      const localTempDir = path.join(SF_DIR, 'preseg_temp', mediaId);
+      const indexFile = path.join(localTempDir, 'index.m3u8');
+      try {
+        if (!fs.existsSync(indexFile)) return;
+        const content = fs.readFileSync(indexFile, 'utf8');
+        if (!content.includes('#EXT-X-ENDLIST')) return;
+        const segs = fs.readdirSync(localTempDir).filter(f=>f.endsWith('.ts')).length;
+        if (segs === 0) return;
+        console.log(`[SF/Preseg/Checker] Detected completion: ${mediaId} — ${segs} segs`);
+        // Get NAS path from filePath
+        const fp = info.filePath;
+        if (!fp) return;
+        const fileBase = path.basename(fp, path.extname(fp));
+        const nasSegDir = path.join(path.dirname(fp), '.hls', fileBase);
+        // Move to NAS
+        try {
+          fs.mkdirSync(path.dirname(nasSegDir), { recursive: true });
+          if (fs.existsSync(nasSegDir)) fs.rmSync(nasSegDir, { recursive: true });
+          fs.renameSync(localTempDir, nasSegDir);
+          console.log(`[SF/Preseg/Checker] Moved to NAS: ${nasSegDir}`);
+        } catch(me) {
+          fs.mkdirSync(nasSegDir, { recursive: true });
+          for (const f of fs.readdirSync(localTempDir)) {
+            fs.copyFileSync(path.join(localTempDir,f), path.join(nasSegDir,f));
+          }
+          fs.rmSync(localTempDir, { recursive:true });
+          console.log(`[SF/Preseg/Checker] Copied to NAS: ${nasSegDir}`);
+        }
+        presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:segs, segLen:info.segLen||6, doneAt:Date.now(), filePath:fp, displayName:info.displayName||path.basename(fp) };
+        savePresegDb();
+        presegWorkers = Math.max(0, presegWorkers - 1);
+        drainPresegQueue();
+      } catch(e) {
+        console.error(`[SF/Preseg/Checker] Error for ${mediaId}:`, e.message);
+      }
+    });
+  }, 5000);
+}
+
 function drainPresegQueue() {
   while (presegWorkers < MAX_PRESEG_WORKERS() && presegQueue.length > 0) {
     const item = presegQueue.shift();
