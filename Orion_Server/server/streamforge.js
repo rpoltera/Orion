@@ -1059,107 +1059,69 @@ async function runPreseg({ mediaId, filePath }) {
 
     console.log(`[SF/Preseg] Transcoding ${mediaId} → ${segDir}`);
 
+    // Simple poll every 5s — no exit event needed
     await new Promise((resolve, reject) => {
-      const proc = spawn(ffmpegExe, args, { stdio: ['ignore','ignore','ignore'] }); // ignore stderr to prevent pipe blocking
-      let errBuf = '';
-      let settled = false;
-      const settle = (fn) => { if (!settled) { settled = true; fn(); } };
+      const proc = spawn(ffmpegExe, args, { stdio: 'ignore', detached: false });
+      let done = false;
 
-      // Watchdog — poll every 10s for completion in case exit event doesn't fire (NFS hang)
-      const watchdog = setInterval(() => {
+      const moveToNas = () => {
         try {
-          const indexFile = path.join(segDir, 'index.m3u8');
-          if (fs.existsSync(indexFile)) {
-            const content = fs.readFileSync(indexFile, 'utf8');
-            if (content.includes('#EXT-X-ENDLIST')) {
-              const segs = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts')).length;
-              console.log(`[SF/Preseg] Watchdog detected completion for ${mediaId} — ${segs} segs`);
-              clearInterval(watchdog);
-              proc.kill('SIGKILL');
-              // Move from local temp to NAS
-              try {
-                fs.mkdirSync(path.dirname(nasSegDir), { recursive: true });
-                if (fs.existsSync(nasSegDir)) fs.rmSync(nasSegDir, { recursive: true });
-                fs.renameSync(localTempDir, nasSegDir);
-              } catch(me) {
-                try {
-                  fs.mkdirSync(nasSegDir, { recursive: true });
-                  for (const f of fs.readdirSync(localTempDir)) fs.copyFileSync(path.join(localTempDir,f), path.join(nasSegDir,f));
-                  fs.rmSync(localTempDir, { recursive:true });
-                } catch {}
-              }
-              presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:segs, segLen, doneAt:Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName||path.basename(filePath||'') };
-              savePresegDb();
-              settle(resolve);
-            }
+          const segs = fs.readdirSync(localTempDir).filter(f=>f.endsWith('.ts')).length;
+          fs.mkdirSync(path.dirname(nasSegDir), { recursive: true });
+          if (fs.existsSync(nasSegDir)) fs.rmSync(nasSegDir, { recursive: true });
+          try {
+            fs.renameSync(localTempDir, nasSegDir);
+          } catch {
+            fs.mkdirSync(nasSegDir, { recursive: true });
+            for (const f of fs.readdirSync(localTempDir)) fs.copyFileSync(path.join(localTempDir,f), path.join(nasSegDir,f));
+            fs.rmSync(localTempDir, { recursive:true });
+          }
+          console.log('[SF/Preseg] Done ' + mediaId + ' — ' + segs + ' segs');
+          presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:segs, segLen, doneAt:Date.now(), filePath,
+            displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName || path.basename(filePath||'') };
+          savePresegDb();
+          return true;
+        } catch(me) {
+          console.error('[SF/Preseg] moveToNas failed:', me.message);
+          return false;
+        }
+      };
+
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        clearInterval(poll);
+        clearTimeout(timeout);
+        if (err) {
+          presegDb[mediaId] = { status:'error', error: err.message };
+          savePresegDb();
+          try { if (fs.existsSync(localTempDir)) fs.rmSync(localTempDir, { recursive:true }); } catch {}
+          reject(err);
+        } else {
+          resolve();
+        }
+      };
+
+      const poll = setInterval(() => {
+        try {
+          const idx = path.join(localTempDir, 'index.m3u8');
+          if (fs.existsSync(idx) && fs.readFileSync(idx,'utf8').includes('#EXT-X-ENDLIST')) {
+            if (moveToNas()) { proc.kill('SIGKILL'); finish(null); }
           }
         } catch {}
-      }, 10000);
+      }, 5000);
 
-      // Timeout after 2 hours
-      const timeout = setTimeout(() => {
-        clearInterval(watchdog);
-        proc.kill('SIGKILL');
-        settle(() => reject(new Error('preseg timeout after 2 hours')));
-      }, 7200000);
+      const timeout = setTimeout(() => finish(new Error('preseg timeout')), 7200000);
 
-      // stderr ignored to prevent pipe buffer blocking FFmpeg exit
-      proc.on('exit', code => {
-        clearInterval(watchdog);
-        clearTimeout(timeout);
-        if (code === 0 || code === null) {
-          // If watchdog already settled this (moved to NAS), skip validation
-          if (settled) return;
-          // Validate completion — check index.m3u8 has EXT-X-ENDLIST and seg count matches
-          try {
-            const indexFile = path.join(segDir, 'index.m3u8');
-            const indexContent = fs.existsSync(indexFile) ? fs.readFileSync(indexFile, 'utf8') : '';
-            const isComplete = indexContent.includes('#EXT-X-ENDLIST');
-            const expectedSegs = (indexContent.match(/#EXTINF/g)||[]).length;
-            const segFiles = fs.readdirSync(segDir).filter(f=>f.endsWith('.ts'));
-            const actualSegs = segFiles.length;
-            // Check every segment is non-zero bytes
-            const emptySegs = segFiles.filter(f => fs.statSync(path.join(segDir,f)).size === 0).length;
-            if (!isComplete || actualSegs < expectedSegs || emptySegs > 0) {
-              const err = `Incomplete: ${actualSegs}/${expectedSegs} segments, endlist=${isComplete}, emptySegs=${emptySegs}`;
-              console.error(`[SF/Preseg] ${err} for ${mediaId}`);
-              presegDb[mediaId] = { status:'error', error: err };
-              savePresegDb();
-              reject(new Error(err));
-              return;
-            }
-            console.log(`[SF/Preseg] Done ${mediaId} — ${actualSegs} segments, moving to NAS...`);
-            // Move from local temp to NAS
-            try {
-              fs.mkdirSync(path.dirname(nasSegDir), { recursive: true });
-              if (fs.existsSync(nasSegDir)) fs.rmSync(nasSegDir, { recursive: true });
-              fs.renameSync(localTempDir, nasSegDir);
-              console.log(`[SF/Preseg] Moved to NAS: ${nasSegDir}`);
-            } catch(moveErr) {
-              // rename may fail across filesystems — copy instead
-              console.log(`[SF/Preseg] rename failed, copying to NAS: ${moveErr.message}`);
-              fs.mkdirSync(nasSegDir, { recursive: true });
-              for (const f of fs.readdirSync(localTempDir)) {
-                fs.copyFileSync(path.join(localTempDir, f), path.join(nasSegDir, f));
-              }
-              fs.rmSync(localTempDir, { recursive: true });
-              console.log(`[SF/Preseg] Copied to NAS: ${nasSegDir}`);
-            }
-            presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:actualSegs, segLen, doneAt: Date.now(), filePath, displayName: presegQueue.find(q=>q.mediaId===mediaId)?.displayName || path.basename(filePath||'') };
-            savePresegDb();
-            settle(resolve);
-          } catch(ve) {
-            presegDb[mediaId] = { status:'error', error: ve.message };
-            savePresegDb();
-            settle(() => reject(ve));
+      proc.on('exit', (code) => {
+        if (done) return;
+        try {
+          const idx = path.join(localTempDir, 'index.m3u8');
+          if (fs.existsSync(idx) && fs.readFileSync(idx,'utf8').includes('#EXT-X-ENDLIST')) {
+            if (moveToNas()) { finish(null); return; }
           }
-        } else {
-          const err = errBuf.slice(-300);
-          console.error(`[SF/Preseg] Error ${mediaId}: ${err}`);
-          presegDb[mediaId] = { status:'error', error: err.slice(0,200) };
-          savePresegDb();
-          settle(() => reject(new Error('preseg failed')));
-        }
+        } catch {}
+        finish(new Error('preseg failed code=' + code));
       });
     });
   } catch(e) {
