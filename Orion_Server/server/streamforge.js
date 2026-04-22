@@ -627,11 +627,19 @@ function buildSchedule(ch, fromMs, toMs) {
 
 // ── Multi-GPU round-robin (for Proxmox + multiple P40s) ──────────────────────
 let _nextGpuIdx = 0;
+const _gpuWorkerCount = {};
 function assignGpu() {
   const count = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
-  const gpu = _nextGpuIdx % count;
-  _nextGpuIdx++;
-  return gpu;
+  let minLoad = Infinity, bestGpu = 0;
+  for (let i = 0; i < count; i++) {
+    const load = _gpuWorkerCount[i] || 0;
+    if (load < minLoad) { minLoad = load; bestGpu = i; }
+  }
+  _gpuWorkerCount[bestGpu] = ((_gpuWorkerCount[bestGpu]||0) + 1);
+  return bestGpu;
+}
+function releaseGpu(gpuId) {
+  if (_gpuWorkerCount[gpuId] > 0) _gpuWorkerCount[gpuId]--;
 }
 
 // ── FFmpeg args builder ───────────────────────────────────────────────────────
@@ -844,6 +852,43 @@ const SF_PRESEG_DIR = () => sfConfig.presegDir ? sfConfig.presegDir : path.join(
 // At playback time: zero FFmpeg, just serve pre-made segments. Near-zero CPU.
 let presegDb = {};    // mediaId -> { status:'pending'|'processing'|'done'|'error', segCount, segLength, segDir, duration }
 let presegQueue = []; // { mediaId, filePath, priority }
+let pendingShows = []; // [{ showTitle, episodes: [{mediaId,filePath}, ...] }] — shows waiting to be queued, one loads at a time
+
+function loadPendingShows() {
+  try {
+    const fp = path.join(SF_DIR, 'preseg-pending-shows.json');
+    if (fs.existsSync(fp)) pendingShows = JSON.parse(fs.readFileSync(fp,'utf8')) || [];
+  } catch { pendingShows = []; }
+}
+function savePendingShows() {
+  try { fs.writeFileSync(path.join(SF_DIR, 'preseg-pending-shows.json'), JSON.stringify(pendingShows)); } catch {}
+}
+// When presegQueue is empty, pop the next show off pendingShows and queue all its episodes.
+function refillFromPendingShows() {
+  if (presegQueue.length > 0) return false;
+  // Keep popping shows until we ACTUALLY queue something — queuePreseg silently drops items
+  // whose .hls folder already exists on the NAS (checkFileAlreadyPresegged), so a show may
+  // look "remaining" by DB status yet produce zero queued items.
+  while (pendingShows.length) {
+    const show = pendingShows.shift();
+    savePendingShows();
+    const before = presegQueue.length;
+    for (const ep of (show.episodes||[])) {
+      if (isPresegged(ep.mediaId)) continue;
+      if (presegDb[ep.mediaId]?.status === 'processing') continue;
+      queuePreseg(ep.mediaId, ep.filePath);
+    }
+    const added = presegQueue.length - before;
+    if (added > 0) {
+      console.log(`[SF/Preseg] Loaded show: "${show.showTitle}" (${added} eps queued, ${pendingShows.length} shows remaining)`);
+      return true;
+    }
+    console.log(`[SF/Preseg] Skipped already-done show: "${show.showTitle}"`);
+  }
+  console.log('[SF/Preseg] pendingShows exhausted');
+  return false;
+}
+
 let presegWorkers = 0;
 const MAX_PRESEG_WORKERS = () => Math.max(1, parseInt(sfConfig.presegWorkers) || 4);
 
@@ -983,6 +1028,7 @@ function startPresegCompletionChecker() {
 }
 
 function drainPresegQueue() {
+  if (presegQueue.length === 0 && pendingShows.length > 0) refillFromPendingShows();
   while (presegWorkers < MAX_PRESEG_WORKERS() && presegQueue.length > 0) {
     const item = presegQueue.shift();
     savePresegQueue();
@@ -991,11 +1037,24 @@ function drainPresegQueue() {
   }
 }
 
+// Probe if source is 10-bit (P40 NVDEC doesn't support it — fall back to software decode)
+function is10BitSource(filePath) {
+  try {
+    const r = require('child_process').execFileSync(
+      ffprobeExe,
+      ['-v','error','-select_streams','v:0','-show_entries','stream=pix_fmt','-of','csv=p=0', filePath],
+      { encoding: 'utf8', timeout: 5000 }
+    ).trim();
+    return r.includes('10le') || r.includes('p10') || r.includes('10be');
+  } catch { return false; }
+}
+
 async function runPreseg({ mediaId, filePath }) {
   const fileBase = path.basename(filePath, path.extname(filePath));
   const fileDir = path.dirname(filePath);
   const nasSegDir = path.join(fileDir, '.hls', fileBase); // final NAS location
-  const localTempDir = path.join(SF_DIR, 'preseg_temp', mediaId); // fast local write
+  const presegTempBase = sfConfig.presegTempDir || path.join(SF_DIR, 'preseg_temp');
+  const localTempDir = path.join(presegTempBase, mediaId); // fast local write
   const segDir = localTempDir; // FFmpeg writes here first
   const segLen = sfConfig.hlsSegmentSeconds || 12;
   presegDb[mediaId] = { status: 'processing', segDir: nasSegDir, filePath };
@@ -1029,14 +1088,23 @@ async function runPreseg({ mediaId, filePath }) {
     const args = [
       '-fflags', '+genpts+igndts',
       '-err_detect', 'ignore_err',
+    ];
+    const sourceIs10Bit = is10BitSource(filePath);
+    if (isNvenc && !sourceIs10Bit) {
+      args.push('-hwaccel', 'cuda', '-hwaccel_device', String(gpuId), '-hwaccel_output_format', 'cuda');
+    } else if (isNvenc && sourceIs10Bit) {
+      console.log(`[SF/Preseg] 10-bit source detected, using software decode: ${path.basename(filePath)}`);
+    }
+    args.push(
       '-i', filePath,
       '-map', '0:v:0', '-map', '0:a:0?',
-    ];
+    );
 
     if (isNvenc) {
-      args.push('-pix_fmt', 'yuv420p',
+      if (sourceIs10Bit) args.push('-pix_fmt', 'yuv420p');  // force 8-bit for NVENC compat
+      args.push(
         '-vcodec', 'h264_nvenc', '-gpu', String(gpuId),
-        '-preset', 'p2', '-rc:v', 'vbr', '-cq:v', '23',
+        '-preset', 'p1', '-rc:v', 'vbr', '-cq:v', '23',
         '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
         '-g', '60', '-keyint_min', '60', '-sc_threshold', '0');
     } else {
@@ -1061,7 +1129,11 @@ async function runPreseg({ mediaId, filePath }) {
 
     // Simple poll every 5s — no exit event needed
     await new Promise((resolve, reject) => {
-      const proc = spawn(ffmpegExe, args, { stdio: 'ignore', detached: false });
+      const proc = spawn(ffmpegExe, args, { stdio: ['ignore', 'ignore', 'pipe'], detached: false });
+      let stderrTail = '';
+      proc.stderr.on('data', chunk => {
+        stderrTail = (stderrTail + chunk.toString()).slice(-2000); // keep last 2KB
+      });
       let done = false;
 
       const moveToNas = () => {
@@ -1093,7 +1165,7 @@ async function runPreseg({ mediaId, filePath }) {
         clearInterval(poll);
         clearTimeout(timeout);
         if (err) {
-          presegDb[mediaId] = { status:'error', error: err.message };
+          presegDb[mediaId] = { status:'error', error: err.message, filePath, failedAt: Date.now() };
           savePresegDb();
           try { if (fs.existsSync(localTempDir)) fs.rmSync(localTempDir, { recursive:true }); } catch {}
           reject(err);
@@ -1106,7 +1178,7 @@ async function runPreseg({ mediaId, filePath }) {
         try {
           const idx = path.join(localTempDir, 'index.m3u8');
           if (fs.existsSync(idx) && fs.readFileSync(idx,'utf8').includes('#EXT-X-ENDLIST')) {
-            if (moveToNas()) { proc.kill('SIGKILL'); finish(null); }
+            if (moveToNas()) { finish(null); proc.kill('SIGKILL'); }
           }
         } catch {}
       }, 5000);
@@ -1121,11 +1193,11 @@ async function runPreseg({ mediaId, filePath }) {
             if (moveToNas()) { finish(null); return; }
           }
         } catch {}
-        finish(new Error('preseg failed code=' + code));
+        finish(new Error('preseg failed code=' + code + ' | ffmpeg stderr: ' + (stderrTail||'').split('\n').slice(-10).join(' | ')));
       });
     });
   } catch(e) {
-    presegDb[mediaId] = { status:'error', error: e.message };
+    presegDb[mediaId] = { status:'error', error: e.message, filePath, failedAt: Date.now() };
     savePresegDb();
     // Cleanup local temp on error
     try { if (fs.existsSync(localTempDir)) fs.rmSync(localTempDir, { recursive:true }); } catch {}
@@ -1628,6 +1700,13 @@ module.exports = function mountStreamForge(app, orion) {
   SF_EPG_DISABLED = path.join(SF_DIR, 'epg_disabled.json');
 
   [SF_DIR, path.join(SF_DIR,'hls'), path.join(SF_DIR,'uploads')].forEach(d => { try { fs.mkdirSync(d,{recursive:true}); } catch {} });
+  // Init preseg state from disk (was previously orphaned — functions defined but never called)
+  try { loadPresegDb(); } catch (e) { console.error('[SF/Preseg] loadPresegDb failed:', e.message); }
+  try { loadPendingShows(); } catch (e) { console.error('[SF/Preseg] loadPendingShows failed:', e.message); }
+  try { startPresegCompletionChecker(); } catch (e) { console.error('[SF/Preseg] startPresegCompletionChecker failed:', e.message); }
+  console.log(`[SF/Preseg] Init: ${Object.keys(presegDb).length} items in DB, ${presegQueue.length} queued, ${pendingShows.length} pending shows`);
+  // Kick the drain loop: handles items restored from disk AND refills from pendingShows if queue is empty
+  try { drainPresegQueue(); } catch (e) { console.error('[SF/Preseg] initial drain failed:', e.message); }
 
   // Defaults
   sfConfig = Object.assign({
@@ -1753,18 +1832,18 @@ module.exports = function mountStreamForge(app, orion) {
     const error = Object.values(presegDb).filter(v=>v.status==='error').length;
     const queued = presegQueue.length;
     const totalMedia = getMediaCombined().filter(m=>m.path||m.filePath).length;
-    const currentFiles = Object.entries(presegDb).filter(([,v])=>v.status==='processing').map(([id])=>{
-      const m = getMediaById(id); return m ? (m.seriesTitle||m.title||id) : id;
-    });
-    const allItems = Object.entries(presegDb).map(([id,v]) => {
-      const m = getMediaById(id);
-      const name = m
-        ? (m.seriesTitle
-            ? `${m.seriesTitle} S${String(m.season||0).padStart(2,'0')}E${String(m.episode||0).padStart(2,'0')}${m.episodeTitle?' — '+m.episodeTitle:''}`
-            : m.title||id)
-        : (v.filePath ? path.basename(v.filePath, path.extname(v.filePath)) : id);
-      return { id, status:v.status, name, error:v.error||null, segCount:v.segCount||null };
-    });
+    const currentFiles = Object.entries(presegDb).filter(([,v])=>v.status==="processing").map(([id,v])=>v.displayName||id);
+    const allItems = Object.entries(presegDb).map(([id,v])=>({ id, status:v.status, name:v.displayName||(v.filePath?require("path").basename(v.filePath,require("path").extname(v.filePath)):id), error:v.error||null, segCount:v.segCount||null }));
+
+
+
+
+
+
+
+
+
+
     res.json({ done, processing, error, queued, totalMedia, workers: presegWorkers, maxWorkers: MAX_PRESEG_WORKERS(), items: allItems, currentFiles });
   });
 
@@ -1835,9 +1914,38 @@ module.exports = function mountStreamForge(app, orion) {
   });
 
   app.post('/api/sf/preseg/queue-all', (req, res) => {
-    const allMedia = getMediaCombined().filter(m=>(m.path||m.filePath)&&!isPresegged(m.id));
-    allMedia.forEach(m => queuePreseg(m.id, m.path||m.filePath));
-    res.json({ ok:true, queued: allMedia.length });
+    const includeMovies = req.body?.includeMovies === true;  // default: TV only
+    const all = getMediaCombined().filter(m => (m.path||m.filePath) && !isPresegged(m.id) && (includeMovies || m.type !== 'movie'));
+    // Group by show (TV) or singleton (movies)
+    const showMap = new Map();
+    for (const m of all) {
+      const key = (m.type === 'movie')
+        ? `__MOVIE__${m.id}`
+        : (m.title || 'Unknown').trim();
+      if (!showMap.has(key)) showMap.set(key, { showTitle: key.startsWith('__MOVIE__') ? (m.title||'Movie') : key, episodes: [] });
+      showMap.get(key).episodes.push({
+        mediaId: m.id,
+        filePath: m.path || m.filePath,
+        season: m.season ?? 0,
+        episode: m.episode ?? 0,
+      });
+    }
+    // Sort shows alphabetically (case-insensitive), movies at end by title
+    const shows = [...showMap.values()].sort((a,b) => {
+      const am = a.showTitle.startsWith('__MOVIE__') ? 1 : 0;
+      const bm = b.showTitle.startsWith('__MOVIE__') ? 1 : 0;
+      if (am !== bm) return am - bm;
+      return a.showTitle.toLowerCase().localeCompare(b.showTitle.toLowerCase());
+    });
+    // Sort episodes within each show by season then episode
+    shows.forEach(sh => sh.episodes.sort((a,b) => (a.season - b.season) || (a.episode - b.episode)));
+    pendingShows = shows;
+    savePendingShows();
+    const totalEps = shows.reduce((n,s) => n + s.episodes.length, 0);
+    console.log(`[SF/Preseg] queue-all: ${shows.length} shows / ${totalEps} items queued in show-at-a-time mode`);
+    // Kick off the first show immediately
+    refillFromPendingShows();
+    res.json({ ok: true, shows: shows.length, totalItems: totalEps, mode: 'show-at-a-time' });
   });
 
   app.delete('/api/sf/preseg/:mediaId', (req, res) => {
@@ -1875,7 +1983,7 @@ module.exports = function mountStreamForge(app, orion) {
   // ── Config ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/config', (req, res) => res.json(sfConfig));
   app.put('/api/sf/config', (req, res) => {
-    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','outputProtocol','srtPort','rtspPort','rtmpPort','udpBase','udpPort','presegDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
+    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','outputProtocol','srtPort','rtspPort','rtmpPort','udpBase','udpPort','presegDir','presegTempDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
     allowed.forEach(k => { if (req.body[k] !== undefined) sfConfig[k] = req.body[k]; });
     saveJson(SF_CFG, sfConfig); res.json({ ok:true });
   });
