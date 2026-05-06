@@ -119,15 +119,15 @@ export default function PlayerOverlay() {
     if (window.Hls && window.Hls.isSupported()) {
       if (hlsRef.current) { hlsRef.current.destroy(); }
       const hls = new window.Hls({
-        maxBufferLength: 30,
-        maxMaxBufferLength: 120,
-        maxBufferSize: 60 * 1000 * 1000,
+        maxBufferLength: 300,
+        maxMaxBufferLength: 1800,
+        maxBufferSize: 240 * 1000 * 1000,
         startLevel: -1,
         enableWorker: true,
         lowLatencyMode: false,
-        backBufferLength: 30,
-        liveSyncDuration: 3,
-        liveMaxLatencyDuration: 30,
+        backBufferLength: 10,
+        liveSyncDuration: 12,
+        liveMaxLatencyDuration: 90,
         manifestLoadingTimeOut: 20000,
         manifestLoadingMaxRetry: 10,
         manifestLoadingRetryDelay: 1000,
@@ -227,35 +227,15 @@ export default function PlayerOverlay() {
     if (!v || !streamUrl) return;
     clog('video events effect — setting src', { streamUrl: streamUrl?.slice(-60) });
 
-    // Live IPTV proxy streams — use HLS.js to handle MPEG-TS
+    // Live IPTV proxy streams — fMP4 over HTTP; native <video> handles it directly.
+    // (hls.js would try to parse the binary as a playlist and fail.)
     const isLiveProxy = streamUrl.includes('/stream/live/proxy');
     if (isLiveProxy) {
-      const loadHlsJs = () => new Promise((res, rej) => {
-        if (window.Hls) return res();
-        const s = document.createElement('script');
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.10/hls.min.js';
-        s.onload = res; s.onerror = rej;
-        document.head.appendChild(s);
-      });
-      loadHlsJs().then(() => {
-        if (window.Hls && window.Hls.isSupported()) {
-          if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-          const hls = new window.Hls({ lowLatencyMode: false });
-          hlsRef.current = hls;
-          hls.loadSource(streamUrl);
-          hls.attachMedia(v);
-          hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
-            setLoading(false); setPlaying(true);
-            v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
-          });
-          hls.on(window.Hls.Events.ERROR, (_, data) => {
-            if (data.fatal) { setError('Stream failed — try another source'); setLoading(false); }
-          });
-        } else {
-          // Safari native HLS
-          v.src = streamUrl; v.load();
-        }
-      }).catch(() => { v.src = streamUrl; v.load(); });
+      if (hlsRef.current) { try { hlsRef.current.destroy(); } catch {} hlsRef.current = null; }
+      v.src = streamUrl;
+      v.load();
+      v.play().then(() => { setLoading(false); setPlaying(true); })
+        .catch(() => { v.muted = true; v.play().then(() => { setLoading(false); setPlaying(true); }).catch(() => { setError('Stream failed — try another source'); setLoading(false); }); });
       return;
     }
 

@@ -550,7 +550,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
     if (!url) return res.status(400).json({ error: 'url required' });
 
     const { spawn } = require('child_process');
-    const ffmpegBin = require('ffmpeg-static');
+    const ffmpegBin = '/usr/bin/ffmpeg';
     const encoder = getEncoder ? getEncoder() : 'libx264';
     const sessionId = require('crypto').randomBytes(8).toString('hex');
 

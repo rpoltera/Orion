@@ -997,7 +997,7 @@ function LiveStreams({ call }) {
     const url = s.url;
     // Try native first (e.g. HLS on Safari), else use HLS.js
     if (window.Hls && window.Hls.isSupported()) {
-      const hls = new window.Hls({ liveSyncDurationCount:2, liveMaxLatencyDurationCount:5, manifestLoadingTimeOut:8000, manifestLoadingMaxRetry:1 });
+      const hls = new window.Hls({ liveSyncDurationCount:6, liveMaxLatencyDurationCount:15, maxBufferLength:60, maxMaxBufferLength:120, manifestLoadingTimeOut:8000, manifestLoadingMaxRetry:1 });
       testHlsRef.current = hls;
       hls.on(window.Hls.Events.ERROR, (e,d) => { if (d.fatal) { setTestStatus('error'); setTestError(d.details||'Stream failed to load'); hls.destroy(); }});
       hls.on(window.Hls.Events.MANIFEST_PARSED, () => { video.play().then(()=>setTestStatus('playing')).catch(()=>setTestStatus('playing')); });
@@ -1807,7 +1807,7 @@ You can run again to continue where it left off.`)) return;
                 const nets = templateNetworks.split(',').map(n=>n.trim()).filter(Boolean);
                 const r = await call('POST','/api/sf/ai/build-channel-template',{
                   targetChannelId:targetCh, networks:nets.length?nets:null,
-                  epgChannelId:templateEpgChannelId||null, date:schedDate, userPrompt:templatePrompt
+                  epgChannelId:templateEpgChannelId||null, date:date, userPrompt:templatePrompt
                 });
                 setTemplateResult(r);
                 notify('✅ Channel template built — '+r.slots?.length+' time slots');

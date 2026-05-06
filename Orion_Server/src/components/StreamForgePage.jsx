@@ -3,7 +3,7 @@ import { useApp } from '../contexts/AppContext';
 import {
   Tv2, Radio, Play, Plus, Trash2, Edit2, Save, X, RefreshCw,
   Settings, Library, Calendar, Bot, Monitor, ChevronRight,
-  List, Signal, Film, ExternalLink
+  List, Signal, Film, ExternalLink, Clock
 } from 'lucide-react';
 
 // ── API — always talks to Orion's own server at /api/sf/* ─────────────────────
@@ -652,8 +652,86 @@ const TABS = [
   { id:'ai',        icon:<Bot size={14}/>,          label:'AI Scheduler'    },
   { id:'libraries', icon:<Library size={14}/>,     label:'Libraries'       },
   { id:'watch',     icon:<Monitor size={14}/>,      label:'Watch'           },
+  { id:'schedules', icon:<Clock size={14}/>,        label:'Schedules'       },
   { id:'settings',  icon:<Settings size={14}/>,    label:'Settings'        },
 ];
+
+function Schedules({ call, onWatch }) {
+  const [items, setItems] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('sf_schedules') || '[]'); } catch { return []; }
+  });
+  const [channels, setChannels] = useState([]);
+  const [draft, setDraft] = useState({ name:'', time:'12:00', days:[1,2,3,4,5], channelId:'' });
+  const [editingId, setEditingId] = useState(null);
+
+  useEffect(() => { call('GET','/api/sf/channels').then(r => setChannels(Array.isArray(r) ? r : (r?.channels || []))).catch(()=>{}); }, [call]);
+
+  const persist = (next) => {
+    setItems(next);
+    localStorage.setItem('sf_schedules', JSON.stringify(next));
+  };
+  const dayLabels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const toggleDay = (d) => {
+    setDraft(prev => ({ ...prev, days: prev.days.includes(d) ? prev.days.filter(x=>x!==d) : [...prev.days, d].sort() }));
+  };
+  const save = () => {
+    if (!draft.name || !draft.channelId) return;
+    const [h,m] = draft.time.split(':').map(Number);
+    const entry = { id: editingId || ('s'+Date.now()), name: draft.name, hour: h, minute: m, days: draft.days, channelId: draft.channelId };
+    const next = editingId ? items.map(i => i.id === editingId ? entry : i) : [...items, entry];
+    persist(next);
+    setDraft({ name:'', time:'12:00', days:[1,2,3,4,5], channelId:'' });
+    setEditingId(null);
+  };
+  const edit = (it) => {
+    setDraft({ name: it.name, time: String(it.hour).padStart(2,'0')+':'+String(it.minute).padStart(2,'0'), days: it.days, channelId: it.channelId });
+    setEditingId(it.id);
+  };
+  const remove = (id) => persist(items.filter(i => i.id !== id));
+  const chName = (id) => channels.find(c => c.id === id)?.name || id;
+  const fmtDays = (d) => d.length === 7 ? 'Daily' : d.length === 5 && d.every(x => x>=1 && x<=5) ? 'Weekdays' : d.map(x=>dayLabels[x]).join(',');
+
+  return (
+    <div>
+      <div style={{ background:'var(--bg-secondary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:20, marginBottom:20 }}>
+        <h3 style={{ margin:'0 0 16px', fontSize:14, color:'var(--text)' }}>{editingId ? 'Edit Schedule' : 'New Schedule'}</h3>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 120px 1fr', gap:12, marginBottom:12 }}>
+          <Field label="Name"><input value={draft.name} onChange={e=>setDraft({...draft, name:e.target.value})} placeholder="Mom's Show" style={{ width:'100%', padding:8, background:'var(--bg)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text)' }}/></Field>
+          <Field label="Time"><input type="time" value={draft.time} onChange={e=>setDraft({...draft, time:e.target.value})} style={{ width:'100%', padding:8, background:'var(--bg)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text)' }}/></Field>
+          <Field label="Channel"><select value={draft.channelId} onChange={e=>setDraft({...draft, channelId:e.target.value})} style={{ width:'100%', padding:8, background:'var(--bg)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text)' }}><option value="">-- select --</option>{channels.map(c => <option key={c.id} value={c.id}>{c.num ? `#${c.num} ` : ''}{c.name}</option>)}</select></Field>
+        </div>
+        <Field label="Days">
+          <div style={{ display:'flex', gap:6 }}>
+            {dayLabels.map((lbl,i) => (
+              <button key={i} onClick={()=>toggleDay(i)} style={{ padding:'6px 10px', borderRadius:'var(--radius)', border:'1px solid '+(draft.days.includes(i)?'var(--accent)':'var(--border)'), background:draft.days.includes(i)?'rgba(16,185,129,0.15)':'var(--bg)', color:draft.days.includes(i)?'var(--accent)':'var(--text-muted)', cursor:'pointer', fontSize:12, fontWeight:600 }}>{lbl}</button>
+            ))}
+          </div>
+        </Field>
+        <div style={{ marginTop:12, display:'flex', gap:8 }}>
+          <button onClick={save} style={{ padding:'8px 16px', background:'var(--accent)', color:'#fff', border:'none', borderRadius:'var(--radius)', cursor:'pointer', display:'flex', alignItems:'center', gap:6, fontSize:12, fontWeight:600 }}><Save size={12}/> {editingId ? 'Save Changes' : 'Add Schedule'}</button>
+          {editingId && <button onClick={()=>{ setDraft({ name:'', time:'12:00', days:[1,2,3,4,5], channelId:'' }); setEditingId(null); }} style={{ padding:'8px 16px', background:'var(--bg)', color:'var(--text-muted)', border:'1px solid var(--border)', borderRadius:'var(--radius)', cursor:'pointer', fontSize:12 }}>Cancel</button>}
+        </div>
+      </div>
+      <div style={{ background:'var(--bg-secondary)', border:'1px solid var(--border)', borderRadius:'var(--radius)' }}>
+        {items.length === 0 ? (
+          <div style={{ padding:32, textAlign:'center', color:'var(--text-muted)', fontSize:13 }}>No schedules yet. Add one above to auto-tune at a specific time.</div>
+        ) : items.map(it => (
+          <div key={it.id} style={{ padding:14, borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', gap:16 }}>
+            <Clock size={16} style={{ color:'var(--accent)' }}/>
+            <div style={{ flex:1 }}>
+              <div style={{ fontWeight:600, color:'var(--text)' }}>{it.name}</div>
+              <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>{String(it.hour).padStart(2,'0')}:{String(it.minute).padStart(2,'0')} · {fmtDays(it.days)} · {chName(it.channelId)}</div>
+            </div>
+            <button onClick={()=>onWatch(it.channelId)} style={{ padding:'6px 12px', background:'var(--bg-tertiary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text-secondary)', cursor:'pointer', fontSize:12, display:'flex', alignItems:'center', gap:5 }}><Play size={12}/> Test</button>
+            <button onClick={()=>edit(it)} style={{ padding:'6px 12px', background:'var(--bg-tertiary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text-secondary)', cursor:'pointer', fontSize:12, display:'flex', alignItems:'center', gap:5 }}><Edit2 size={12}/> Edit</button>
+            <button onClick={()=>remove(it.id)} style={{ padding:'6px 12px', background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.3)', borderRadius:'var(--radius)', color:'#ef4444', cursor:'pointer', fontSize:12, display:'flex', alignItems:'center', gap:5 }}><Trash2 size={12}/></button>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop:14, fontSize:11, color:'var(--text-muted)' }}>Schedules are saved per-device in this browser. They only fire while StreamForge is open in this browser tab.</div>
+    </div>
+  );
+}
 
 export default function StreamForgePage() {
   const call = useSFApi();
@@ -663,6 +741,33 @@ export default function StreamForgePage() {
 
   const goWatch=id=>{ setWatchId(id); setTab('watch'); };
   const goPlayout=id=>{ setPlayoutId(id); setTab('playout'); };
+
+  // Schedule firing — checks every 20s for matching schedules
+  useEffect(() => {
+    const lastFiredRef = { current: {} };
+    const tick = () => {
+      let items = [];
+      try { items = JSON.parse(localStorage.getItem('sf_schedules') || '[]'); } catch {}
+      const now = new Date();
+      const dow = now.getDay();
+      const hh = now.getHours();
+      const mm = now.getMinutes();
+      const minuteKey = `${now.toDateString()}-${hh}:${mm}`;
+      for (const it of items) {
+        if (!it.days?.includes(dow)) continue;
+        if (it.hour !== hh || it.minute !== mm) continue;
+        const fireKey = `${it.id}-${minuteKey}`;
+        if (lastFiredRef.current[fireKey]) continue;
+        lastFiredRef.current[fireKey] = true;
+        console.log('[SF Schedule] firing', it.name, '->', it.channelId);
+        goWatch(it.channelId);
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 20000);
+    return () => clearInterval(iv);
+  }, []);
+
 
   return (
     <div className="page">
@@ -697,6 +802,7 @@ export default function StreamForgePage() {
         {tab==='epg'       && <EPGManager  call={call}/>}
         {tab==='ai'        && <AIScheduler call={call}/>}
         {tab==='libraries' && <Libraries   call={call}/>}
+        {tab==='schedules' && <Schedules  call={call} onWatch={goWatch}/>}
         {tab==='watch'     && <Watch       call={call} initialChannelId={watchId}/>}
         {tab==='settings'  && <SFSettings  call={call}/>}
       </div>

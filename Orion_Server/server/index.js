@@ -19,7 +19,7 @@ const cors       = require('cors');
 const path       = require('path');
 const fs         = require('fs');
 const ffmpeg     = require('fluent-ffmpeg');
-const ffmpegStatic = require('ffmpeg-static');
+const ffmpegStatic = '/usr/bin/ffmpeg';
 
 const multer = require('multer');
 const { loadConfig, getConfig, getSettings, updateConfig, updateSettings, saveConfig, PATHS } = require('./config');
@@ -212,10 +212,59 @@ io.on('connection', socket => {
   socket.on('disconnect', () => console.log('[Socket] Disconnected:', socket.id));
 });
 
+// Device registry: tracks IPs that hit IPTV/HLS endpoints
+const _devicesPath = '/var/lib/orion/sf/devices.json';
+let _devices = {};
+try { _devices = JSON.parse(fs.readFileSync(_devicesPath, 'utf8')); } catch {}
+let _devicesDirty = false;
+setInterval(() => {
+  if (_devicesDirty) {
+    _devicesDirty = false;
+    try { fs.writeFileSync(_devicesPath, JSON.stringify(_devices, null, 2)); } catch (e) { console.error('[Devices] save failed:', e.message); }
+  }
+}, 5000);
+
+function _trackDevice(req) {
+  const url = req.url || '';
+  // Only track on IPTV/HLS/M3U endpoints (where players actually hit)
+  if (!/^\/(sf\/(hls|stream|iptv|preseg-file)|api\/stream\/live\/proxy|api\/sf\/channels)/.test(url)) return;
+  const ip = (req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket?.remoteAddress || req.ip || 'unknown';
+  if (!ip || ip === 'unknown') return;
+  const ua = req.headers['user-agent'] || '';
+  const key = ip.replace(/^::ffff:/, '');
+  if (!_devices[key]) {
+    _devices[key] = { ip: key, name: '', firstSeen: Date.now(), lastSeen: Date.now(), userAgent: ua, hits: 1 };
+  } else {
+    _devices[key].lastSeen = Date.now();
+    _devices[key].userAgent = ua;
+    _devices[key].hits = (_devices[key].hits || 0) + 1;
+  }
+  _devicesDirty = true;
+}
+
 // Log ALL incoming requests regardless of route
 app.use((req, res, next) => {
   console.log(`[REQ] ${req.method} ${req.url}`);
+  _trackDevice(req);
   next();
+});
+
+// Devices API — list, rename, delete
+app.get('/api/sf/devices', (req, res) => {
+  const list = Object.values(_devices).sort((a,b)=>b.lastSeen - a.lastSeen);
+  res.json({ devices: list });
+});
+app.patch('/api/sf/devices/:ip', express.json(), (req, res) => {
+  const ip = req.params.ip;
+  if (!_devices[ip]) return res.status(404).json({ error: 'not found' });
+  if (typeof req.body?.name === 'string') _devices[ip].name = req.body.name.slice(0, 80);
+  _devicesDirty = true;
+  res.json({ ok: true, device: _devices[ip] });
+});
+app.delete('/api/sf/devices/:ip', (req, res) => {
+  delete _devices[req.params.ip];
+  _devicesDirty = true;
+  res.json({ ok: true });
 });
 
 async function start() {
@@ -362,13 +411,19 @@ async function start() {
     try {
       const decodedUrl = decodeURIComponent(url);
       const { spawn } = require('child_process');
-      const ffmpegPath = require('ffmpeg-static');
+      const ffmpegPath = '/usr/bin/ffmpeg';
       const encoder = cachedEncoder || 'libx264';
+      // Browser-realistic headers for picky upstreams (Amagi, Xumo, Pluto, etc)
+      const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+      let referer = '';
+      try { const u = new URL(decodedUrl); referer = u.origin + '/'; } catch {}
       const args = [
-        '-probesize','100000','-analyzeduration','100000',
+        '-probesize','5000000','-analyzeduration','5000000',
         '-fflags','+genpts+discardcorrupt+nobuffer',
         '-err_detect','ignore_err',
-        '-user_agent','Mozilla/5.0',
+        '-user_agent', ua,
+        ...(referer ? ['-headers', `Referer: ${referer}\r\nOrigin: ${referer.replace(/\/$/, '')}\r\n`] : []),
+        '-reconnect','1','-reconnect_streamed','1','-reconnect_delay_max','5',
         '-i', decodedUrl,
         '-map','0:v:0?','-map','0:a:0?',
         '-vcodec','copy',
@@ -382,6 +437,7 @@ async function start() {
       res.setHeader('Content-Type','video/mp2t');
       res.setHeader('Cache-Control','no-cache');
       res.setHeader('Access-Control-Allow-Origin','*');
+      console.log('[LiveProxy] DEBUG args:', JSON.stringify(args));
       const proc = spawn(ffmpegPath, args, { stdio:['ignore','pipe','pipe'] });
       proc.stdout.pipe(res);
       proc.stderr.on('data', d => {

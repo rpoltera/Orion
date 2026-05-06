@@ -153,8 +153,7 @@ function GlobalBackground() {
       )}
       {activeSection === 'home' && (
         <>
-          <div style={{ position:'absolute', top:'40%', left:0, right:0, bottom:0, background:'rgba(10,10,18,0.75)' }} />
-          <div style={{ position:'absolute', top:'25%', left:0, right:0, height:'20%', background:'linear-gradient(to bottom,transparent,rgba(10,10,18,0.75))' }} />
+          <div style={{ position:'absolute', top:'65%', left:0, right:0, bottom:0, background:'linear-gradient(to bottom, rgba(10,10,18,0.2) 0%, rgba(10,10,18,0.95) 40%)' }} />
         </>
       )}
     </div>
