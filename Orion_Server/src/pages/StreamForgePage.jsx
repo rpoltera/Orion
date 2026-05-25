@@ -140,7 +140,7 @@ function Dashboard({ call, onTabChange }) {
     <div>
       <div style={{ display:'flex',alignItems:'center',gap:10,marginBottom:24,padding:'10px 14px',background:'rgba(16,185,129,0.08)',border:'1px solid rgba(16,185,129,0.2)',borderRadius:'var(--radius-lg)' }}>
         <div style={{ width:8,height:8,borderRadius:'50%',background:'#10b981',boxShadow:'0 0 8px #10b981' }}/>
-        <span style={{ fontSize:13,color:'#10b981',fontWeight:600 }}>StreamForge engine running inside Orion</span>
+        <span style={{ fontSize:13,color:'#10b981',fontWeight:600 }}>Channel engine running inside Orion</span>
         {status && <span style={{ fontSize:11,color:'var(--text-muted)',marginLeft:8 }}>· {status.hwEncoder} · ffmpeg ready</span>}
       </div>
       <div style={{ display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:16,marginBottom:28 }}>
@@ -327,7 +327,7 @@ function Channels({ call, onWatch, onPlayout }) {
                         <div style={{ flex:1,minWidth:0 }}>
                           <div style={{ fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap' }}>{epgCh.name}</div>
                           <div style={{ fontSize:11,marginTop:1 }}>
-                            {sfCh?<span style={{ color:'#10b981' }}>Already in StreamForge as CH {sfCh.num}</span>
+                            {sfCh?<span style={{ color:'#10b981' }}>Already a Channel: CH {sfCh.num}</span>
                               :iptvMatch?<span style={{ color:'#10b981' }}>✓ IPTV stream matched</span>
                               :<span style={{ color:'#f97316' }}>No IPTV match</span>}
                           </div>
@@ -1821,7 +1821,7 @@ You can run again to continue where it left off.`)) return;
           {/* Target Channel — EPG mode only (Network mode has it inside its own card) */}
           {buildMode==='epg'&&<div style={card}>
             <span style={sectionLabel}>Target Channel</span>
-            <label style={{ ...sectionLabel,marginBottom:5 }}>Add Results to this StreamForge Channel</label>
+            <label style={{ ...sectionLabel,marginBottom:5 }}>Add Results to this Channel</label>
             <select style={inp} value={targetCh} onChange={e=>setTargetCh(e.target.value)}>
               <option value="">— Select a channel —</option>
               {channels.filter(c=>!c.liveStreamId).map(c=><option key={c.id} value={c.id}>{c.num} — {c.name}</option>)}
@@ -1918,7 +1918,7 @@ You can run again to continue where it left off.`)) return;
                   </div>
                   <div style={{ maxHeight:280,overflowY:'auto',border:'1px solid var(--border)',borderRadius:'var(--radius)' }}>
                     {filteredEpg.length===0
-                      ? <div style={{ padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:12 }}>All EPG channels already have StreamForge channels.</div>
+                      ? <div style={{ padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:12 }}>All EPG channels already have a Channel mapping.</div>
                       : filteredEpg.map(c=>(
                         <label key={c.id} style={{ display:'flex',alignItems:'center',gap:10,padding:'9px 14px',borderBottom:'1px solid rgba(255,255,255,0.04)',cursor:'pointer',background:epgSelection.has(c.id)?'rgba(99,102,241,0.08)':'transparent' }}>
                           <input type="checkbox" checked={epgSelection.has(c.id)} onChange={e=>setEpgSelection(prev=>{const n=new Set(prev);e.target.checked?n.add(c.id):n.delete(c.id);return n;})} style={{ width:15,height:15,accentColor:'var(--accent)' }}/>
@@ -2403,81 +2403,7 @@ function SFSettings({ call }) {
           <Field label="Xtream Username"><input style={inp} value={config.xcUser||''} onChange={e=>update('xcUser',e.target.value)}/></Field>
           <Field label="Xtream Password"><input style={inp} value={config.xcPass||''} onChange={e=>update('xcPass',e.target.value)}/></Field>
         </div>
-        <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius-lg)',padding:20 }}>
-          <div style={{ fontWeight:700,fontSize:14,marginBottom:16 }}>🤖 AI Provider</div>
-          <Field label="Provider">
-            <select style={inp} value={config.aiProvider||'anthropic'} onChange={e=>update('aiProvider',e.target.value)}>
-              <option value="anthropic">Anthropic (Claude)</option>
-              <option value="openai">OpenAI (GPT-4)</option>
-              <option value="ollama">Ollama (Local LLM)</option>
-              <option value="openwebui">Open WebUI</option>
-              <option value="custom">Custom Endpoint</option>
-            </select>
-          </Field>
-          {config.aiProvider==='anthropic' && <Field label="Anthropic API Key"><input style={inp} type="password" value={config.anthropicApiKey||''} onChange={e=>update('anthropicApiKey',e.target.value)} placeholder="sk-ant-…"/></Field>}
-          {config.aiProvider==='openai' && <>
-            <Field label="OpenAI API Key"><input style={inp} type="password" value={config.openaiApiKey||''} onChange={e=>update('openaiApiKey',e.target.value)}/></Field>
-            <Field label="Model"><input style={inp} value={config.openaiModel||'gpt-4o'} onChange={e=>update('openaiModel',e.target.value)}/></Field>
-          </>}
-          {config.aiProvider==='ollama' && <>
-            <Field label="Ollama URL" hint="e.g. http://192.168.0.x:11434"><input style={inp} value={config.ollamaUrl||'http://localhost:11434'} onChange={e=>update('ollamaUrl',e.target.value)}/></Field>
-            <Field label="Model"><input style={inp} value={config.ollamaModel||'llama3.2'} onChange={e=>update('ollamaModel',e.target.value)}/></Field>
-          </>}
-          {config.aiProvider==='openwebui' && <>
-            <Field label="Open WebUI URL" hint="e.g. http://192.168.0.x:3000"><input style={inp} value={config.openwebUIUrl||''} onChange={e=>update('openwebUIUrl',e.target.value)} placeholder="http://192.168.0.x:3000"/></Field>
-            <Field label="API Key" hint="Found in Open WebUI → Settings → Account"><input style={inp} type="password" value={config.openwebUIKey||''} onChange={e=>update('openwebUIKey',e.target.value)} placeholder="sk-…"/></Field>
-            <Field label="Model"><input style={inp} value={config.openwebUIModel||''} onChange={e=>update('openwebUIModel',e.target.value)} placeholder="llama3.2"/></Field>
-          </>}
-          {config.aiProvider==='custom' && <>
-            <Field label="Base URL" hint="OpenAI-compatible /v1 endpoint"><input style={inp} value={config.customAiUrl||''} onChange={e=>update('customAiUrl',e.target.value)} placeholder="http://host:port/v1"/></Field>
-            <Field label="API Key" hint="Leave blank if not required"><input style={inp} type="password" value={config.customAiKey||''} onChange={e=>update('customAiKey',e.target.value)}/></Field>
-            <Field label="Model"><input style={inp} value={config.customAiModel||''} onChange={e=>update('customAiModel',e.target.value)} placeholder="model-name"/></Field>
-          </>}
-          <button onClick={testAi} disabled={testingAi} style={{ marginTop:10, padding:'7px 16px', background:'rgba(255,255,255,0.07)', border:'1px solid rgba(255,255,255,0.15)', color:'white', borderRadius:'var(--radius)', cursor:'pointer', fontSize:12 }}>
-            {testingAi ? '⏳ Testing…' : '🧪 Test AI Connection'}
-          </button>
-        </div>
-        <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius-lg)',padding:20 }}>
-          <div style={{ fontWeight:700,fontSize:14,marginBottom:16 }}>🎬 Transcoding</div>
-          <Field label="Video Codec">
-            <select style={inp} value={config.videoCodec||'copy'} onChange={e=>update('videoCodec',e.target.value)}>
-              <option value="copy">Copy (no transcode — fastest, may stutter with HEVC)</option>
-              <option value="h264">H.264 (hardware encode — best compatibility)</option>
-              <option value="hevc">H.265/HEVC (hardware encode — smaller files)</option>
-            </select>
-          </Field>
-          {(config.videoCodec==='h264'||config.videoCodec==='hevc') && <>
-            <Field label="Hardware Decode" hint="Use GPU to decode the input stream — eliminates CPU decoding entirely. NVIDIA=NVDEC, AMD=D3D11VA/VAAPI, Intel=QSV">
-              <label style={{ display:'flex',alignItems:'center',gap:8,cursor:'pointer' }}>
-                <input type="checkbox" checked={!!config.hwDecode} onChange={e=>update('hwDecode',e.target.checked)}/>
-                <span style={{ fontSize:13 }}>Enable hardware decode (all GPU types supported)</span>
-              </label>
-            </Field>
-            <Field label="GPU Count" hint="Number of GPUs available for round-robin channel distribution">
-              <input style={inp} type="number" min={1} max={16} value={config.gpuCount||1} onChange={e=>update('gpuCount',parseInt(e.target.value)||1)}/>
-            </Field>
-          </>}
-          <Field label="Maximum Resolution" hint="The highest resolution to encode. When adaptive quality is enabled this is the ceiling.">
-            <select style={inp} value={config.maxResolution||config.videoResolution||''} onChange={e=>update('maxResolution',e.target.value)}>
-              <option value="">Source (keep original)</option>
-              <option value="3840x2160">4K UHD — 3840×2160</option>
-              <option value="2560x1440">2K QHD — 2560×1440</option>
-              <option value="1920x1080">1080p FHD — 1920×1080</option>
-              <option value="1280x720">720p HD — 1280×720</option>
-              <option value="854x480">480p SD — 854×480</option>
-              <option value="640x360">360p — 640×360</option>
-              <option value="426x240">240p — 426×240</option>
-            </select>
-          </Field>
-          <Field label="Adaptive Quality" hint="Automatically reduce resolution when server load is high (like Netflix). Drops to 720p then 480p as needed, restores when load drops.">
-            <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer' }}>
-              <input type="checkbox" checked={!!config.adaptiveQuality} onChange={e=>update('adaptiveQuality', e.target.checked)} />
-              <span style={{ fontSize:13 }}>Enable adaptive quality (auto-reduce resolution under load)</span>
-            </label>
-          </Field>
-          <Field label="Audio Language" hint="ISO 639-2 code (e.g. eng, spa)"><input style={inp} value={config.audioLanguage||'eng'} onChange={e=>update('audioLanguage',e.target.value)}/></Field>
-        </div>
-        <div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius-lg)',padding:20 }}>
+<div style={{ background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius-lg)',padding:20 }}>
           <div style={{ fontWeight:700,fontSize:14,marginBottom:16 }}>📡 Streaming Output</div>
           <Field label={<span style={{display:'flex',alignItems:'center',gap:6}}>Output Protocol <span title={'HLS: Universal, 2-4s start, works everywhere including WiFi and internet.&#10;SRT: Low latency 1-2s, works over WiFi and internet, supported by TiviMate/VLC.&#10;RTSP: Low latency 1-2s, works over WiFi, wide player support.&#10;RTMP: 2-3s latency, universal compatibility, works everywhere.&#10;UDP Multicast: Near-instant &lt;1s, requires wired ethernet, local network only.'} style={{cursor:'help',color:'var(--accent)',fontSize:14}}>ⓘ</span></span>} hint="Choose the streaming protocol for all channels">
             <select style={inp} value={config.outputProtocol||'hls'} onChange={e=>update('outputProtocol',e.target.value)}>
@@ -2644,186 +2570,54 @@ function ScheduleGrid({ call }) {
 }
 
 
-function PreSegManager({ call }) {
-  const [status, setStatus] = React.useState(null);
-  const [channels, setChannels] = React.useState([]);
-  const [loading, setLoading] = React.useState(false);
-  const [msg, setMsg] = React.useState('');
-  const [workers, setWorkers] = React.useState(4);
-  const [activeTab, setActiveTab] = React.useState('channels');
 
-  const refresh = async () => {
-    try {
-      const [s, chs] = await Promise.all([
-        call('GET', '/api/sf/preseg/status?items=1'),
-        call('GET', '/api/sf/channels'),
-      ]);
-      setStatus(s);
-      setWorkers(s.maxWorkers || 4);
-      setChannels(chs.filter(c => !c.liveStreamId));
-    } catch(e) { setMsg(e.message); }
-  };
+// === [polish] Reusable bits for Convert + Pre-Segment pages ===
+function _formatEta(seconds) {
+  if (seconds == null || !isFinite(seconds) || seconds < 0) return '--';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `~${d}d ${h}h`;
+  if (h > 0) return `~${h}h ${m}m`;
+  if (m > 0) return `~${m}m`;
+  return '<1m';
+}
 
-  React.useEffect(() => { refresh(); const t = setInterval(refresh, 10000); return () => clearInterval(t); }, []);
 
-  const queueChannel = async (chId, chName) => {
-    setLoading(true);
-    try {
-      const r = await call('POST', '/api/sf/preseg/queue-channel', { channelId: chId });
-      setMsg('✅ Queued ' + r.queued + ' items for "' + chName + '"');
-      refresh();
-    } catch(e) { setMsg(e.message); }
-    setLoading(false);
-  };
-
-  const queueAll = async () => {
-    if (!window.confirm('Queue ALL library content for pre-segmentation?')) return;
-    setLoading(true);
-    try {
-      const r = await call('POST', '/api/sf/preseg/queue-all', {});
-      setMsg('✅ Queued ' + r.queued + ' items');
-      refresh();
-    } catch(e) { setMsg(e.message); }
-    setLoading(false);
-  };
-
-  const saveWorkers = async (n) => {
-    try {
-      await call('PUT', '/api/sf/config', { presegWorkers: n, gpuCount: n });
-      setWorkers(n);
-      setMsg('✅ Workers set to ' + n);
-    } catch(e) { setMsg(e.message); }
-  };
-
-  const card = { background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--radius-lg)', padding:20, marginBottom:16 };
-  const doneItems = (status?.items||[]).filter(i=>i.status==='done');
-  const errorItems = (status?.items||[]).filter(i=>i.status==='error');
-
+function _bar(value, max, accent) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  const color = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : (accent || '#10b981');
   return (
-    <div>
-      {msg && <div style={{ padding:'10px 14px', background:'rgba(99,102,241,0.1)', border:'1px solid rgba(99,102,241,0.3)', borderRadius:'var(--radius)', marginBottom:16, fontSize:13 }}>{msg}</div>}
-      <div style={card}>
-        <div style={{ fontWeight:700, fontSize:14, marginBottom:16 }}>⚡ Pre-Segmentation Engine</div>
-        <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:16, lineHeight:1.6 }}>
-          Pre-segments media files to HLS once. Playback uses near-zero CPU — just file I/O. Target: 60+ channels.
-        </div>
-        {status && (
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:12, marginBottom:16 }}>
-            {[
-              { label:'Done', value:status.done, color:'#10b981' },
-              { label:'Processing', value:status.processing, color:'var(--accent)' },
-              { label:'Queued', value:status.queued, color:'#f59e0b' },
-              { label:'Errors', value:status.error, color:'#ef4444' },
-              { label:'Total Media', value:status.totalMedia, color:'var(--text-secondary)' },
-            ].map(s => (
-              <div key={s.label} style={{ background:'var(--bg-tertiary)', borderRadius:'var(--radius)', padding:'12px 16px', textAlign:'center' }}>
-                <div style={{ fontSize:24, fontWeight:700, color:s.color }}>{(s.value||0).toLocaleString()}</div>
-                <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:4 }}>{s.label}</div>
-              </div>
-            ))}
-          </div>
-        )}
-        {status && (status.done||0) > 0 && (status.totalMedia||0) > 0 && (
-          <div style={{ marginBottom:16 }}>
-            <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:'var(--text-muted)', marginBottom:4 }}>
-              <span>Progress</span>
-              <span>{Math.round((status.done||0)/(status.totalMedia||1)*100)}%</span>
-            </div>
-            <div style={{ height:6, background:'var(--bg-tertiary)', borderRadius:3, overflow:'hidden' }}>
-              <div style={{ height:'100%', width:Math.round((status.done||0)/(status.totalMedia||1)*100)+'%', background:'#10b981', borderRadius:3, transition:'width 0.5s' }}/>
-            </div>
-          </div>
-        )}
-        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
-          <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-            <span style={{ fontSize:12, color:'var(--text-muted)' }}>Workers:</span>
-            {[1,2,4,6,8,12,16].map(n => (
-              <button key={n} onClick={() => saveWorkers(n)}
-                style={{ padding:'5px 12px', background:workers===n?'var(--accent)':'var(--bg-tertiary)', color:workers===n?'white':'var(--text-secondary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', cursor:'pointer', fontSize:12, fontWeight:600 }}>
-                {n}
-              </button>
-            ))}
-          </div>
-          <button onClick={queueAll} disabled={loading} style={{ padding:'9px 20px', background:'var(--accent)', color:'white', border:'none', borderRadius:'var(--radius)', fontWeight:700, cursor:'pointer', fontSize:13 }}>
-            ⚡ Queue All Library
-          </button>
-          <button onClick={refresh} style={{ padding:'9px 14px', background:'var(--bg-tertiary)', border:'1px solid var(--border)', borderRadius:'var(--radius)', color:'var(--text-secondary)', cursor:'pointer', fontSize:13 }}>
-            ↻ Refresh
-          </button>
-          <button onClick={async()=>{ if(!window.confirm('Reset all done/error entries so they get re-validated on next queue?')) return; await call('POST','/api/sf/preseg/reset',{}); setMsg('✅ Reset — re-queue channels to re-validate'); refresh(); }}
-            style={{ padding:'9px 14px', background:'rgba(239,68,68,0.1)', border:'1px solid rgba(239,68,68,0.3)', borderRadius:'var(--radius)', color:'#ef4444', cursor:'pointer', fontSize:13 }}>
-            🔄 Reset & Re-validate
-          </button>
-        </div>
-      </div>
-
-      <div style={{ display:'flex', gap:0, marginBottom:12, borderRadius:'var(--radius)', overflow:'hidden', border:'1px solid var(--border)', width:'fit-content' }}>
-        {[
-          { id:'channels', label:'📺 Channels' },
-          { id:'done', label:'✅ Done (' + doneItems.length + ')' },
-          { id:'errors', label:'❌ Errors (' + errorItems.length + ')' },
-        ].map((t,i) => (
-          <button key={t.id} onClick={() => setActiveTab(t.id)}
-            style={{ padding:'7px 18px', background:activeTab===t.id?'var(--accent)':'var(--bg-card)', color:activeTab===t.id?'white':'var(--text-secondary)', border:'none', borderLeft:i>0?'1px solid var(--border)':'none', cursor:'pointer', fontSize:12, fontWeight:600 }}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {activeTab==='channels' && (
-        <div style={card}>
-          <div style={{ fontWeight:700, fontSize:14, marginBottom:12 }}>Queue by Channel</div>
-          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-            {channels.map(ch => (
-              <div key={ch.id} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 14px', background:'var(--bg-tertiary)', borderRadius:'var(--radius)' }}>
-                <span style={{ fontSize:11, fontWeight:700, color:'var(--accent)', minWidth:24 }}>{ch.num}</span>
-                <span style={{ flex:1, fontSize:13 }}>{ch.name}</span>
-                <button onClick={() => queueChannel(ch.id, ch.name)} disabled={loading}
-                  style={{ padding:'5px 14px', background:'rgba(99,102,241,0.15)', border:'1px solid rgba(99,102,241,0.3)', borderRadius:'var(--radius)', color:'#818cf8', cursor:'pointer', fontSize:11, fontWeight:600 }}>
-                  Queue Content
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {activeTab==='done' && (
-        <div style={card}>
-          <div style={{ fontWeight:700, fontSize:14, marginBottom:12 }}>✅ Completed ({doneItems.length})</div>
-          <div style={{ maxHeight:400, overflowY:'auto', display:'flex', flexDirection:'column', gap:2 }}>
-            {doneItems.length===0
-              ? <div style={{ color:'var(--text-muted)', fontSize:13 }}>No files completed yet</div>
-              : doneItems.map(i => (
-                <div key={i.id} style={{ fontSize:11, color:'#10b981', padding:'4px 8px', borderBottom:'1px solid rgba(255,255,255,0.04)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                  <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>✓ {i.name||i.id}</span>
-                  {i.segCount && <span style={{ color:'var(--text-muted)', fontSize:10, marginLeft:8, flexShrink:0 }}>{i.segCount} segs</span>}
-                </div>
-              ))
-            }
-          </div>
-        </div>
-      )}
-
-      {activeTab==='errors' && (
-        <div style={card}>
-          <div style={{ fontWeight:700, fontSize:14, marginBottom:12 }}>❌ Errors ({errorItems.length})</div>
-          <div style={{ maxHeight:400, overflowY:'auto', display:'flex', flexDirection:'column', gap:4 }}>
-            {errorItems.length===0
-              ? <div style={{ color:'var(--text-muted)', fontSize:13 }}>No errors</div>
-              : errorItems.map(i => (
-                <div key={i.id} style={{ fontSize:11, padding:'6px 10px', background:'rgba(239,68,68,0.08)', borderRadius:'var(--radius)' }}>
-                  <div style={{ fontWeight:600, color:'#ef4444', marginBottom:2 }}>{i.name||i.id}</div>
-                  <div style={{ color:'var(--text-muted)' }}>{i.error||'Unknown error'}</div>
-                </div>
-              ))
-            }
-          </div>
-        </div>
-      )}
+    <div style={{ flex: 1, height: 5, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+      <div style={{ width: `${pct}%`, height: '100%', background: color, transition: 'width 0.4s' }} />
     </div>
   );
 }
+
+
+function _useDoneRate(donePoll) {
+  const [history, setHistory] = React.useState([]);
+  React.useEffect(() => {
+    if (donePoll == null) return;
+    const now = Date.now();
+    setHistory(h => {
+      const next = [...h, { t: now, done: donePoll }];
+      return next.filter(x => now - x.t < 600000); // keep last 10 min
+    });
+  }, [donePoll]);
+  const rate = React.useMemo(() => {
+    if (history.length < 2) return null;
+    const oldest = history[0];
+    const newest = history[history.length - 1];
+    const dt = (newest.t - oldest.t) / 1000;
+    const dd = newest.done - oldest.done;
+    if (dt < 20) return null;
+    return dd / dt; // per second
+  }, [history]);
+  return rate;
+}
+
+
 
 const TABS = [
   { id:'dashboard', icon:<Signal size={14}/>,    label:'Dashboard'       },
@@ -2835,7 +2629,6 @@ const TABS = [
   { id:'libraries', icon:<Library size={14}/>,     label:'Libraries'       },
   { id:'schedule',  icon:<Calendar size={14}/>,     label:'Schedule'        },
   { id:'watch',     icon:<Monitor size={14}/>,      label:'Watch'           },
-  { id:'preseg',    icon:<Zap size={14}/>,           label:'Pre-Segment'     },
   { id:'settings',  icon:<Settings size={14}/>,    label:'Settings'        },
 ];
 
@@ -2884,7 +2677,6 @@ export default function StreamForgePage() {
         {tab==='schedule'  && <ScheduleGrid  call={call}/>}
         {tab==='watch'     && <Watch       call={call} initialChannelId={watchId}/>}
         {tab==='settings'  && <SFSettings  call={call}/>}
-        {tab==='preseg'    && <PreSegManager call={call}/>}
       </div>
     </div>
   );

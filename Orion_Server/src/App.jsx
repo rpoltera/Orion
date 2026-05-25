@@ -22,6 +22,8 @@ import SchedulerPage from './pages/SchedulerPage';
 import CollectionsPage from './pages/CollectionsPage';
 import UsersPage from './pages/UsersPage';
 import StreamForgePage from './pages/StreamForgePage';
+import MediaSettingsPage from './pages/MediaSettingsPage';
+import EncoderPage from './pages/EncoderPage';
 import LoginScreen from './components/LoginScreen';
 import './index.css';
 
@@ -234,6 +236,11 @@ function AppContent() {
       case 'music':        return <MusicPage onSelect={handleMediaSelect} />;
       case 'musicvideos':  return <MusicVideosPage onSelect={handleMediaSelect} />;
       case 'livetv':       return <IPTVPage />;
+      case 'media-library':   return <SettingsPage mode="media" initialTab="library" />;
+      case 'media-metadata':  return <SettingsPage mode="media" initialTab="metadata" />;
+      case 'encoder-video':   return <EncoderPage initialTab="video" />;
+      case 'encoder-convert': return <EncoderPage initialTab="convert" />;
+      case 'encoder-preseg':  return <EncoderPage initialTab="preseg" />;
       case 'streamforge':  return <StreamForgePage />;
       case 'streaming':   return <StreamingServicesPage />;
       case 'pluto':       return <StreamingPage service="pluto" />;

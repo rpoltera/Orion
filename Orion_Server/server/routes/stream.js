@@ -359,7 +359,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
           ...(audioFilter ? ['-af', audioFilter] : []),
           '-ac', '2', '-ar', '48000', '-b:a', '192k',
         ];
-        if (videoCodec !== 'copy') outputOptions.push('-pix_fmt', pixFmt, '-threads', '0', '-fps_mode', 'cfr');
+        if (videoCodec !== 'copy') outputOptions.push('-pix_fmt', pixFmt, '-threads', '0', '-vsync', 'cfr');
         if (scaleFilter) outputOptions.push(`-vf scale=${scaleFilter}`);
         if (subtitle && subtitle !== '0') {
           const subIdx = parseInt(subtitle)||0;
@@ -410,7 +410,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
             .outputOptions([...outputOptions, ...videoOptions])
             .on('start', cmd => {
               _activeSessions.set(sessionId, { ffmpegCmd, filePath, startTime: Date.now(), bufferedSeconds: 0 });
-              console.log(`[FFmpeg] ${path.basename(filePath)} cmd: ${cmd.slice(0, 200)}`);
+              console.log(`[FFmpeg] ${path.basename(filePath)} cmd: ${cmd}`);
             })
             .on('progress', prog => {
               if (prog.timemark) {

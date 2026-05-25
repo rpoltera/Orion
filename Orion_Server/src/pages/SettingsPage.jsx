@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { themes } from '../themes/themes';
-import { FolderOpen, Trash2, RefreshCw, HardDrive, Palette, BookOpen, Cpu, Info, GitBranch, ExternalLink, Key, CheckCircle, Bug, Download, Trash, Bot, Zap, AlertCircle, ToggleLeft, ToggleRight, Film, BarChart2, Plus, Wand2, Clock, Users, LayoutDashboard, GripVertical, Eye, EyeOff } from 'lucide-react';
-import LocalAISettings from '../components/LocalAISettings';
+import { FolderOpen, Trash2, RefreshCw, HardDrive, Palette, BookOpen, Cpu, Info, GitBranch, ExternalLink, Key, CheckCircle, Bug, Download, Trash, Bot, Zap, AlertCircle, ToggleLeft, ToggleRight, Film, BarChart2, Plus, Wand2, Clock, Users, LayoutDashboard, GripVertical, Eye, EyeOff, Activity} from 'lucide-react';
+import AISettings from '../components/AISettings';
 import SchedulerPage from './SchedulerPage';
 import UsersPage from './UsersPage';
 
@@ -354,7 +354,7 @@ function NASSharesList({ API }) {
   );
 }
 
-function CustomLibrariesSettings({ API }) {
+export function CustomLibrariesSettings({ API }) {
   const { customLibraries, fetchCustomLibraries } = useApp();
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
@@ -482,7 +482,7 @@ function CustomLibrariesSettings({ API }) {
   );
 }
 
-function AutoCollectionsEmbedded() {
+export function AutoCollectionsEmbedded() {
   const API = 'http://localhost:3001/api';
   const [cfg, setCfg] = React.useState(null);
   const [running, setRunning] = React.useState(false);
@@ -1761,7 +1761,698 @@ function MovieFolderCleanup() {
   );
 }
 
-export default function SettingsPage() {
+function ServicesPanel() {
+  const [services, setServices] = React.useState([]);
+  const [busy, setBusy] = React.useState({});
+  const [logs, setLogs] = React.useState({});
+
+  const load = async () => {
+    try {
+      const r = await fetch('/api/services');
+      setServices(await r.json());
+    } catch (e) { console.error('[services] load failed:', e); }
+  };
+
+  React.useEffect(() => {
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  const action = async (name, act) => {
+    setBusy(b => ({ ...b, [name]: act }));
+    try {
+      const r = await fetch(`/api/services/${name}/${act}`, { method: 'POST' });
+      const d = await r.json();
+      if (!r.ok) console.error('[services]', act, d);
+      await new Promise(rs => setTimeout(rs, 1200));
+      await load();
+    } finally {
+      setBusy(b => ({ ...b, [name]: null }));
+    }
+  };
+
+  const showLogs = async (name) => {
+    try {
+      const r = await fetch(`/api/services/${name}/logs?lines=30`);
+      const d = await r.json();
+      setLogs(l => ({ ...l, [name]: d.lines || [] }));
+    } catch (e) { console.error(e); }
+  };
+
+  return (
+    <div style={{display:'flex', flexDirection:'column', gap:10, padding:'4px 0'}}>
+      <div style={{fontSize:18, fontWeight:700, marginBottom:4}}>Background Services</div>
+      <div style={{padding:'12px 16px', background:'var(--bg-tertiary)', borderRadius:'var(--radius)', fontSize:12, color:'var(--text-muted)'}}>
+        Toggle background services on/off. <b>preseg</b> and <b>convert</b> are managed via systemd; stopping them halts their background work. <b>streamforge</b> is a UI flag that hides the StreamForge sidebar link when off.
+      </div>
+      {services.length === 0 && (
+        <div style={{padding:20, textAlign:'center', color:'var(--text-muted)'}}>Loading services...</div>
+      )}
+      {services.map(s => (
+        <div key={s.name} style={{padding:'14px 18px', background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:'var(--radius)', display:'flex', flexDirection:'column', gap:10}}>
+          <div style={{display:'flex', alignItems:'center', gap:14}}>
+            {(() => null)()}
+            <div style={{
+              width:10, height:10, borderRadius:'50%',
+              background: (s.systemdUnit ? s.active : s.configEnabled) ? '#10b981' : '#6b7280',
+              boxShadow: (s.systemdUnit ? s.active : s.configEnabled) ? '0 0 8px rgba(16,185,129,0.6)' : 'none',
+              flexShrink:0
+            }} />
+            <div style={{flex:1, minWidth:0}}>
+              <div style={{fontWeight:700, fontSize:14, textTransform:'capitalize'}}>{s.name}</div>
+              <div style={{fontSize:12, color:'var(--text-muted)', marginTop:2}}>{s.description}</div>
+              <div style={{fontSize:10, color:'var(--text-muted)', marginTop:4, display:'flex', gap:12, flexWrap:'wrap'}}>
+                {s.systemdUnit && <span>unit: {s.systemdUnit}</span>}
+                {s.port && <span>port: {s.port}</span>}
+                <span style={{color: (s.systemdUnit ? s.active : s.configEnabled) ? '#10b981' : '#9ca3af'}}>{
+                  s.systemdUnit
+                    ? (s.active ? '● active' : '○ stopped')
+                    : (s.configEnabled ? '● enabled' : '○ disabled')
+                }</span>
+              </div>
+            </div>
+            {s.systemdUnit ? (
+              <>
+                {s.active ? (
+                  <button onClick={() => action(s.name, 'stop')} disabled={!!busy[s.name]}
+                    style={{padding:'7px 16px', background:'rgba(239,68,68,0.15)', border:'1px solid rgba(239,68,68,0.3)', color:'#ef4444', borderRadius:'var(--radius)', cursor:'pointer', fontSize:11, fontWeight:600}}>
+                    {busy[s.name] === 'stop' ? '...' : 'Stop'}
+                  </button>
+                ) : (
+                  <button onClick={() => action(s.name, 'start')} disabled={!!busy[s.name]}
+                    style={{padding:'7px 16px', background:'rgba(16,185,129,0.15)', border:'1px solid rgba(16,185,129,0.3)', color:'#10b981', borderRadius:'var(--radius)', cursor:'pointer', fontSize:11, fontWeight:600}}>
+                    {busy[s.name] === 'start' ? '...' : 'Start'}
+                  </button>
+                )}
+                <button onClick={() => action(s.name, 'restart')} disabled={!!busy[s.name] || !s.active}
+                  style={{padding:'7px 14px', background:'rgba(99,102,241,0.15)', border:'1px solid rgba(99,102,241,0.3)', color:'#818cf8', borderRadius:'var(--radius)', cursor: s.active ? 'pointer' : 'not-allowed', fontSize:11, fontWeight:600, opacity: s.active ? 1 : 0.4}}>
+                  {busy[s.name] === 'restart' ? '...' : 'Restart'}
+                </button>
+                <button onClick={() => showLogs(s.name)}
+                  style={{padding:'7px 12px', background:'transparent', border:'1px solid rgba(255,255,255,0.1)', color:'var(--text-muted)', borderRadius:'var(--radius)', cursor:'pointer', fontSize:11}}>
+                  Logs
+                </button>
+              </>
+            ) : (
+              <button onClick={() => action(s.name, s.configEnabled ? 'disable' : 'enable')} disabled={!!busy[s.name]}
+                style={{padding:'7px 16px', background: s.configEnabled ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)', border:`1px solid ${s.configEnabled ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)'}`, color: s.configEnabled ? '#ef4444' : '#10b981', borderRadius:'var(--radius)', cursor:'pointer', fontSize:11, fontWeight:600}}>
+                {busy[s.name] ? '...' : (s.configEnabled ? 'Disable' : 'Enable')}
+              </button>
+            )}
+          </div>
+          {logs[s.name] && (
+            <div style={{maxHeight:200, overflowY:'auto', padding:'8px 10px', background:'rgba(0,0,0,0.3)', borderRadius:4, fontSize:10, fontFamily:'monospace', color:'var(--text-muted)', whiteSpace:'pre-wrap'}}>
+              {logs[s.name].join('\n')}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AISuggestionsCard() {
+  const [analyzing, setAnalyzing] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+  const [error, setError] = React.useState(null);
+  const [lastAt, setLastAt] = React.useState(null);
+  const [expanded, setExpanded] = React.useState({});
+  const [showSnapshot, setShowSnapshot] = React.useState(false);
+
+  // Load last result from localStorage
+  React.useEffect(() => {
+    try {
+      const stored = localStorage.getItem('orion_ai_suggestions_last');
+      if (stored) {
+        const d = JSON.parse(stored);
+        setResult(d);
+        setLastAt(d.ts);
+      }
+    } catch (e) {}
+  }, []);
+
+  const analyze = async () => {
+    setAnalyzing(true);
+    setError(null);
+    try {
+      const r = await fetch('/api/ai/suggestions/analyze', { method: 'POST' });
+      const d = await r.json();
+      if (!d.ok) {
+        setError(d.error || 'Analysis failed');
+        if (d.rawSample) setError(prev => prev + ' — raw: ' + d.rawSample.slice(0, 200));
+      } else {
+        setResult(d);
+        setLastAt(d.ts);
+        try { localStorage.setItem('orion_ai_suggestions_last', JSON.stringify(d)); } catch (e) {}
+      }
+    } catch (e) {
+      setError(e.message);
+    }
+    setAnalyzing(false);
+  };
+
+  const [exportStatus, setExportStatus] = React.useState(null);
+  const [exporting, setExporting] = React.useState(false);
+
+  // Fetch a fresh snapshot for export (don't rely on stale result)
+  const _getFreshSnapshot = async () => {
+    const r = await fetch('/api/ai/suggestions/snapshot');
+    if (!r.ok) throw new Error('Snapshot fetch failed (HTTP ' + r.status + ')');
+    return await r.json();
+  };
+
+  const _buildPromptText = (snapshot) => {
+    return [
+      "I'm running Orion, a self-hosted media server. Please review the platform snapshot below and identify ALL issues: errors, misconfigurations, hardware/software mismatches, resource problems, and optimization opportunities. Be exhaustive — don't artificially limit your findings.",
+      "",
+      "ARCHITECTURE:",
+      "- Runs in an LXC container on Proxmox",
+      "- Hardware: 48 CPU cores, 32 GB RAM, 4× NVIDIA Tesla P40 GPUs (Pascal-gen NVENC)",
+      "- Storage: NFS mount of media library (eth0)",
+      "- Three services:",
+      "  * orion (port 3001): UI, library, channels, playout, EPG, playout-transcode",
+      "  * orion-preseg (port 3002): pre-segments media into HLS using NVDEC + NVENC",
+      "  * orion-convert (port 3003): 10-bit → 8-bit conversion using NVDEC + scale_cuda + NVENC",
+      "",
+      "IMPORTANT CONTEXT TO AVOID MISREADS:",
+      "- nvidia-smi 'utilization.gpu' (the `util` field) measures CUDA cores. Video encoding does NOT use CUDA cores — it uses the NVENC/NVDEC engines, shown in `enc` and `dec`. Low `util` with active `enc`/`dec` (30-60%) is normal and healthy.",
+      "- Worker counts are intentionally constrained (typically 4) because NFS I/O coordination becomes the CPU bottleneck above that, not encoding.",
+      "- This box is currently mid-way through a one-time 10-bit → 8-bit library-wide conversion; a high `convertService.queued` is expected and not an issue.",
+      "- ffmpeg errors with `code=null` usually mean the process was killed externally (SIGKILL during a worker restart), not a code bug. Note these but don't treat as runtime failures.",
+      "",
+      "AUDIT INSTRUCTIONS:",
+      "Look at every field in the snapshot. Pay special attention to:",
+      "- Cross-references between `gpus` (which lists actual GPU hardware) and `config.hwAccel`, `config.gpuCount`, `config.videoCodec`, encoder fields — flag any hardware/software mismatch (e.g. AMD `amf` encoder on NVIDIA GPUs)",
+      "- Config values that look wrong, placeholder, or contradictory across services",
+      "- Service health, error counts, recent log lines",
+      "- Resource hotspots (GPU temp ≥75°C, memory/disk near full)",
+      "- Asymmetric GPU load suggesting balance bugs",
+      "- Data quality issues (e.g. bitDepth=unknown counts)",
+      "",
+      "Output your findings as a numbered list. For each finding include: severity (critical/warning/info), title, what's wrong + why it matters + the fix, and the specific snapshot fields that led you to the conclusion.",
+      "",
+      "PLATFORM SNAPSHOT:",
+      "```json",
+      JSON.stringify(snapshot, null, 2),
+      "```"
+    ].join('\n');
+  };
+
+  const copyForAI = async () => {
+    setExporting(true);
+    setExportStatus(null);
+    try {
+      const snapshot = await _getFreshSnapshot();
+      const text = _buildPromptText(snapshot);
+      let copied = false;
+
+      // Method 1: Modern Clipboard API (requires HTTPS or localhost — silently skipped on HTTP/LAN)
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        } catch (e) { /* fall through to execCommand */ }
+      }
+
+      // Method 2: execCommand fallback — works on HTTP/LAN
+      if (!copied) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        // Must be in viewport + focusable for execCommand('copy') to work
+        ta.style.position = 'fixed';
+        ta.style.top = '0';
+        ta.style.left = '0';
+        ta.style.width = '2em';
+        ta.style.height = '2em';
+        ta.style.padding = '0';
+        ta.style.border = 'none';
+        ta.style.outline = 'none';
+        ta.style.boxShadow = 'none';
+        ta.style.background = 'transparent';
+        ta.style.opacity = '0';
+        ta.setAttribute('readonly', '');
+        document.body.appendChild(ta);
+
+        const prevFocus = document.activeElement;
+        ta.focus();
+        ta.select();
+        try { ta.setSelectionRange(0, text.length); } catch (e) {}
+
+        try {
+          copied = document.execCommand('copy');
+        } catch (e) {}
+
+        document.body.removeChild(ta);
+        if (prevFocus && typeof prevFocus.focus === 'function') {
+          try { prevFocus.focus(); } catch (e) {}
+        }
+      }
+
+      if (copied) {
+        setExportStatus({ kind: 'success', msg: `Copied ${(text.length/1024).toFixed(1)} KB — paste into Claude/ChatGPT/etc.` });
+      } else {
+        setExportStatus({ kind: 'error', msg: `Copy blocked by browser. Use 💾 .json to download instead, or open Snapshot and copy manually.` });
+      }
+    } catch (e) {
+      setExportStatus({ kind: 'error', msg: 'Export failed: ' + e.message });
+    }
+    setExporting(false);
+    setTimeout(() => setExportStatus(null), 6000);
+  };
+
+
+  const downloadJson = async () => {
+    setExporting(true);
+    setExportStatus(null);
+    try {
+      const snapshot = await _getFreshSnapshot();
+      const text = JSON.stringify(snapshot, null, 2);
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').replace(/T/, '_').slice(0, 19);
+      a.href = url;
+      a.download = `orion-snapshot-${ts}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setExportStatus({ kind: 'success', msg: `Saved ${a.download}` });
+    } catch (e) {
+      setExportStatus({ kind: 'error', msg: 'Download failed: ' + e.message });
+    }
+    setExporting(false);
+    setTimeout(() => setExportStatus(null), 5000);
+  };
+
+  const sevOrder = { critical: 0, warning: 1, info: 2 };
+  const sevColors = {
+    critical: { bg: 'rgba(239,68,68,0.08)', border: 'rgba(239,68,68,0.4)', text: '#ef4444', icon: '🔴' },
+    warning:  { bg: 'rgba(245,158,11,0.08)', border: 'rgba(245,158,11,0.4)', text: '#f59e0b', icon: '🟡' },
+    info:     { bg: 'rgba(59,130,246,0.08)', border: 'rgba(59,130,246,0.4)', text: '#3b82f6', icon: '🔵' }
+  };
+
+  const sortedSugs = (result?.suggestions || []).slice().sort((a, b) =>
+    (sevOrder[a.severity] ?? 99) - (sevOrder[b.severity] ?? 99)
+  );
+
+  const minsAgo = lastAt ? Math.floor((Date.now() - lastAt) / 60000) : null;
+
+  return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px', marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+            💡 AI Suggestions
+            {result?.summary && <span style={{ fontSize: 11, fontWeight: 500, padding: '2px 10px', background: 'rgba(167,139,250,0.12)', color: '#a78bfa', borderRadius: 10 }}>powered by your configured AI provider</span>}
+          </div>
+          {lastAt && (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+              Last analyzed {minsAgo === 0 ? 'just now' : `${minsAgo}m ago`}
+              {sortedSugs.length > 0 && <span> • {sortedSugs.length} {sortedSugs.length === 1 ? 'item' : 'items'}</span>}
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={analyze} disabled={analyzing}
+            style={{ padding: '8px 16px', background: analyzing ? 'var(--bg-tertiary)' : '#6366f1', color: analyzing ? 'var(--text-muted)' : '#fff', border: 'none', borderRadius: 'var(--radius)', cursor: analyzing ? 'wait' : 'pointer', fontSize: 13, fontWeight: 600 }}>
+            {analyzing ? '⏳ Analyzing…' : '🧠 Analyze Now'}
+          </button>
+          {result && (
+            <button onClick={() => setShowSnapshot(s => !s)} title="See what data was sent to the AI"
+              style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: 12 }}>
+              {showSnapshot ? '▼' : '▶'} Snapshot
+            </button>
+          )}
+          <button onClick={copyForAI} disabled={exporting} title="Copy a prompt-wrapped snapshot to paste into another AI"
+            style={{ padding: '8px 12px', background: 'rgba(167,139,250,0.12)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)', borderRadius: 'var(--radius)', cursor: exporting ? 'wait' : 'pointer', fontSize: 12, fontWeight: 600 }}>
+            {exporting ? '⏳' : '📋 Copy for AI'}
+          </button>
+          <button onClick={downloadJson} disabled={exporting} title="Download the raw snapshot as a .json file"
+            style={{ padding: '8px 12px', background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', cursor: exporting ? 'wait' : 'pointer', fontSize: 12 }}>
+            💾 .json
+          </button>
+        </div>
+      </div>
+      {exportStatus && (
+        <div style={{ padding: '8px 12px', borderRadius: 'var(--radius)', fontSize: 12, marginBottom: 12,
+          color: exportStatus.kind === 'success' ? '#10b981' : '#ef4444',
+          background: exportStatus.kind === 'success' ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
+          border: `1px solid ${exportStatus.kind === 'success' ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}` }}>
+          {exportStatus.kind === 'success' ? '✅' : '❌'} {exportStatus.msg}
+        </div>
+      )}
+
+      {error && (
+        <div style={{ padding: '10px 14px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 'var(--radius)', color: '#ef4444', fontSize: 12, marginBottom: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          ❌ {error}
+        </div>
+      )}
+
+      {result?.summary && !error && (
+        <div style={{ padding: '10px 14px', background: 'rgba(167,139,250,0.06)', border: '1px solid rgba(167,139,250,0.2)', borderRadius: 'var(--radius)', fontSize: 13, marginBottom: 12, color: 'var(--text-primary)' }}>
+          {result.summary}
+        </div>
+      )}
+
+      {!result && !error && !analyzing && (
+        <div style={{ padding: 14, color: 'var(--text-muted)', fontSize: 13, textAlign: 'center' }}>
+          Click <strong>Analyze Now</strong> to have your configured AI review the platform and suggest optimizations.
+        </div>
+      )}
+
+      {sortedSugs.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {sortedSugs.map((s, i) => {
+            const c = sevColors[s.severity] || sevColors.info;
+            const isExpanded = expanded[i];
+            return (
+              <div key={i} style={{
+                padding: '12px 14px',
+                background: c.bg,
+                borderLeft: `3px solid ${c.border}`,
+                borderRadius: 6,
+                borderTop: '1px solid rgba(255,255,255,0.03)',
+                borderRight: '1px solid rgba(255,255,255,0.03)',
+                borderBottom: '1px solid rgba(255,255,255,0.03)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                  <span style={{ fontSize: 14, marginTop: 1 }}>{c.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: c.text }}>{s.title}</span>
+                      {s.category && <span style={{ fontSize: 9, padding: '2px 8px', background: 'rgba(255,255,255,0.06)', borderRadius: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5 }}>{s.category}</span>}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: s.evidence ? 6 : 0 }}>
+                      {s.description}
+                    </div>
+                    {s.evidence && (
+                      <div>
+                        <button onClick={() => setExpanded(e => ({ ...e, [i]: !e[i] }))}
+                          style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer', padding: 0 }}>
+                          {isExpanded ? '▼ Hide' : '▶ Show'} evidence
+                        </button>
+                        {isExpanded && (
+                          <div style={{ marginTop: 6, padding: '8px 10px', background: 'rgba(0,0,0,0.2)', borderRadius: 4, fontSize: 11, color: 'var(--text-muted)', fontFamily: 'ui-monospace, monospace', whiteSpace: 'pre-wrap' }}>
+                            {s.evidence}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {showSnapshot && result?.snapshot && (
+        <pre style={{ marginTop: 12, padding: 12, background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 10, color: 'var(--text-muted)', maxHeight: 400, overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {JSON.stringify(result.snapshot, null, 2)}
+        </pre>
+      )}
+
+    </div>
+  );
+}
+
+function SystemStatusPage() {
+  const [gpus, setGpus] = React.useState([]);
+  const [stats, setStats] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [paused, setPaused] = React.useState(false);
+
+  const refresh = async () => {
+    try {
+      const [g, s] = await Promise.all([
+        fetch('/api/system/gpus').then(r => r.json()).catch(() => []),
+        fetch('/api/system/stats').then(r => r.json()).catch(() => null)
+      ]);
+      setGpus(Array.isArray(g) ? g : []);
+      setStats(s);
+    } catch (e) { /* silent */ }
+    finally { setLoading(false); }
+  };
+
+  React.useEffect(() => {
+    refresh();
+    if (paused) return;
+    const t = setInterval(refresh, 2000);
+    return () => clearInterval(t);
+  }, [paused]);
+
+  const Bar = ({ value, max = 100, color = '#10b981', label, suffix }) => {
+    const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+    const barColor = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : color;
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+        <span style={{ color: 'var(--text-muted)', minWidth: 64, fontWeight: 500 }}>{label}</span>
+        <div style={{ flex: 1, height: 8, background: 'rgba(255,255,255,0.06)', borderRadius: 4, overflow: 'hidden' }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: barColor, transition: 'width 0.4s' }} />
+        </div>
+        <span style={{ minWidth: 80, textAlign: 'right', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+          {suffix || `${Math.round(value)}%`}
+        </span>
+      </div>
+    );
+  };
+
+  if (loading) {
+    return <div style={{ padding: 20, color: 'var(--text-muted)' }}>Loading GPU info...</div>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <AISuggestionsCard />
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>System Status</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+            {gpus.length === 0
+              ? 'GPU section: no GPUs detected'
+              : `Live monitoring • ${gpus.length} ${gpus.length === 1 ? 'GPU' : 'GPUs'} • 2s refresh`}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setPaused(p => !p)}
+            style={{ padding: '7px 14px', background: paused ? 'rgba(245,158,11,0.15)' : 'var(--bg-tertiary)', border: `1px solid ${paused ? 'rgba(245,158,11,0.3)' : 'var(--border)'}`, color: paused ? '#f59e0b' : 'var(--text-secondary)', borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            {paused ? '▶ Resume' : '⏸ Pause'}
+          </button>
+          <button onClick={refresh}
+            style={{ padding: '7px 14px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', color: 'var(--text-secondary)', borderRadius: 'var(--radius)', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+            ↻ Refresh
+          </button>
+        </div>
+      </div>
+
+      {gpus.length === 0 && (
+        <div style={{ padding: 24, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, color: 'var(--text-muted)', fontSize: 13, textAlign: 'center' }}>
+          No NVIDIA GPUs found.<br />
+          <span style={{ fontSize: 11 }}>Verify nvidia-smi is installed and accessible to the orion user.</span>
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(360px, 1fr))`, gap: 14 }}>
+        {gpus.map(g => {
+          const memUsedGb = (g.memoryUsedMb || 0) / 1024;
+          const memTotalGb = (g.memoryTotalMb || 0) / 1024;
+          const memPct = g.memoryTotalMb ? (g.memoryUsedMb / g.memoryTotalMb) * 100 : 0;
+          const isHot = g.temperature >= 75;
+          const active = g.utilization > 1 || g.encoder > 1 || g.decoder > 1;
+          return (
+            <div key={g.index} style={{
+              padding: '18px 20px',
+              background: 'var(--bg-card)',
+              border: `1px solid ${active ? 'rgba(16,185,129,0.4)' : 'var(--border)'}`,
+              borderRadius: 12,
+              transition: 'border-color 0.3s'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: active ? '#10b981' : 'var(--text-muted)', letterSpacing: 1, textTransform: 'uppercase' }}>GPU {g.index}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2 }}>{g.name}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', letterSpacing: 1, textTransform: 'uppercase' }}>Temp</div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: isHot ? '#ef4444' : 'var(--text-primary)' }}>{g.temperature}°C</div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <Bar value={g.utilization} label="GPU" color="#6366f1" />
+                <Bar value={g.encoder}     label="Encoder" color="#10b981" />
+                <Bar value={g.decoder}     label="Decoder" color="#3b82f6" />
+                <Bar value={memPct} label="Memory" color="#a78bfa"
+                     suffix={`${memUsedGb.toFixed(1)} / ${memTotalGb.toFixed(0)} GB`} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* CPU, Memory, Disk, Network sections */}
+      {stats && (
+        <>
+          <SystemSectionHeader title="CPU" subtitle={`${stats.cpu?.cores?.length || 0} cores`} value={stats.cpu?.overall} />
+          <CpuPanel cpu={stats.cpu || { overall: 0, cores: [] }} />
+
+          <SystemSectionHeader title="Memory" subtitle={_memHeader(stats.memory)} value={_memPct(stats.memory)} />
+          <MemoryPanel memory={stats.memory || {}} />
+
+          <SystemSectionHeader title="Disk I/O" subtitle={`${(stats.disk || []).length} ${(stats.disk || []).length === 1 ? 'device' : 'devices'}`} />
+          <DiskPanel disks={stats.disk || []} />
+
+          <SystemSectionHeader title="Network" subtitle={`${(stats.network || []).length} ${(stats.network || []).length === 1 ? 'interface' : 'interfaces'}`} />
+          <NetworkPanel nets={stats.network || []} />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ===== System Status sub-components =====
+function _memPct(m) { return m && m.total ? ((m.total - m.available) / m.total * 100) : 0; }
+function _memHeader(m) {
+  if (!m || !m.total) return '';
+  const used = (m.total - m.available) / 1073741824;
+  const total = m.total / 1073741824;
+  return `${used.toFixed(1)} / ${total.toFixed(0)} GB`;
+}
+function _fmtRate(mbS) {
+  if (mbS == null) return '0 B/s';
+  const bs = mbS * 1e6;
+  if (bs < 1024) return `${bs.toFixed(0)} B/s`;
+  if (bs < 1048576) return `${(bs/1024).toFixed(1)} KB/s`;
+  if (bs < 1073741824) return `${(bs/1048576).toFixed(1)} MB/s`;
+  return `${(bs/1073741824).toFixed(2)} GB/s`;
+}
+
+function SystemSectionHeader({ title, subtitle, value }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 6, paddingBottom: 4, borderBottom: '1px solid var(--border)' }}>
+      <div>
+        <span style={{ fontSize: 14, fontWeight: 700 }}>{title}</span>
+        {subtitle && <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 10 }}>{subtitle}</span>}
+      </div>
+      {value != null && (
+        <span style={{ fontSize: 14, fontWeight: 700, color: value > 80 ? '#ef4444' : value > 50 ? '#f59e0b' : '#10b981', fontVariantNumeric: 'tabular-nums' }}>
+          {value.toFixed(0)}%
+        </span>
+      )}
+    </div>
+  );
+}
+
+function _miniBar({ value, max = 100, color }) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  const c = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : (color || '#10b981');
+  return (
+    <div style={{ flex: 1, height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+      <div style={{ width: `${pct}%`, height: '100%', background: c, transition: 'width 0.4s' }} />
+    </div>
+  );
+}
+
+function CpuPanel({ cpu }) {
+  const cores = cpu.cores || [];
+  return (
+    <div style={{ padding: '14px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 50, fontWeight: 600 }}>Overall</span>
+        {_miniBar({ value: cpu.overall || 0, color: '#6366f1' })}
+        <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', minWidth: 44, textAlign: 'right' }}>{(cpu.overall || 0).toFixed(1)}%</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(60px, 1fr))', gap: 6 }}>
+        {cores.map(c => (
+          <div key={c.index} style={{ padding: '5px 7px', background: 'rgba(255,255,255,0.03)', borderRadius: 4 }}>
+            <div style={{ fontSize: 9, color: 'var(--text-muted)', marginBottom: 3 }}>c{c.index}</div>
+            <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 2, overflow: 'hidden', marginBottom: 3 }}>
+              <div style={{ width: `${c.usage}%`, height: '100%', background: c.usage > 80 ? '#ef4444' : c.usage > 50 ? '#f59e0b' : '#6366f1' }} />
+            </div>
+            <div style={{ fontSize: 9, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>{c.usage.toFixed(0)}%</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MemoryPanel({ memory }) {
+  const m = memory || {};
+  const usedRam = (m.total || 0) - (m.available || 0);
+  const usedSwap = (m.swapTotal || 0) - (m.swapFree || 0);
+  const Row = ({ label, used, total, color }) => {
+    const pct = total > 0 ? (used / total) * 100 : 0;
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 50, fontWeight: 600 }}>{label}</span>
+        {_miniBar({ value: pct, color })}
+        <span style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)', minWidth: 110, textAlign: 'right' }}>
+          {(used / 1073741824).toFixed(1)} / {(total / 1073741824).toFixed(0)} GB
+        </span>
+      </div>
+    );
+  };
+  return (
+    <div style={{ padding: '14px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10 }}>
+      <Row label="RAM"  used={usedRam}  total={m.total || 0}     color="#10b981" />
+      {(m.swapTotal || 0) > 0 && <Row label="Swap" used={usedSwap} total={m.swapTotal} color="#a78bfa" />}
+      {(m.cached || 0) > 0 && (
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+          Cached/Buffers: {(m.cached / 1073741824).toFixed(1)} GB
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiskPanel({ disks }) {
+  if (!disks || disks.length === 0) {
+    return <div style={{ padding: '12px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 12, color: 'var(--text-muted)' }}>No block devices found (LXC may not expose /proc/diskstats)</div>;
+  }
+  return (
+    <div style={{ padding: '14px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10 }}>
+      {disks.map(d => (
+        <div key={d.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+          <span style={{ fontSize: 12, fontWeight: 600, minWidth: 80 }}>{d.name}</span>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 30, textAlign: 'right' }}>r</span>
+          <span style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', color: '#3b82f6', minWidth: 80, textAlign: 'right' }}>{_fmtRate(d.readMbS)}</span>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 30, textAlign: 'right' }}>w</span>
+          <span style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', color: '#10b981', minWidth: 80, textAlign: 'right' }}>{_fmtRate(d.writeMbS)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function NetworkPanel({ nets }) {
+  if (!nets || nets.length === 0) {
+    return <div style={{ padding: '12px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, fontSize: 12, color: 'var(--text-muted)' }}>No network interfaces found</div>;
+  }
+  // Sort by activity (rx + tx) descending, hide silent interfaces
+  const sorted = [...nets].sort((a, b) => (b.rxMbS + b.txMbS) - (a.rxMbS + a.txMbS));
+  return (
+    <div style={{ padding: '14px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10 }}>
+      {sorted.map(n => {
+        const active = (n.rxMbS + n.txMbS) > 0.01;
+        return (
+          <div key={n.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.04)', opacity: active ? 1 : 0.55 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, minWidth: 80 }}>{n.name}</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 30, textAlign: 'right' }}>↓ rx</span>
+            <span style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', color: '#3b82f6', minWidth: 80, textAlign: 'right' }}>{_fmtRate(n.rxMbS)}</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', minWidth: 30, textAlign: 'right' }}>↑ tx</span>
+            <span style={{ fontSize: 11, fontVariantNumeric: 'tabular-nums', color: '#10b981', minWidth: 80, textAlign: 'right' }}>{_fmtRate(n.txMbS)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+
+export default function SettingsPage({ initialTab, mode = 'settings' } = {}) {
   const { theme, changeTheme, library, scanFolders, fetchLibrary, hardwareInfo, libraryPaths, fetchLibraryPaths, API } = useApp();
   const [localPaths, setLocalPaths] = useState({ movies: [], tvShows: [], music: [], musicVideos: [] });
   const [transcodeSettings, setTranscodeSettings] = useState({ hardware: 'auto', quality: '720p' });
@@ -1854,7 +2545,8 @@ export default function SettingsPage() {
   const [libSettingsSaved, setLibSettingsSaved] = useState(false);
   const [libSettingsError, setLibSettingsError] = useState(false);
   const [pathMappings, setPathMappings] = useState([]); // [{unc, local}]
-  const [activeTab, setActiveTab] = useState('library');
+  const [activeTab, setActiveTab] = useState(initialTab || (mode === 'media' ? 'library' : 'transcoding'));
+  React.useEffect(() => { if (initialTab) setActiveTab(initialTab); }, [initialTab]);
   const [metaStatus, setMetaStatus] = useState(null);
   const [debugEnabled, setDebugEnabled] = useState(false);
   const [probeStatus, setProbeStatus] = useState(null);
@@ -1967,9 +2659,11 @@ const TAB_GROUPS = [
   {
     label: 'System',
     tabs: [
+      { id: 'services',    icon: Zap,       label: 'Background Services' },
+      { id: 'systemstatus', icon: Activity,  label: 'System Status' },
       { id: 'scheduler',   icon: Clock,     label: 'Scheduler' },
       { id: 'users',       icon: Users,     label: 'Users' },
-      { id: 'ai',          icon: Bot,       label: 'Local AI' },
+      { id: 'ai',          icon: Bot,       label: 'AI' },
       { id: 'activity',    icon: BarChart2, label: 'Activity' },
       { id: 'debug',       icon: Bug,       label: 'Debug' },
       { id: 'about',       icon: Info,      label: 'About' },
@@ -2143,7 +2837,7 @@ const TAB_GROUPS = [
 
         {/* Left nav — accordion groups */}
         <div style={{ width:210, flexShrink:0, borderRight:'1px solid var(--border)', marginRight:32, paddingTop:4 }}>
-          {TAB_GROUPS.map(group => (
+          {(mode === 'media' ? TAB_GROUPS.filter(g => ['Library','Metadata'].includes(g.label)) : TAB_GROUPS.filter(g => !['Library','Metadata'].includes(g.label))).map(group => (
             <NavGroup key={group.label} group={group} activeTab={activeTab} setActiveTab={setActiveTab} />
           ))}
         </div>
@@ -2831,20 +3525,36 @@ const TAB_GROUPS = [
 
         {activeTab === 'transcoding' && (
           <div>
-            {/* Hardware status banner */}
-            {hardwareInfo && (
-              <div style={{ background: hardwareInfo.isHardware ? 'rgba(16,185,129,0.08)' : 'rgba(245,158,11,0.08)', border: `1px solid ${hardwareInfo.isHardware ? 'rgba(16,185,129,0.25)' : 'rgba(245,158,11,0.25)'}`, borderRadius: 'var(--radius-lg)', padding: '16px 20px', marginBottom: 28, display: 'flex', alignItems: 'center', gap: 14 }}>
-                <HardDrive size={24} color={hardwareInfo.isHardware ? '#34d399' : '#fbbf24'} />
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14, color: hardwareInfo.isHardware ? '#34d399' : '#fbbf24' }}>
-                    {hardwareInfo.isHardware ? '⚡ Hardware Acceleration Active' : '🖥 Software Transcoding (CPU)'}
-                  </div>
-                  <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
-                    Encoder: <code style={{ background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: 3, fontSize: 12 }}>{hardwareInfo.encoder}</code> — {hardwareInfo.type}
+            {/* Hardware status banner — derived from user selection, not stale auto-detect */}
+            {(() => {
+              const sel = (transcodeSettings.hwAccel || 'auto').toLowerCase();
+              const codec = (transcodeSettings.videoCodec || 'h264').toLowerCase();
+              const labels = {
+                nvenc:    { enc: codec === 'hevc' ? 'hevc_nvenc' : 'h264_nvenc', name: 'NVIDIA NVENC' },
+                amf:      { enc: codec === 'hevc' ? 'hevc_amf'   : 'h264_amf',   name: 'AMD AMF' },
+                qsv:      { enc: codec === 'hevc' ? 'hevc_qsv'   : 'h264_qsv',   name: 'Intel Quick Sync' },
+                cpu:      { enc: codec === 'hevc' ? 'libx265'    : 'libx264',    name: 'Software (CPU)' },
+                software: { enc: codec === 'hevc' ? 'libx265'    : 'libx264',    name: 'Software (CPU)' },
+              };
+              const auto = labels[sel] || {
+                enc: hardwareInfo?.encoder || 'auto-detect',
+                name: hardwareInfo?.encoderName || hardwareInfo?.type || 'Auto-detect'
+              };
+              const isHw = !['cpu', 'software'].includes(sel);
+              return (
+                <div style={{ background: isHw ? 'rgba(16,185,129,0.08)' : 'rgba(245,158,11,0.08)', border: `1px solid ${isHw ? 'rgba(16,185,129,0.25)' : 'rgba(245,158,11,0.25)'}`, borderRadius: 'var(--radius-lg)', padding: '16px 20px', marginBottom: 28, display: 'flex', alignItems: 'center', gap: 14 }}>
+                  <HardDrive size={24} color={isHw ? '#34d399' : '#fbbf24'} />
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: isHw ? '#34d399' : '#fbbf24' }}>
+                      {isHw ? '⚡ Hardware Acceleration Active' : '🖥 Software Transcoding (CPU)'}
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
+                      Encoder: <code style={{ background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: 3, fontSize: 12 }}>{auto.enc}</code> — {auto.name}
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Quality */}
             <div style={{ marginBottom: 28 }}>
@@ -2875,7 +3585,7 @@ const TAB_GROUPS = [
             <div style={{ marginBottom: 28 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: 1.2, textTransform: 'uppercase', marginBottom: 14 }}>Hardware Acceleration</div>
               {[
-                { label: 'Hardware encoder', key: 'hardware', desc: 'GPU encoder to use for transcoding.',
+                { label: 'Hardware encoder', key: 'hwAccel', desc: 'GPU encoder to use for transcoding.',
                   options: [{ value: 'auto', label: 'Auto-detect (recommended)' },{ value: 'amf', label: 'AMD AMF (RX / Radeon)' },{ value: 'nvenc', label: 'NVIDIA NVENC' },{ value: 'qsv', label: 'Intel Quick Sync' },{ value: 'software', label: 'Software / CPU only' }] },
                 { label: 'Hardware transcoding device', key: 'hwDevice', desc: 'The GPU or device used for hardware transcoding.',
                   options: [{ value: 'auto', label: 'Auto' },{ value: '0', label: 'GPU 0' },{ value: '1', label: 'GPU 1' },{ value: '2', label: 'GPU 2' }] },
@@ -2893,7 +3603,7 @@ const TAB_GROUPS = [
                 </div>
               ))}
               {[
-                { key: 'hwAccel', label: 'Use hardware acceleration when available', desc: 'Orion will use GPU-accelerated encoding and decoding when possible.' },
+                { key: 'hwAccelEnabled', label: 'Use hardware acceleration when available', desc: 'Orion will use GPU-accelerated encoding and decoding when possible.' },
                 { key: 'hwEncoding', label: 'Use hardware-accelerated video encoding', desc: 'If hardware acceleration is enabled, also use it for encoding (not just decoding).' },
                 { key: 'hdrToneMap', label: 'Enable HDR tone mapping', desc: 'Transcoded HDR content will appear dimmed without this. May require additional GPU drivers.' },
               ].map(({ key, label, desc }) => (
@@ -3052,7 +3762,7 @@ const TAB_GROUPS = [
         )}
 
         {activeTab === 'ai' && (
-          <LocalAISettings API={API} />
+          <AISettings API={API} />
         )}
 
         {activeTab === 'about' && (
@@ -3090,6 +3800,8 @@ const TAB_GROUPS = [
 
         {activeTab === 'scheduler' && <SchedulerPage embedded />}
         {activeTab === 'users'     && <UsersPage embedded />}
+        {activeTab === 'services'  && <ServicesPanel />}
+        {activeTab === 'systemstatus' && <SystemStatusPage />}
 
         {activeTab === 'homelayout' && (
           <HomeLayoutSettings />

@@ -15,6 +15,7 @@ const { v4: uuidv4 }          = require('uuid');
 const { spawn, execSync }      = require('child_process');
 const multer  = require('multer');
 const crypto  = require('crypto');
+const playoutEngine = require('./playout-engine');
 
 // ── Data files — stored alongside Orion's library.json ───────────────────────
 let SF_DIR, SF_CFG, SF_CHANNELS, SF_LIBRARIES, SF_MEDIA, SF_EPG, SF_STREAMS, SF_EPG_DISABLED;
@@ -375,6 +376,12 @@ function resolveSource(item) {
 }
 
 function getPlayoutNow(ch, nowMs) {
+  if (!ch.liveStreamId) {
+    try { const r = playoutEngine.getNowPlaying(ch.id); if (r) return r; } catch (e) {}
+  }
+  return _getPlayoutNowOld(ch, nowMs);
+}
+function _getPlayoutNowOld(ch, nowMs) {
   if (ch.liveStreamId) {
     const stream = getSfStream(ch.liveStreamId);
     if (stream) return { item: null, stream, block: { streamId: ch.liveStreamId }, offsetSeconds: 0, startTime: nowMs, endTime: nowMs + 86400000, isLive: true };
@@ -585,7 +592,538 @@ function getPlayoutNow(ch, nowMs) {
 }
 
 function buildSchedule(ch, fromMs, toMs) {
+  if (ch.liveStreamId) return _buildScheduleOld(ch, fromMs, toMs);
+  try {
+    const progs = ensureChannelSchedule(ch, false);
+    if (progs && progs.length) {
+      return progs.filter(p => p.end > fromMs && p.start < toMs);
+    }
+  } catch (e) { console.warn('[SF] ensureChannelSchedule failed: ' + e.message); }
+  try { const r = playoutEngine.getSchedule(ch.id, fromMs, toMs); if (r && r.length) return r; } catch (e) {}
+  return _buildScheduleOld(ch, fromMs, toMs);
+}
+
+// [PATCHED] Rotation+TimeBlock schedule builder for custom channels.
+// Walks 30-min slots. TimeBlocks take precedence; rotation pool fills the rest.
+// Looks up real episodes from orionDb.tvShows so EPG has full episode info.
+
+// [PATCHED PERSISTSCHED] Single source of truth: generate schedule with GUID references,
+// persist to channel, and both EPG + playout read from it. No more drift.
+
+// [PATCHED ALLFORMATS] Format-specific schedule builders
+
+function _ps_getAllMedia() {
+  try {
+    if (typeof getMediaCombined === 'function') return getMediaCombined();
+  } catch {}
+  const a = [];
+  if (orionDb) {
+    if (Array.isArray(orionDb.tvShows)) for (const x of orionDb.tvShows) a.push(x);
+    if (Array.isArray(orionDb.movies)) for (const x of orionDb.movies) a.push(x);
+    if (Array.isArray(orionDb.musicVideos)) for (const x of orionDb.musicVideos) a.push(x);
+    if (Array.isArray(orionDb.music)) for (const x of orionDb.music) a.push(x);
+  }
+  return a;
+}
+
+function _ps_seededShuffle(arr, seedStr) {
+  const out = arr.slice();
+  let s = String(seedStr||'').split('').reduce((a,c)=>a + c.charCodeAt(0), 1);
+  for (let i = out.length - 1; i > 0; i--) {
+    s = (s * 9301 + 49297) % 233280;
+    const j = Math.floor((s / 233280) * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+function _ps_makeProgram(t, end, item, fallbackTitle) {
+  if (!item) return null;
+  const fp = item.path || item.filePath;
+  if (!fp) return null;
+  const titleStr = item.seriesTitle && item.season != null
+    ? `${item.seriesTitle} S${String(item.season).padStart(2,'0')}E${String(item.episode||0).padStart(2,'0')}${item.episodeTitle ? ' — ' + item.episodeTitle : ''}`
+    : (item.title || fallbackTitle || '');
+  return {
+    start: t,
+    end,
+    mediaId: item.id || null,
+    filePath: fp,
+    duration: item.duration || Math.floor((end-t)/1000),
+    title: titleStr,
+    desc: item.summary || '',
+    icon: item.thumb || '',
+    season: item.season,
+    episode: item.episode,
+    seriesTitle: item.seriesTitle,
+    episodeTitle: item.episodeTitle || '',
+  };
+}
+
+// Format: seriesSchedule.episodes (pre-computed single-show schedule list)
+function _ps_buildEpisodeListSchedule(ch, fromMs, toMs) {
+  const eps = (ch.seriesSchedule || {}).episodes || [];
+  if (!eps.length) return [];
+  const allMedia = _ps_getAllMedia();
+  const byId = new Map();
+  for (const m of allMedia) if (m.id) byId.set(m.id, m);
+  const programs = [];
+  let t = fromMs, idx = 0, safety = 0;
+  while (t < toMs && safety++ < 20000) {
+    const ref = eps[idx % eps.length]; idx++;
+    const full = (ref.mediaId && byId.get(ref.mediaId)) || ref;
+    if (!full) { t += 1800000; continue; }
+    const dur = (full.duration || ref.duration || 1800) * 1000;
+    const end = Math.min(t + dur, toMs);
+    const p = _ps_makeProgram(t, end, full, ch.name);
+    if (p) programs.push(p);
+    t = end;
+  }
+  return programs;
+}
+
+// Format: playout array (manual playlist of mediaIds and/or streamIds)
+// [PATCHED] Secondary-key fallback: if mediaId is stale (re-import), parse title for S/E and look up by (series, season, episode)
+function _ps_buildPlayoutSchedule(ch, fromMs, toMs) {
+  const playout = ch.playout || [];
+  if (!playout.length) return [];
+  const allMedia = _ps_getAllMedia();
+  const _norm = v => String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const byId = new Map();
+  for (const m of allMedia) {
+    if (m.id) byId.set(m.id, m);
+  }
+  // [PATCHED RAWTV] Secondary-key index from raw orionDb.tvShows.
+  // getMediaCombined() strips seriesTitle/season/episode for some entries,
+  // so we MUST use raw data here. byId still uses combined to allow stale-id matching.
+  const bySeriesEp = new Map();
+  const _rawTV = (orionDb && Array.isArray(orionDb.tvShows)) ? orionDb.tvShows : [];
+  for (const m of _rawTV) {
+    if (m.seriesTitle && m.season != null && m.episode != null) {
+      if (!(m.path || m.filePath)) continue;
+      const k = _norm(m.seriesTitle) + '|' + m.season + '|' + m.episode;
+      if (!bySeriesEp.has(k)) bySeriesEp.set(k, m);
+      // Also index raw items by id so byId can resolve them too (in case getMediaCombined lacks them)
+      if (m.id && !byId.has(m.id)) byId.set(m.id, m);
+    }
+  }
+  const SE_RE = /(.+?)\s+[Ss](\d{1,2})[Ee](\d{1,2})\s*$/;
+
+  // [PATCHED FALLBACK] Build per-show episode lists for round-robin fallback
+  // when a specific S/E doesn't exist (e.g., E00 placeholders, missing imports).
+  const byShow = new Map();
+  for (const m of _rawTV) {
+    if (!m.seriesTitle) continue;
+    if (!(m.path || m.filePath)) continue;
+    if (m.season == null || m.episode == null) continue;
+    const k = _norm(m.seriesTitle);
+    if (!byShow.has(k)) byShow.set(k, []);
+    byShow.get(k).push(m);
+  }
+  for (const arr of byShow.values()) {
+    arr.sort((a,b)=> (a.season-b.season) || (a.episode-b.episode));
+  }
+  const showCursor = {};
+  function pickAnyForShow(showNorm) {
+    const arr = byShow.get(showNorm);
+    if (!arr || !arr.length) return null;
+    const idx = (showCursor[showNorm] || 0) % arr.length;
+    showCursor[showNorm] = idx + 1;
+    return arr[idx];
+  }
+  let fallback = 0;
+
+  function resolveBlock(block) {
+    if (block.mediaId && byId.has(block.mediaId)) return byId.get(block.mediaId);
+    const title = block.title || '';
+    const m = title.match(SE_RE);
+    if (m) {
+      const show = m[1].trim();
+      const season = parseInt(m[2], 10);
+      const episode = parseInt(m[3], 10);
+      const showNorm = _norm(show);
+      const k = showNorm + '|' + season + '|' + episode;
+      if (bySeriesEp.has(k)) return bySeriesEp.get(k);
+      // [PATCHED FALLBACK] Exact S/E not found — round-robin from this show's episodes.
+      const any = pickAnyForShow(showNorm);
+      if (any) { fallback++; return any; }
+    }
+    return null;
+  }
+  const programs = [];
+  let t = fromMs, idx = 0, safety = 0;
+  let primary = 0, secondary = 0, missed = 0;
+  while (t < toMs && safety++ < 20000) {
+    const block = playout[idx % playout.length]; idx++;
+    if (block.streamId) {
+      const dur = (block.duration || 3600) * 1000;
+      const end = Math.min(t + dur, toMs);
+      programs.push({ start: t, end, mediaId: null, filePath: null,
+        duration: block.duration||3600, title: '🔴 Live', desc: '', icon: '' });
+      t = end; continue;
+    }
+    let item = null;
+    if (block.mediaId && byId.has(block.mediaId)) { item = byId.get(block.mediaId); primary++; }
+    else { item = resolveBlock(block); if (item) secondary++; else missed++; }
+    if (!item) { t += 1800000; continue; }
+    const dur = (item.duration || block.duration || 1800) * 1000;
+    const end = Math.min(t + dur, toMs);
+    const p = _ps_makeProgram(t, end, item, block.title || ch.name);
+    if (p) programs.push(p);
+    t = end;
+  }
+  if (programs.length) console.log('[SF] playout schedule "' + ch.name + '": ' + programs.length + ' programs (primary=' + primary + ', secondary=' + secondary + ', fallback=' + fallback + ', missed=' + missed + ')');
+  return programs;
+}
+
+// Format: libraryLoop (entire library, optional shuffle)
+function _ps_buildLibraryLoopSchedule(ch, fromMs, toMs) {
+  const ll = ch.libraryLoop || {};
+  if (!ll.libraryId) return [];
+  let items = _ps_getAllMedia().filter(m => m.libraryId === ll.libraryId);
+  if (!items.length) return [];
+  if (ll.shuffle) items = _ps_seededShuffle(items, ch.id);
+  const programs = [];
+  let t = fromMs, idx = 0, safety = 0;
+  while (t < toMs && safety++ < 20000) {
+    const item = items[idx % items.length]; idx++;
+    if (!(item.path || item.filePath)) { t += 1800000; continue; }
+    const dur = (item.duration || 1800) * 1000;
+    const end = Math.min(t + dur, toMs);
+    const p = _ps_makeProgram(t, end, item, ch.name);
+    if (p) programs.push(p);
+    t = end;
+  }
+  return programs;
+}
+
+// Format: genreLoop (filter library by genre + mediaType)
+function _ps_buildGenreLoopSchedule(ch, fromMs, toMs) {
+  const gl = ch.genreLoop || {};
+  if (!gl.genre) return [];
+  const targetGenre = String(gl.genre).toLowerCase();
+  const targetType = gl.mediaType ? String(gl.mediaType).toLowerCase() : null;
+  let items = _ps_getAllMedia().filter(m => {
+    if (targetType && String(m.type||'').toLowerCase() !== targetType) return false;
+    const genres = m.genres || [];
+    return Array.isArray(genres) && genres.some(g => String(g).toLowerCase().includes(targetGenre));
+  });
+  if (!items.length) return [];
+  items = _ps_seededShuffle(items, ch.id);
+  const programs = [];
+  let t = fromMs, idx = 0, safety = 0;
+  while (t < toMs && safety++ < 20000) {
+    const item = items[idx % items.length]; idx++;
+    if (!(item.path || item.filePath)) { t += 1800000; continue; }
+    const dur = (item.duration || 1800) * 1000;
+    const end = Math.min(t + dur, toMs);
+    const p = _ps_makeProgram(t, end, item, ch.name);
+    if (p) programs.push(p);
+    t = end;
+  }
+  return programs;
+}
+
+function generateChannelSchedule(ch, fromMs, toMs) {
+  const tbs = Array.isArray(ch.timeBlocks) ? ch.timeBlocks : [];
+  const rotation = (ch.seriesSchedule && Array.isArray(ch.seriesSchedule.showTitles))
+                   ? ch.seriesSchedule.showTitles.slice() : [];
+  // [PATCHED ALLFORMATS] Dispatch to format-specific builders when not rotation/timeBlock
+  if (!tbs.length && !rotation.length) {
+    if (ch.seriesSchedule && Array.isArray(ch.seriesSchedule.episodes) && ch.seriesSchedule.episodes.length > 1) {
+      return _ps_buildEpisodeListSchedule(ch, fromMs, toMs);
+    }
+    if (Array.isArray(ch.playout) && ch.playout.length) {
+      return _ps_buildPlayoutSchedule(ch, fromMs, toMs);
+    }
+    if (ch.libraryLoop && ch.libraryLoop.libraryId) {
+      return _ps_buildLibraryLoopSchedule(ch, fromMs, toMs);
+    }
+    if (ch.genreLoop && ch.genreLoop.genre) {
+      return _ps_buildGenreLoopSchedule(ch, fromMs, toMs);
+    }
+    return [];
+  }
+
+  const norm = v => String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const tvShows = (orionDb && Array.isArray(orionDb.tvShows)) ? orionDb.tvShows : [];
+
+  const showIndex = new Map();
+  for (const it of tvShows) {
+    const st = it.seriesTitle || '';
+    if (!st || it.season == null || it.episode == null) continue;
+    const p = it.path || it.filePath || '';
+    if (!p) continue;
+    const k = norm(st);
+    if (!showIndex.has(k)) showIndex.set(k, []);
+    showIndex.get(k).push(it);
+  }
+  for (const arr of showIndex.values()) {
+    arr.sort((a,b)=> (a.season-b.season) || (a.episode-b.episode));
+  }
+
+  function getEpisodes(seriesTitle) {
+    const target = norm(seriesTitle);
+    if (showIndex.has(target)) return showIndex.get(target);
+    for (const [k, v] of showIndex.entries()) {
+      if (k.startsWith(target) || target.startsWith(k)) return v;
+    }
+    return [];
+  }
+
+  function tbApplies(tb, date) {
+    const dow = date.getDay();
+    const days = String(tb.daysOfWeek || 'daily').toLowerCase();
+    if (days === 'daily') return true;
+    if (days === 'weekdays') return dow >= 1 && dow <= 5;
+    if (days === 'weekends') return dow === 0 || dow === 6;
+    const dayMap = { sun:0,mon:1,tue:2,wed:3,thu:4,fri:5,sat:6,
+                     sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6 };
+    return days.split(',').map(x => x.trim()).some(d => dayMap[d] === dow);
+  }
+
+  function timeStr(date) {
+    return String(date.getHours()).padStart(2,'0') + ':' + String(date.getMinutes()).padStart(2,'0');
+  }
+
+  const programs = [];
+  const slotMs = 30 * 60 * 1000;
+  let rotIdx = 0;
+  const epCursor = {};
+  let lastShowKey = null;
+  let lastResyncDay = null;  // [3AMRESYNC] tracks last day we re-synced
+
+  let t = fromMs;
+  let safety = 0;
+  while (t < toMs && safety++ < 10000) {
+    const date = new Date(t);
+    const cur = timeStr(date);
+
+    let pickedShow = null;
+    for (const tb of tbs) {
+      if (!tbApplies(tb, date)) continue;
+      if (tb.start && tb.end && tb.start <= cur && cur < tb.end) {
+        pickedShow = tb.showTitle; break;
+      }
+    }
+    if (!pickedShow && rotation.length) {
+      let tries = 0;
+      do {
+        pickedShow = rotation[rotIdx % rotation.length];
+        rotIdx++;
+        tries++;
+      } while (norm(pickedShow) === lastShowKey && tries < rotation.length);
+    }
+    if (!pickedShow) { t += slotMs; continue; }
+
+    const eps = getEpisodes(pickedShow);
+    let ep = null;
+    if (eps.length) {
+      const k = norm(pickedShow);
+      epCursor[k] = (epCursor[k] || 0);
+      ep = eps[epCursor[k] % eps.length];
+      epCursor[k]++;
+    }
+
+    const durSec = (ep && ep.duration) ? ep.duration : 1800;
+    // [PATCHED 3AMRESYNC] Use ACTUAL duration. No minimum slot. Continuous back-to-back.
+    const durMs = durSec * 1000;
+    const end = Math.min(t + durMs, toMs);
+
+    const titleStr = ep
+      ? (ep.seriesTitle
+          ? `${ep.seriesTitle} S${String(ep.season||0).padStart(2,'0')}E${String(ep.episode||0).padStart(2,'0')}${ep.episodeTitle ? ' — ' + ep.episodeTitle : ''}`
+          : (ep.title || pickedShow))
+      : pickedShow;
+
+    programs.push({
+      start: t,
+      end,
+      mediaId: ep ? ep.id : null,
+      filePath: ep ? (ep.path || ep.filePath) : null,
+      duration: durSec,
+      title: titleStr,
+      desc: (ep && ep.summary) || '',
+      icon: (ep && ep.thumb) || '',
+      season: ep ? ep.season : null,
+      episode: ep ? ep.episode : null,
+      seriesTitle: ep ? ep.seriesTitle : pickedShow,
+      episodeTitle: ep ? ep.episodeTitle : '',
+      showTitle: pickedShow,
+    });
+
+    lastShowKey = norm(pickedShow);
+    t = end;
+
+    // [3AMRESYNC] Once per day at 3am, if drifted off slot boundary, pad with dead air to next slot
+    const _d = new Date(t);
+    const _dayKey = _d.getFullYear() + '-' + (_d.getMonth()+1) + '-' + _d.getDate();
+    if (lastResyncDay !== _dayKey && _d.getHours() === 3) {
+      const aligned = Math.ceil(t / slotMs) * slotMs;
+      if (aligned > t) {
+        programs.push({
+          start: t,
+          end: aligned,
+          mediaId: null,
+          filePath: null,
+          duration: Math.floor((aligned - t) / 1000),
+          title: '— Programming Adjustment —',
+          desc: 'Schedule re-syncs at ' + new Date(aligned).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit'}),
+          icon: '',
+          season: null,
+          episode: null,
+          seriesTitle: '',
+          episodeTitle: '',
+          showTitle: '',
+        });
+        t = aligned;
+      }
+      lastResyncDay = _dayKey;
+    }
+  }
+  return programs;
+}
+
+function ensureChannelSchedule(ch, force) {
+  const now = Date.now();
+  const horizonDays = 7;
+  const horizonMs = horizonDays * 86400 * 1000;
+  const stale = !ch.scheduledPrograms
+              || !Array.isArray(ch.scheduledPrograms)
+              || !ch.scheduledPrograms.length
+              || !ch.scheduledProgramsGeneratedAt
+              || (now - (ch.scheduledProgramsGeneratedAt||0) > 12 * 3600 * 1000)
+              || (ch.scheduledPrograms[ch.scheduledPrograms.length-1].end < now + 24 * 3600 * 1000);
+  if (!force && !stale) return ch.scheduledPrograms;
+  const fromMs = now;
+  const toMs = now + horizonMs;
+  const progs = generateChannelSchedule(ch, fromMs, toMs);
+  ch.scheduledPrograms = progs;
+  ch.scheduledProgramsGeneratedAt = now;
+  saveAll();
+  console.log('[SF] regenerated schedule for "' + ch.name + '": ' + progs.length + ' programs over ' + horizonDays + ' days');
+  return progs;
+}
+
+function _buildScheduleRotation(ch, fromMs, toMs) {
+  const tbs = Array.isArray(ch.timeBlocks) ? ch.timeBlocks : [];
+  const rotation = (ch.seriesSchedule && Array.isArray(ch.seriesSchedule.showTitles))
+                   ? ch.seriesSchedule.showTitles.slice() : [];
+  if (!tbs.length && !rotation.length) return [];
+
+  // Normalize for matching
+  const norm = v => String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const tvShows = (orionDb && Array.isArray(orionDb.tvShows)) ? orionDb.tvShows : [];
+
+  // Build show->episodes index once
+  const showIndex = new Map();
+  for (const it of tvShows) {
+    const st = it.seriesTitle || '';
+    if (!st || it.season == null || it.episode == null) continue;
+    const k = norm(st);
+    if (!showIndex.has(k)) showIndex.set(k, []);
+    showIndex.get(k).push(it);
+  }
+  // Sort each show's episodes by (season, episode)
+  for (const arr of showIndex.values()) {
+    arr.sort((a,b)=> (a.season-b.season) || (a.episode-b.episode));
+  }
+
+  function getEpisodes(seriesTitle) {
+    const target = norm(seriesTitle);
+    if (showIndex.has(target)) return showIndex.get(target);
+    // Try prefix match (handles year suffixes like "Will & Grace (1998)")
+    for (const [k, v] of showIndex.entries()) {
+      if (k.startsWith(target) || target.startsWith(k)) return v;
+    }
+    return [];
+  }
+
+  function tbApplies(tb, date) {
+    const dow = date.getDay(); // 0=Sun, 6=Sat
+    const days = String(tb.daysOfWeek || 'daily').toLowerCase();
+    if (days === 'daily') return true;
+    if (days === 'weekdays') return dow >= 1 && dow <= 5;
+    if (days === 'weekends') return dow === 0 || dow === 6;
+    const dayMap = { sun:0,mon:1,tue:2,wed:3,thu:4,fri:5,sat:6,
+                     sunday:0,monday:1,tuesday:2,wednesday:3,thursday:4,friday:5,saturday:6 };
+    const list = days.split(',').map(x => x.trim());
+    return list.some(d => dayMap[d] === dow);
+  }
+
+  function timeStr(date) {
+    return String(date.getHours()).padStart(2,'0') + ':' + String(date.getMinutes()).padStart(2,'0');
+  }
+
+  const programs = [];
+  const slotMs = 30 * 60 * 1000;
+  let rotIdx = 0;
+  const epCursor = {}; // per-show round-robin cursor
+
+  let t = fromMs;
+  let safety = 0;
+  while (t < toMs && safety++ < 5000) {
+    const date = new Date(t);
+    const cur = timeStr(date);
+
+    // 1) timeBlock match wins
+    let pickedShow = null;
+    for (const tb of tbs) {
+      if (!tbApplies(tb, date)) continue;
+      if (tb.start && tb.end && tb.start <= cur && cur < tb.end) {
+        pickedShow = tb.showTitle; break;
+      }
+    }
+    // 2) fall back to rotation pool
+    if (!pickedShow && rotation.length) {
+      pickedShow = rotation[rotIdx % rotation.length];
+      rotIdx++;
+    }
+    if (!pickedShow) { t += slotMs; continue; }
+
+    const eps = getEpisodes(pickedShow);
+    let ep = null;
+    if (eps.length) {
+      const k = norm(pickedShow);
+      epCursor[k] = (epCursor[k] || 0);
+      ep = eps[epCursor[k] % eps.length];
+      epCursor[k]++;
+    }
+
+    // Episode duration — default 30 min if unknown
+    const durSec = (ep && ep.duration) ? ep.duration : 1800;
+    const durMs = Math.max(slotMs, durSec * 1000);
+    const end = Math.min(t + durMs, toMs);
+
+    const titleStr = ep
+      ? (ep.seriesTitle
+          ? `${ep.seriesTitle} S${String(ep.season||0).padStart(2,'0')}E${String(ep.episode||0).padStart(2,'0')}${ep.episodeTitle ? ' — ' + ep.episodeTitle : ''}`
+          : (ep.title || pickedShow))
+      : pickedShow;
+
+    programs.push({
+      start: t,
+      end,
+      title: titleStr,
+      desc: (ep && ep.summary) || '',
+      icon: (ep && ep.thumb) || '',
+      season: ep ? ep.season : undefined,
+      episode: ep ? ep.episode : undefined,
+      seriesTitle: ep ? ep.seriesTitle : pickedShow,
+    });
+
+    t = end;
+  }
+  return programs;
+}
+
+function _buildScheduleOld(ch, fromMs, toMs) {
   if (ch.liveStreamId) { const s=getSfStream(ch.liveStreamId); return [{start:fromMs,end:toMs,title:s?`🔴 ${s.name}`:'🔴 Live',isLive:true}]; }
+  // [PATCHED] Rotation+timeBlock channels — compute EPG from config (don't need running stream)
+  if ((ch.seriesSchedule?.showTitles?.length || ch.timeBlocks?.length) && !(ch.playout||[]).length) {
+    const r = _buildScheduleRotation(ch, fromMs, toMs);
+    if (r && r.length) return r;
+  }
   // GenreLoop/collection and series channels — walk through time slots and get what's playing
   if (ch.genreLoops?.length || ch.genreLoop || ch.seriesSchedule?.episodes?.length) {
     const programs = [];
@@ -599,7 +1137,7 @@ function buildSchedule(ch, fromMs, toMs) {
       const title = now.item.seriesTitle
         ? `${now.item.seriesTitle} S${String(now.item.season||0).padStart(2,'0')}E${String(now.item.episode||0).padStart(2,'0')}${now.item.episodeTitle?' — '+now.item.episodeTitle:''}`
         : now.item.title || ch.name;
-      programs.push({ start, end, title, desc: now.item.summary||'', icon: now.item.thumb||'' });
+      programs.push({ start, end, title, desc: now.item.summary||'', icon: now.item.thumb||'', season: now.item.season, episode: now.item.episode, seriesTitle: now.item.seriesTitle });
       t = end + 1000; // move to next slot
     }
     return programs;
@@ -673,7 +1211,7 @@ function buildFfArgs(src, offsetSeconds, opts={}) {
   // Hardware decode (optional, off by default)
   // Disable hw decode for file sources — filter reinit errors when episodes change resolution
   const isNvenc = hw === 'nvenc' || hwEncoder.includes('nvenc');
-  const useHwDecode = (sfConfig.hwDecode === true && isLiveSrc && isNvenc) && vCodec !== 'copy';
+  const useHwDecode = (sfConfig.hwDecode === true && isNvenc) && vCodec !== 'copy';
   if (useHwDecode) {
     if (hw === 'nvenc' || hwEncoder.includes('nvenc')) {
       args.push('-hwaccel', 'cuda', '-hwaccel_device', String(gpuId), '-hwaccel_output_format', 'cuda');
@@ -889,24 +1427,54 @@ function refillFromPendingShows() {
   return false;
 }
 
-let presegWorkers = 0;
-const MAX_PRESEG_WORKERS = () => Math.max(1, parseInt(sfConfig.presegWorkers) || 4);
+let presegWorkers = 0;  // legacy total (kept for status API)
+let gpuPresegWorkers = 0;  // 8-bit files - fast NVENC pipeline
+let cpuPresegWorkers = 0;  // 10-bit files - SW decode, CPU-bound
+// [CONFIGURABLE_v2] Worker limits driven by sfConfig.presegWorkers (UI) with fallback to maxGpuPreseg/maxCpuPreseg
+let MAX_GPU_PRESEG = 4;
+let MAX_CPU_PRESEG = 2;
+function refreshPresegLimits() {
+  const total = parseInt(sfConfig.presegWorkers) || 0;
+  const route10b = sfConfig.route10BitToCpu === true;
+  if (total > 0) {
+    if (route10b) {
+      MAX_GPU_PRESEG = Math.max(1, Math.ceil(total * 0.8));
+      MAX_CPU_PRESEG = Math.max(0, total - MAX_GPU_PRESEG);
+    } else {
+      MAX_GPU_PRESEG = total;
+      MAX_CPU_PRESEG = 0;
+    }
+  } else {
+    MAX_GPU_PRESEG = Math.max(1, parseInt(sfConfig.maxGpuPreseg) || 4);
+    MAX_CPU_PRESEG = Math.max(0, parseInt(sfConfig.maxCpuPreseg) || 2);
+  }
+}
+refreshPresegLimits();
+const MAX_PRESEG_WORKERS = () => MAX_GPU_PRESEG + MAX_CPU_PRESEG;
 
 function loadPresegDb() {
+  // [SINGLE_SOURCE_v1] queue rebuilt from preseg.json every startup. No queue-file drift. Zombies auto-reset.
   try {
     const p = path.join(SF_DIR, 'preseg.json');
     if (fs.existsSync(p)) presegDb = JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch {}
-  // Restore pending queue from disk
-  try {
-    const qp = path.join(SF_DIR, 'preseg-queue.json');
-    if (fs.existsSync(qp)) {
-      const saved = JSON.parse(fs.readFileSync(qp, 'utf8'));
-      // Only restore items not already done
-      presegQueue = saved.filter(q => presegDb[q.mediaId]?.status !== 'done' && presegDb[q.mediaId]?.status !== 'processing');
-      console.log(`[SF/Preseg] Restored ${presegQueue.length} queued items from disk`);
+  presegQueue = [];
+  let zombiesReset = 0;
+  for (const mid of Object.keys(presegDb || {})) {
+    const v = presegDb[mid];
+    if (!v || !v.filePath) continue;
+    if (v.status === 'processing') {
+      v.status = 'queued';
+      zombiesReset++;
     }
-  } catch {}
+    if (v.status === 'queued') {
+      presegQueue.push({ mediaId: mid, filePath: v.filePath, displayName: v.displayName || '' });
+    }
+  }
+  if (zombiesReset > 0) {
+    try { fs.writeFileSync(path.join(SF_DIR, 'preseg.json'), JSON.stringify(presegDb, null, 2)); } catch {}
+  }
+  console.log(`[SF/Preseg] Loaded ${presegQueue.length} queued items from preseg.json (${zombiesReset} zombies reset)`);
 }
 
 function savePresegQueue() {
@@ -946,9 +1514,34 @@ function checkFileAlreadyPresegged(mediaId, filePath) {
   return false;
 }
 
+// [DEBOUNCE_v1] Debounced async save — coalesces bursts to max 1 write per 2s.
+// 250 calls in a 1s burst become 1 write at the end. Event loop never blocks.
+let _presegSaveTimer = null;
+let _presegSaveInflight = false;
 function savePresegDb() {
+  if (_presegSaveTimer) return;
+  _presegSaveTimer = setTimeout(() => {
+    _presegSaveTimer = null;
+    if (_presegSaveInflight) { _presegSaveTimer = setTimeout(savePresegDb, 500); return; }
+    _presegSaveInflight = true;
+    const tmpPath = path.join(SF_DIR, 'preseg.json.tmp');
+    const finalPath = path.join(SF_DIR, 'preseg.json');
+    fs.writeFile(tmpPath, JSON.stringify(presegDb), (err) => {
+      if (err) { console.error('[SF/Preseg] save failed:', err.message); _presegSaveInflight = false; return; }
+      fs.rename(tmpPath, finalPath, (err2) => {
+        _presegSaveInflight = false;
+        if (err2) console.error('[SF/Preseg] rename failed:', err2.message);
+      });
+    });
+  }, 2000);
+}
+// Sync flush — call on SIGTERM/SIGINT to persist final state before exit
+function flushPresegDbSync() {
+  if (_presegSaveTimer) { clearTimeout(_presegSaveTimer); _presegSaveTimer = null; }
   try { fs.writeFileSync(path.join(SF_DIR, 'preseg.json'), JSON.stringify(presegDb)); } catch {}
 }
+process.once('SIGTERM', flushPresegDbSync);
+process.once('SIGINT', flushPresegDbSync);
 
 function isPresegged(mediaId) {
   return presegDb[mediaId]?.status === 'done';
@@ -1016,9 +1609,12 @@ function startPresegCompletionChecker() {
           fs.rmSync(localTempDir, { recursive:true });
           console.log(`[SF/Preseg/Checker] Copied to NAS: ${nasSegDir}`);
         }
-        presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:segs, segLen:info.segLen||6, doneAt:Date.now(), filePath:fp, displayName:info.displayName||path.basename(fp) };
+        const was10b = info.is10Bit === true;
+        presegDb[mediaId] = { status:'done', segDir:nasSegDir, segCount:segs, segLen:info.segLen||6, doneAt:Date.now(), filePath:fp, displayName:info.displayName||path.basename(fp), is10Bit: was10b };
         savePresegDb();
-        presegWorkers = Math.max(0, presegWorkers - 1);
+        if (was10b) cpuPresegWorkers = Math.max(0, cpuPresegWorkers - 1);
+        else gpuPresegWorkers = Math.max(0, gpuPresegWorkers - 1);
+        presegWorkers = gpuPresegWorkers + cpuPresegWorkers;
         drainPresegQueue();
       } catch(e) {
         console.error(`[SF/Preseg/Checker] Error for ${mediaId}:`, e.message);
@@ -1027,26 +1623,136 @@ function startPresegCompletionChecker() {
   }, 5000);
 }
 
+// [EXTERNALIZE_v1] Yield in-process preseg to orion-preseg service when enabled
+function _externalPresegEnabled() {
+  try {
+    const c = JSON.parse(require('fs').readFileSync('/var/lib/orion/config.json', 'utf8'));
+    return !!(c.services && c.services.preseg && c.services.preseg.enabled === true);
+  } catch { return false; }
+}
+
+// [FORWARD_v2] Generic HTTP helper to orion-preseg service on localhost:3002
+function _httpToPreseg(method, reqPath, payload) {
+  const http = require('http');
+  return new Promise((resolve, reject) => {
+    const data = (payload != null) ? JSON.stringify(payload) : null;
+    const headers = data
+      ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+      : {};
+    const r = http.request({
+      hostname: '127.0.0.1', port: 3002, path: reqPath, method, headers, timeout: 30000
+    }, (resp) => {
+      let body = '';
+      resp.on('data', d => body += d);
+      resp.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve({ raw: body }); } });
+    });
+    r.on('error', reject);
+    r.on('timeout', () => { r.destroy(new Error('timeout')); });
+    if (data) r.write(data);
+    r.end();
+  });
+}
+function _postToPreseg(reqPath, payload) { return _httpToPreseg('POST', reqPath, payload); }
+function _getFromPreseg(reqPath) { return _httpToPreseg('GET', reqPath, null); }
+
 function drainPresegQueue() {
+  if (_externalPresegEnabled()) return;  // [EXTERNALIZE_v1] orion-preseg owns this
   if (presegQueue.length === 0 && pendingShows.length > 0) refillFromPendingShows();
-  while (presegWorkers < MAX_PRESEG_WORKERS() && presegQueue.length > 0) {
-    const item = presegQueue.shift();
+  // [PATCHED v2] Dual-worker: 2 GPU (8-bit) + 1 CPU (10-bit), dispatched by type
+  const proc = Object.values(presegDb).filter(v => v && v.status === 'processing');
+  const cpuCount = proc.filter(v => v.is10Bit === true).length;
+  const gpuCount = proc.length - cpuCount;
+  if (gpuCount !== gpuPresegWorkers || cpuCount !== cpuPresegWorkers) {
+    console.log('[SF/Preseg] resync: gpu ' + gpuPresegWorkers + '->' + gpuCount + ', cpu ' + cpuPresegWorkers + '->' + cpuCount);
+    gpuPresegWorkers = gpuCount;
+    cpuPresegWorkers = cpuCount;
+  }
+  presegWorkers = gpuPresegWorkers + cpuPresegWorkers;
+  refreshPresegLimits();
+  // PROMOTE_PENDING_v1: top up queue from 'pending' entries when running low
+  if (presegQueue.length < 100) {
+    const PROMOTE_BATCH = 200;
+    let _promoted = 0;
+    for (const _mid of Object.keys(presegDb)) {
+      if (_promoted >= PROMOTE_BATCH) break;
+      const _v = presegDb[_mid];
+      if (_v && _v.status === 'pending') {
+        _v.status = 'queued';
+        presegQueue.push({ mediaId: _mid, filePath: _v.filePath, displayName: _v.displayName || '' });
+        _promoted++;
+      }
+    }
+    if (_promoted > 0) {
+      try { fs.writeFileSync(path.join(SF_DIR, 'preseg.json'), JSON.stringify(presegDb)); } catch {}
+      console.log(`[SF/Preseg] Promoted ${_promoted} pending -> queued (queue now ${presegQueue.length})`);
+    }
+  }
+  const _route10b = sfConfig.route10BitToCpu === true;
+  let safety = presegQueue.length + 4;
+  while (safety-- > 0 && (gpuPresegWorkers < MAX_GPU_PRESEG || cpuPresegWorkers < MAX_CPU_PRESEG) && presegQueue.length > 0) {
+    let pickIdx = -1, pickIs10b = null;
+    if (_route10b) {
+      for (let i = 0; i < presegQueue.length; i++) {
+        const it = presegQueue[i];
+        if (it._is10Bit === undefined) {
+          try { it._is10Bit = is10BitSource(it.filePath); } catch { it._is10Bit = false; }
+        }
+        if (it._is10Bit && cpuPresegWorkers < MAX_CPU_PRESEG) { pickIdx = i; pickIs10b = true; break; }
+        if (!it._is10Bit && gpuPresegWorkers < MAX_GPU_PRESEG) { pickIdx = i; pickIs10b = false; break; }
+      }
+    } else {
+      if (gpuPresegWorkers < MAX_GPU_PRESEG) { pickIdx = 0; pickIs10b = false; }
+      else if (cpuPresegWorkers < MAX_CPU_PRESEG) { pickIdx = 0; pickIs10b = true; }
+    }
+    if (pickIdx === -1) break;
+    const item = presegQueue.splice(pickIdx, 1)[0];
     savePresegQueue();
-    presegWorkers++;
-    runPreseg(item).finally(() => { presegWorkers--; drainPresegQueue(); });
+    if (pickIs10b) cpuPresegWorkers++; else gpuPresegWorkers++;
+    presegWorkers = gpuPresegWorkers + cpuPresegWorkers;
+    presegDb[item.mediaId] = { status:'processing', filePath: item.filePath, displayName: item.displayName, is10Bit: pickIs10b, startedAt: Date.now() };
+    savePresegDb();
+    runPreseg(item).finally(() => {
+      if (pickIs10b) cpuPresegWorkers = Math.max(0, cpuPresegWorkers - 1);
+      else gpuPresegWorkers = Math.max(0, gpuPresegWorkers - 1);
+      presegWorkers = gpuPresegWorkers + cpuPresegWorkers;
+      drainPresegQueue();
+    });
   }
 }
 
 // Probe if source is 10-bit (P40 NVDEC doesn't support it — fall back to software decode)
+// PROBE_CACHE_v1: persistent disk cache keyed by filePath:size:mtimeMs
+const _probeCachePath = '/var/lib/orion/sf/probe-cache.json';
+let _probeCache = (function(){
+  try { return JSON.parse(fs.readFileSync(_probeCachePath,'utf8')); } catch { return {}; }
+})();
+let _probeCacheDirty = 0;
+function _saveProbeCacheIfDirty(force) {
+  if (!force && _probeCacheDirty < 50) return;
+  try { fs.writeFileSync(_probeCachePath, JSON.stringify(_probeCache)); _probeCacheDirty = 0; } catch {}
+}
 function is10BitSource(filePath) {
+  let key = filePath;
+  try {
+    const st = fs.statSync(filePath);
+    key = filePath + ':' + st.size + ':' + Math.floor(st.mtimeMs);
+  } catch { return false; }
+  if (_probeCache[key] !== undefined) return _probeCache[key];
   try {
     const r = require('child_process').execFileSync(
       ffprobeExe,
       ['-v','error','-select_streams','v:0','-show_entries','stream=pix_fmt','-of','csv=p=0', filePath],
       { encoding: 'utf8', timeout: 5000 }
     ).trim();
-    return r.includes('10le') || r.includes('p10') || r.includes('10be');
-  } catch { return false; }
+    const result = r.includes('10le') || r.includes('p10') || r.includes('10be');
+    _probeCache[key] = result;
+    _probeCacheDirty++;
+    _saveProbeCacheIfDirty(false);
+    return result;
+  } catch {
+    _probeCache[key] = false;
+    return false;
+  }
 }
 
 async function runPreseg({ mediaId, filePath }) {
@@ -1079,38 +1785,57 @@ async function runPreseg({ mediaId, filePath }) {
   try {
     fs.mkdirSync(localTempDir, { recursive: true });
     const gpuId = assignGpu();
-    // Use config to determine encoder — hwEncoder may not be set yet at startup
-    const useNvenc = sfConfig.hwAccel === 'nvenc' || hwEncoder.includes('nvenc');
-    const enc = useNvenc ? 'h264_nvenc' : 'libx264';
-    const isNvenc = useNvenc;
+    // [CONFIGURABLE_v1] Encoder selection driven by sfConfig.hwAccel: nvenc/amf/qsv/cpu
+    const _hwAccel = (sfConfig.hwAccel || 'cpu').toLowerCase();
+    const isNvenc = _hwAccel === 'nvenc';
+    const isAmf = _hwAccel === 'amf';
+    const isQsv = _hwAccel === 'qsv';
+    const enc = isNvenc ? 'h264_nvenc' : isAmf ? 'h264_amf' : isQsv ? 'h264_qsv' : 'libx264';
+    const useNvenc = isNvenc;
 
     // Build encode args — same quality as live but no seek offset
     const args = [
       '-fflags', '+genpts+igndts',
       '-err_detect', 'ignore_err',
+      '-threads', '2',         // [PATCHED] hard cap on decoder threads
+      '-thread_type', 'frame', // [PATCHED] frame-only, no slice-level multiply
     ];
     const sourceIs10Bit = is10BitSource(filePath);
-    if (isNvenc && !sourceIs10Bit) {
+    if (sfConfig.skip10BitPreseg === true && sourceIs10Bit) {
+      console.log(`[SF/Preseg] 10-bit source SKIPPED (config): ${path.basename(filePath)}`);
+      presegDb[mediaId] = { status: 'skipped-10bit', filePath, displayName: (presegDb[mediaId] && presegDb[mediaId].displayName) || path.basename(filePath), skippedAt: Date.now() };
+      savePresegDb();
+      throw new Error('SKIP_10BIT');
+    }
+    if (isNvenc) {
       args.push('-hwaccel', 'cuda', '-hwaccel_device', String(gpuId), '-hwaccel_output_format', 'cuda');
-    } else if (isNvenc && sourceIs10Bit) {
-      console.log(`[SF/Preseg] 10-bit source detected, using software decode: ${path.basename(filePath)}`);
     }
     args.push(
       '-i', filePath,
       '-map', '0:v:0', '-map', '0:a:0?',
     );
 
+    // [CONFIGURABLE_v1] Per-encoder video args
+    if (sourceIs10Bit && (isNvenc || isAmf || isQsv)) args.push('-pix_fmt', 'yuv420p');
     if (isNvenc) {
-      if (sourceIs10Bit) args.push('-pix_fmt', 'yuv420p');  // force 8-bit for NVENC compat
-      args.push(
-        '-vcodec', 'h264_nvenc', '-gpu', String(gpuId),
+      args.push('-vcodec', 'h264_nvenc', '-gpu', String(gpuId),
         '-preset', 'p1', '-rc:v', 'vbr', '-cq:v', '23',
         '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
         '-g', '60', '-keyint_min', '60', '-sc_threshold', '0');
+    } else if (isAmf) {
+      args.push('-vcodec', 'h264_amf',
+        '-quality', 'speed', '-rc', 'vbr_peak', '-qp_i', '23', '-qp_p', '23',
+        '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
+        '-g', '60');
+    } else if (isQsv) {
+      args.push('-vcodec', 'h264_qsv',
+        '-preset', 'veryfast', '-global_quality', '23',
+        '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
+        '-g', '60');
     } else {
-      args.push('-pix_fmt', 'yuv420p',
-        '-vcodec', 'libx264', '-crf', '23', '-preset', 'fast',
-        '-b:v', '4M', '-maxrate', '8M', '-bufsize', '8M',
+      args.push('-vcodec', 'libx264',
+        '-preset', 'veryfast', '-crf', '23',
+        '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
         '-g', '60', '-keyint_min', '60', '-sc_threshold', '0');
     }
 
@@ -1136,6 +1861,7 @@ async function runPreseg({ mediaId, filePath }) {
       });
       let done = false;
 
+      let lastMoveErr = null;
       const moveToNas = () => {
         try {
           const segs = fs.readdirSync(localTempDir).filter(f=>f.endsWith('.ts')).length;
@@ -1155,6 +1881,7 @@ async function runPreseg({ mediaId, filePath }) {
           return true;
         } catch(me) {
           console.error('[SF/Preseg] moveToNas failed:', me.message);
+          lastMoveErr = me;
           return false;
         }
       };
@@ -1165,7 +1892,7 @@ async function runPreseg({ mediaId, filePath }) {
         clearInterval(poll);
         clearTimeout(timeout);
         if (err) {
-          presegDb[mediaId] = { status:'error', error: err.message, filePath, failedAt: Date.now() };
+          if (err && err.message === 'SKIP_10BIT') {} else { presegDb[mediaId] = { status:'error', error: err.message, filePath, failedAt: Date.now() }; }
           savePresegDb();
           try { if (fs.existsSync(localTempDir)) fs.rmSync(localTempDir, { recursive:true }); } catch {}
           reject(err);
@@ -1191,13 +1918,15 @@ async function runPreseg({ mediaId, filePath }) {
           const idx = path.join(localTempDir, 'index.m3u8');
           if (fs.existsSync(idx) && fs.readFileSync(idx,'utf8').includes('#EXT-X-ENDLIST')) {
             if (moveToNas()) { finish(null); return; }
+            // [VISIBILITY_v1] moveToNas failed — surface its actual error, not the generic ffmpeg msg
+            if (lastMoveErr) return finish(new Error('moveToNas: ' + lastMoveErr.message));
           }
         } catch {}
         finish(new Error('preseg failed code=' + code + ' | ffmpeg stderr: ' + (stderrTail||'').split('\n').slice(-10).join(' | ')));
       });
     });
   } catch(e) {
-    presegDb[mediaId] = { status:'error', error: e.message, filePath, failedAt: Date.now() };
+    if (e && e.message === 'SKIP_10BIT') {} else { presegDb[mediaId] = { status:'error', error: e.message, filePath, failedAt: Date.now() }; }
     savePresegDb();
     // Cleanup local temp on error
     try { if (fs.existsSync(localTempDir)) fs.rmSync(localTempDir, { recursive:true }); } catch {}
@@ -1241,6 +1970,33 @@ function getPresegPlaylist(mediaId, offsetSeconds, channelId) {
 }
 
 function startHlsSession(ch, opts={}) {
+  if (ch.liveStreamId) return _startHlsSessionOld(ch, opts);
+  if (hlsSessions[ch.id]) {
+    try { process.kill(hlsSessions[ch.id].proc.pid, 0); return hlsSessions[ch.id]; }
+    catch (e) { delete hlsSessions[ch.id]; }
+  }
+  try {
+    const stream = playoutEngine.startChannelStream(ch);
+    if (stream && stream.proc) {
+      const wrapped = {
+        proc: { pid: stream.proc.pid, kill: function(){}, killed: false, on: function(){}, once: function(){} },
+        _realProc: stream.proc,
+        dir: '/var/lib/orion/sf/hls/' + ch.id,
+        startedAt: new Date(stream.startedAt || Date.now()).toISOString(),
+        _startedAt: stream.startedAt || Date.now(),
+        lastRequest: Date.now(),
+        gpuId: 0, mode: 'concat', keepAlive: true,
+      };
+      hlsSessions[ch.id] = wrapped;
+      stream.proc.on('exit', () => { if (hlsSessions[ch.id] === wrapped) delete hlsSessions[ch.id]; });
+      return wrapped;
+    }
+  } catch (e) {
+    console.warn('[SF/HLS] playoutEngine failed for', ch.name, '-', e.message);
+  }
+  return _startHlsSessionOld(ch, opts);
+}
+function _startHlsSessionOld(ch, opts={}) {
   const channelId = ch.id;
   if (hlsSessions[channelId]) { try { hlsSessions[channelId].proc.kill('SIGKILL'); } catch {} delete hlsSessions[channelId]; }
   const hlsDir = path.join(SF_HLS_DIR(), channelId);
@@ -1336,10 +2092,36 @@ function startHlsSession(ch, opts={}) {
   return session;
 }
 
+// Stuck-ffmpeg watchdog — checks every 15 sec, kills any ffmpeg whose segments are >30s old
+setInterval(() => {
+  const now = Date.now();
+  for (const id of Object.keys(hlsSessions)) {
+    const s = hlsSessions[id];
+    if (!s || !s.dir) continue;
+    try {
+      const files = fs.readdirSync(s.dir).filter(f => f.endsWith('.ts'));
+      if (!files.length) continue; // not producing yet, give it time
+      const newest = Math.max(...files.map(f => {
+        try { return fs.statSync(path.join(s.dir, f)).mtimeMs; } catch { return 0; }
+      }));
+      if (now - newest > 60000) {
+        const ch = sfDb.channels.find(c => c.id === id);
+        console.log(`[SF/StuckGuard] Killing frozen "${ch?.name || id}" — last seg ${Math.round((now-newest)/1000)}s old`);
+        const realProc = s._realProc || s.proc;
+        try { realProc && realProc.pid && process.kill(realProc.pid, 'SIGKILL'); } catch {}
+        delete hlsSessions[id];
+      }
+    } catch {}
+  }
+}, 15000);
+
 // Pre-buffer watchdog — checks every 5 minutes and restarts any channel that should be running
 setInterval(() => {
   const mode = sfConfig.prebufferMode || 'library';
   if (mode === 'none') return;
+  const _osMem = require('os');
+  const _usedPct = (_osMem.totalmem() - _osMem.freemem()) / _osMem.totalmem() * 100;
+  if (_usedPct >= 60) { return; }
   (sfDb.channels || []).forEach(ch => {
     if (hlsSessions[ch.id]) return; // already running
     const isLive = !!ch.liveStreamId;
@@ -1724,10 +2506,20 @@ module.exports = function mountStreamForge(app, orion) {
   // Auto-fill hardware from Orion's detection — also re-check after 5s in case detection wasn't done yet
   function applyHwEncoder() {
     if (hwEncoder && hwEncoder !== 'libx264') {
-      if (hwEncoder.includes('amf'))        sfConfig.hwAccel = 'amf';
-      else if (hwEncoder.includes('nvenc')) sfConfig.hwAccel = 'nvenc';
-      else if (hwEncoder.includes('qsv'))   sfConfig.hwAccel = 'qsv';
-      console.log(`[SF] hwAccel set to: ${sfConfig.hwAccel} from encoder: ${hwEncoder}`);
+      // [PATCHED] Stop overwriting user-set hwAccel on every startup.
+      // Also: check /dev/nvidia0 before trusting hwEncoder string (ffmpeg lists h264_amf
+      // even on NVIDIA-only boxes, which used to cause silent reverts to amf).
+      if (sfConfig.hwAccel && sfConfig.hwAccel !== 'auto') {
+        console.log(`[SF] hwAccel preserved from config: ${sfConfig.hwAccel} (encoder probe: ${hwEncoder})`);
+      } else {
+        let _hasNvidia = false;
+        try { _hasNvidia = require('fs').existsSync('/dev/nvidia0'); } catch {}
+        if (_hasNvidia || hwEncoder.includes('nvenc'))  sfConfig.hwAccel = 'nvenc';
+        else if (hwEncoder.includes('qsv'))             sfConfig.hwAccel = 'qsv';
+        else if (hwEncoder.includes('amf'))             sfConfig.hwAccel = 'amf';
+        else                                            sfConfig.hwAccel = 'cpu';
+        console.log(`[SF] hwAccel auto-set to: ${sfConfig.hwAccel} (NVIDIA dev: ${_hasNvidia}, encoder: ${hwEncoder})`);
+      }
     }
   }
   applyHwEncoder();
@@ -1756,9 +2548,18 @@ module.exports = function mountStreamForge(app, orion) {
     const channels = sfDb.channels || [];
     if (!channels.length) return;
     const gpuCount = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
-    const BATCH = gpuCount; // 1 channel per GPU — prevents CPU overload during pre-buffer
+    // [PATCHED] Prebuffer always uses 4-way batching regardless of gpuCount (which controls preseg only).
+    // 4 P40s have plenty of NVENC headroom for parallel channel startup.
+    const BATCH = 4;
     console.log(`[SF/Prebuffer] Pre-buffering ${channels.length} channels in batches of ${BATCH}...`);
     for (let i = 0; i < channels.length; i += BATCH) {
+      // Memory throttle — stop prebuffering if RAM usage >= 60%
+      const _osMem = require('os');
+      const _usedPct = (_osMem.totalmem() - _osMem.freemem()) / _osMem.totalmem() * 100;
+      if (_usedPct >= 60) {
+        console.log(`[SF/Prebuffer] Memory at ${_usedPct.toFixed(1)}% (>=60%) — stopping after ${i}/${channels.length} channels`);
+        break;
+      }
       const batch = channels.slice(i, i + BATCH);
       batch.forEach(ch => {
         const mode = sfConfig.prebufferMode || 'library';
@@ -1826,7 +2627,16 @@ module.exports = function mountStreamForge(app, orion) {
   });
 
   // Pre-seg management endpoints
-  app.get('/api/sf/preseg/status', (req, res) => {
+  app.get('/api/sf/preseg/status', async (req, res) => {
+    if (_externalPresegEnabled()) {
+      try {
+        const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
+        const result = await _getFromPreseg('/status' + qs);
+        return res.json(result);
+      } catch (e) {
+        return res.status(502).json({ error: 'orion-preseg unreachable: ' + e.message });
+      }
+    }
     const done = Object.values(presegDb).filter(v=>v.status==='done').length;
     const processing = Object.values(presegDb).filter(v=>v.status==='processing').length;
     const error = Object.values(presegDb).filter(v=>v.status==='error').length;
@@ -1864,53 +2674,75 @@ module.exports = function mountStreamForge(app, orion) {
     res.json({ ok:true });
   });
 
-  app.post('/api/sf/preseg/queue-channel', (req, res) => {
+  app.post('/api/sf/preseg/queue-channel', async (req, res) => {
     const { channelId } = req.body;
     if (!channelId) return res.status(400).json({ error:'channelId required' });
     const ch = sfDb.channels.find(c=>c.id===channelId);
     if (!ch) return res.status(404).json({ error:'channel not found' });
 
-    let queued = 0;
-    // Queue all items for this channel's content
-    const queueItem = (item) => {
+    // [FORWARD_v1] Collect items first, then dispatch to either orion-preseg or in-process
+    const items = [];
+    const collectItem = (item) => {
       if (!item) return;
       const filePath = item.path || item.filePath;
-      if (filePath && !isPresegged(item.id)) {
-        queuePreseg(item.id, filePath);
-        queued++;
-      }
+      if (filePath) items.push({ mediaId: item.id, filePath });
     };
 
     if (ch.genreLoops?.length || ch.genreLoop) {
       const idx = getNetworkIndex();
       const loops = ch.genreLoops?.length ? ch.genreLoops : [ch.genreLoop];
       loops.forEach(l => {
-        const items = idx.get((l.genre||'').toLowerCase()) || [];
-        items.forEach(queueItem);
+        const inner = idx.get((l.genre||'').toLowerCase()) || [];
+        inner.forEach(collectItem);
       });
-    } else if (ch.seriesSchedule?.episodes?.length) {
-      // Try by mediaId first, fall back to title search
-      const showTitle = (ch.seriesSchedule.showTitle || ch.name || '').toLowerCase();
-      const allEps = getMediaCombined().filter(m =>
-        (m.seriesTitle||m.title||'').toLowerCase().includes(showTitle) ||
-        showTitle.includes((m.seriesTitle||m.title||'').toLowerCase())
-      );
-      if (allEps.length) {
-        allEps.forEach(queueItem);
-      } else {
+    } else if (ch.seriesSchedule) {
+      const showTitlesArr = Array.isArray(ch.seriesSchedule.showTitles)
+        ? ch.seriesSchedule.showTitles
+        : (ch.seriesSchedule.showTitle ? [ch.seriesSchedule.showTitle] : []);
+      const _norm = (x) => (x||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (showTitlesArr.length > 0) {
+        const targets = showTitlesArr.map(_norm);
+        const allEps = getMediaCombined().filter(m => {
+          if (m.season == null || m.episode == null) return false;
+          const t = _norm(m.seriesTitle || m.showName || m.title || m.filename);
+          return targets.some(target => t === target || t.startsWith(target));
+        });
+        console.log('[SF/Preseg] queue-channel ' + (ch.name||'?') + ': found ' + allEps.length + ' eps from ' + showTitlesArr.length + ' shows');
+        allEps.forEach(collectItem);
+      } else if (ch.seriesSchedule.episodes?.length) {
         ch.seriesSchedule.episodes.forEach(ep => {
           const item = getMediaById(ep.mediaId);
-          queueItem(item);
+          collectItem(item);
         });
       }
     } else if (ch.playout?.length) {
       ch.playout.forEach(b => {
         const item = getMediaById(b.mediaId);
-        queueItem(item);
+        collectItem(item);
       });
     }
 
-    res.json({ ok:true, queued });
+    // Dispatch
+    if (_externalPresegEnabled()) {
+      try {
+        const result = await _postToPreseg('/queue/bulk', { items, channelId });
+        console.log('[SF/Preseg] forwarded to orion-preseg: ' + JSON.stringify(result));
+        return res.json({ ok: true, delegated: 'orion-preseg', ...result });
+      } catch (e) {
+        console.error('[SF/Preseg] forward to orion-preseg failed:', e.message);
+        return res.status(502).json({ error: 'orion-preseg unreachable: ' + e.message });
+      }
+    } else {
+      // In-process fallback (legacy path)
+      let queued = 0;
+      for (const it of items) {
+        if (!isPresegged(it.mediaId)) {
+          queuePreseg(it.mediaId, it.filePath);
+          queued++;
+        }
+      }
+      return res.json({ ok: true, queued });
+    }
   });
 
   app.post('/api/sf/preseg/queue-all', (req, res) => {
@@ -1973,7 +2805,296 @@ module.exports = function mountStreamForge(app, orion) {
   }));
 
   // ── AI test ──────────────────────────────────────────────────────────────────
-  app.post('/api/sf/ai/test', async (req, res) => {
+  // === [ai_suggestions] AI-powered platform optimization advisor ===
+
+  async function _buildOrionSnapshot() {
+    const snap = { ts: new Date().toISOString() };
+    const _fs = require('fs');
+    const { execSync } = require('child_process');
+
+    // System: /proc reads
+    try {
+      const loadavg = _fs.readFileSync('/proc/loadavg', 'utf8').trim().split(' ').slice(0,3);
+      const mem = {};
+      _fs.readFileSync('/proc/meminfo', 'utf8').split('\n').forEach(l => {
+        const [k,v] = l.split(':'); if (v) mem[k.trim()] = parseInt(v.trim().split(/\s+/)[0]);
+      });
+      snap.system = {
+        loadAvg1m: parseFloat(loadavg[0]),
+        loadAvg5m: parseFloat(loadavg[1]),
+        loadAvg15m: parseFloat(loadavg[2]),
+        memUsedGb: +(((mem.MemTotal - mem.MemAvailable) / 1048576).toFixed(1)),
+        memTotalGb: +((mem.MemTotal / 1048576).toFixed(0)),
+        memPctUsed: +(((mem.MemTotal - mem.MemAvailable) / mem.MemTotal * 100).toFixed(0))
+      };
+    } catch (e) { snap.system = { error: e.message }; }
+
+    // GPUs
+    try {
+      const out = execSync(
+        'nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.encoder,utilization.decoder,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits',
+        { timeout: 3000 }
+      ).toString();
+      snap.gpus = out.trim().split('\n').filter(Boolean).map(line => {
+        const p = line.split(',').map(s => s.trim());
+        return {
+          idx: parseInt(p[0]), name: p[1],
+          util: parseInt(p[2])||0, enc: parseInt(p[3])||0, dec: parseInt(p[4])||0,
+          memUsedMb: parseInt(p[5])||0, memTotalMb: parseInt(p[6])||0, tempC: parseInt(p[7])||0
+        };
+      });
+    } catch (e) { snap.gpus = []; }
+
+    // Services
+    try {
+      snap.services = {};
+      for (const svc of ['orion','orion-preseg','orion-convert']) {
+        try {
+          const a = execSync(`systemctl is-active ${svc}`, { timeout: 1500 }).toString().trim();
+          snap.services[svc] = a;
+        } catch (e) {
+          snap.services[svc] = e.stdout ? e.stdout.toString().trim() : 'unknown';
+        }
+      }
+    } catch (e) {}
+
+    // Convert + preseg service status (HTTP to local services)
+    try {
+      const r = await fetch('http://127.0.0.1:3003/status', { signal: AbortSignal.timeout(2000) });
+      const d = await r.json();
+      snap.convertService = {
+        workers: d.workers, maxWorkers: d.maxWorkers, gpuLoad: d.gpuLoad,
+        done: d.done, processing: d.processing, queued: d.queued, error: d.error,
+        encoder: d.encoder, outputMode: d.outputMode, remaining10bit: d.remaining10bit
+      };
+    } catch (e) { snap.convertService = { error: 'unreachable' }; }
+
+    try {
+      const r = await fetch('http://127.0.0.1:3002/status', { signal: AbortSignal.timeout(2000) });
+      const d = await r.json();
+      snap.presegService = d;
+    } catch (e) { snap.presegService = { error: 'unreachable' }; }
+
+    // DB: hls_status, media_probe, convert_status
+    const db = _getOrionDbReadonly();
+    if (db) {
+      try {
+        const rows = db.prepare("SELECT status, kind, COUNT(*) as cnt FROM hls_status GROUP BY status, kind").all();
+        snap.hlsByStatusKind = {};
+        for (const r of rows) {
+          snap.hlsByStatusKind[r.status] = snap.hlsByStatusKind[r.status] || {};
+          snap.hlsByStatusKind[r.status][r.kind || 'unknown'] = r.cnt;
+        }
+      } catch (e) {}
+      try {
+        const rows = db.prepare("SELECT bitDepth, COUNT(*) as cnt FROM media_probe GROUP BY bitDepth").all();
+        snap.bitDepthCounts = {};
+        for (const r of rows) snap.bitDepthCounts[r.bitDepth || 'unknown'] = r.cnt;
+      } catch (e) {}
+      try {
+        const rows = db.prepare("SELECT status, COUNT(*) as cnt FROM convert_status GROUP BY status").all();
+        snap.convertByStatus = {};
+        for (const r of rows) snap.convertByStatus[r.status] = r.cnt;
+      } catch (e) {}
+      try {
+        const errs = db.prepare("SELECT mediaId, originalPath, error, doneAt FROM convert_status WHERE status='error' ORDER BY doneAt DESC LIMIT 5").all();
+        snap.recentConvertErrors = errs.map(e => ({
+          file: (e.originalPath || '').split('/').pop(),
+          err: (e.error || '').slice(0, 240)
+        }));
+      } catch (e) {}
+    }
+
+    // Library counts
+    try {
+      const all = getMediaCombined();
+      snap.library = {
+        total: all.length,
+        movies: all.filter(m => m.type === 'movie').length,
+        tvEpisodes: all.filter(m => m.season != null).length,
+        music: all.filter(m => m.type === 'music').length,
+        musicVideos: all.filter(m => m.type === 'musicVideo').length
+      };
+    } catch (e) {}
+
+    // Config: FULL sfConfig (so the AI can cross-reference hardware against settings)
+    // Redact secrets before sending
+    const _redactedConfig = JSON.parse(JSON.stringify(sfConfig || {}));
+    const _secretKeys = ['anthropicApiKey','openaiApiKey','openwebUIKey','customAiKey','xcPass','sdPassword'];
+    for (const k of _secretKeys) {
+      if (_redactedConfig[k]) _redactedConfig[k] = _redactedConfig[k].length > 0 ? '<set>' : '<empty>';
+    }
+    snap.config = _redactedConfig;
+
+    // Convert service full config
+    try {
+      const r = await fetch('http://127.0.0.1:3003/config', { signal: AbortSignal.timeout(2000) });
+      snap.convertServiceConfig = await r.json();
+    } catch (e) {}
+
+    // Preseg service full config
+    try {
+      const r = await fetch('http://127.0.0.1:3002/config', { signal: AbortSignal.timeout(2000) });
+      snap.presegServiceConfig = await r.json();
+    } catch (e) {}
+
+    // Recent journalctl per service (last 20 lines each, prioritizing errors)
+    try {
+      const { execSync } = require('child_process');
+      snap.recentLogs = {};
+      for (const svc of ['orion','orion-preseg','orion-convert']) {
+        try {
+          const log = execSync(
+            `journalctl -u ${svc} --no-pager -n 25 -o cat 2>/dev/null | grep -iE 'error|fail|warn|exception|crash' | tail -10`,
+            { timeout: 2500, shell: '/bin/bash' }
+          ).toString().trim();
+          snap.recentLogs[svc] = log ? log.split('\n').slice(-10) : [];
+        } catch (e) { snap.recentLogs[svc] = []; }
+      }
+    } catch (e) {}
+
+    // Disk usage for key mounts
+    try {
+      const { execSync } = require('child_process');
+      const df = execSync('df -h --output=source,size,used,avail,pcent,target 2>/dev/null | tail -n +2', { timeout: 2000 }).toString();
+      snap.disk = df.trim().split('\n').map(line => {
+        const p = line.trim().split(/\s+/);
+        return { source: p[0], size: p[1], used: p[2], avail: p[3], usedPct: p[4], target: p[5] };
+      }).filter(d => d.target && !d.target.startsWith('/run/') && !d.target.startsWith('/snap'));
+    } catch (e) {}
+
+    // HLS error sample (specific files that failed presegmentation)
+    if (db) {
+      try {
+        const errs = db.prepare("SELECT mediaId, filePath, error FROM hls_status WHERE status='error' ORDER BY updatedAt DESC LIMIT 5").all();
+        snap.recentHlsErrors = errs.map(e => ({
+          file: (e.filePath || '').split('/').pop(),
+          err: (e.error || '').slice(0, 240)
+        }));
+      } catch (e) {}
+    }
+
+    // Channel count (if accessible)
+    try {
+      if (sfDb && sfDb.channels) snap.channelCount = sfDb.channels.length;
+    } catch (e) {}
+
+    return snap;
+  }
+
+  const _AI_SUGGEST_SYSTEM_PROMPT = [
+    'You are a thorough SRE auditor for Orion, a self-hosted media server. Your job is to find EVERY noteworthy issue, misconfiguration, error, or optimization opportunity in the platform snapshot.',
+    '',
+    'ARCHITECTURE:',
+    '- Runs in LXC container on Proxmox',
+    '- Hardware: 48 CPU cores, 32 GB RAM, 4× NVIDIA Tesla P40 GPUs (Pascal NVENC)',
+    '- Storage: NFS mount of media library (eth0 network)',
+    '- Three services:',
+    '  * orion (port 3001): UI, library, channels, playout, EPG, transcode for playout',
+    '  * orion-preseg (port 3002): pre-segments media into HLS using NVDEC + NVENC',
+    '  * orion-convert (port 3003): 10-bit → 8-bit video conversion using NVDEC + scale_cuda + NVENC',
+    '- Worker count is intentionally constrained (typically 4) because NFS I/O coordination becomes the CPU bottleneck above that, not encoding.',
+    '',
+    'IMPORTANT MISREADINGS TO AVOID:',
+    '- nvidia-smi `utilization.gpu` (the `util` field) measures CUDA core usage, which video encoding does NOT use. It will look low (3-20%) even when GPUs are working hard. The real video work shows in `enc` (NVENC engine) and `dec` (NVDEC engine) — 30-60% there is healthy. Do NOT flag low `util` as a problem if `enc`/`dec` are active.',
+    '- A high conversion queue is not automatically a problem; this is a one-time library-wide conversion. The work just takes time.',
+    '- Idle preseg workers (workers: 0) is fine if the preseg queue is empty.',
+    '',
+    'YOUR AUDIT — be exhaustive, do NOT artificially limit count. Look at EVERY part of the snapshot:',
+    '',
+    '1. ERRORS — surface every error pattern. Look at recentConvertErrors, recentHlsErrors, recentLogs.{service}, services map. Note: ffmpeg errors with `code=null` typically mean the process was killed externally (SIGKILL), not a real bug — flag the pattern but note it.',
+    '',
+    '2. HARDWARE-CONFIG MISMATCHES — critically important. Cross-reference `gpus` (which lists NVIDIA Tesla P40s) against `config` and `convertServiceConfig`/`presegServiceConfig`. Examples to flag:',
+    '   - `config.hwAccel`: must be a NVIDIA-compatible value (cuda, nvenc) — AMD ("amf") or Intel ("qsv") is wrong on these GPUs',
+    '   - `config.gpuCount`: must equal the actual number of GPUs in the `gpus` array (probably 4)',
+    '   - `config.videoCodec`: should pair with the correct encoder (h264 → h264_nvenc; hevc → hevc_nvenc)',
+    '   - Encoder names: hevc_amf / h264_amf will fail on NVIDIA; flag them',
+    '',
+    '3. CONFIG ANOMALIES — flag any value that looks wrong, deprecated, placeholder, or contradictory:',
+    '   - Empty/missing required fields (e.g. baseUrl, xcUser if intended)',
+    '   - Default/placeholder values that should have been set',
+    '   - Counts that don\'t match (e.g. presegService.maxWorkers vs config.preseg.workers)',
+    '   - Suspicious values (e.g. maxResolution: "854x480" if the user expects HD)',
+    '',
+    '4. RESOURCE ISSUES — flag genuine resource problems:',
+    '   - GPU `tempC` ≥ 75°C (hot)',
+    '   - Memory usage above 85%',
+    '   - Disk mount above 90% used',
+    '   - Asymmetric GPU load (one GPU at 0% while others are working) — possible round-robin bug',
+    '',
+    '5. SERVICE HEALTH — flag any non-active service that should be running',
+    '',
+    '6. DATA CONSISTENCY — note things like:',
+    '   - bitDepthCounts.unknown > 0 (files without probe data)',
+    '   - hlsByStatusKind errors',
+    '   - convertByStatus error count',
+    '',
+    'OUTPUT FORMAT: Strict JSON only. No markdown code fences. No preamble. Schema:',
+    '{',
+    '  "summary": "1-2 sentence high-level state (mention concerning things)",',
+    '  "suggestions": [',
+    '    {',
+    '      "severity": "critical" | "warning" | "info",',
+    '      "title": "Short, specific title under 70 chars",',
+    '      "description": "What is wrong, why it matters, and the recommended fix (1-4 sentences)",',
+    '      "evidence": "Exact field paths and values from the snapshot — e.g. \\"config.hwAccel = amf, but gpus[0].name = Tesla P40\\"",',
+    '      "category": "errors" | "config" | "hardware" | "resources" | "performance" | "data"',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    'SEVERITY GUIDE:',
+    '- critical: actively blocking work, will fail when triggered, data loss possible, or fundamental misconfig',
+    '- warning: degraded performance, errors not yet blocking, sub-optimal',
+    '- info: noted but not urgent — could be improved, minor inefficiency',
+    '',
+    'Be exhaustive. Cite specific snapshot field paths in evidence. If you find 12 issues, return 12. Do not summarize multiple distinct issues into one item.'
+  ].join('\n');
+
+  app.post('/api/ai/suggestions/analyze', async (req, res) => {
+    try {
+      const snapshot = await _buildOrionSnapshot();
+      const userMsg = 'Here is the current Orion snapshot:\n\n' + JSON.stringify(snapshot, null, 2);
+      const text = await callAI(_AI_SUGGEST_SYSTEM_PROMPT, userMsg);
+      let raw = text.replace(/```json|```/g, '').trim();
+      const ji = raw.indexOf('{');
+      if (ji > 0) raw = raw.slice(ji);
+      const lastBrace = raw.lastIndexOf('}');
+      if (lastBrace > 0 && lastBrace < raw.length - 1) raw = raw.slice(0, lastBrace + 1);
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        return res.json({
+          ok: false,
+          error: 'AI returned malformed JSON',
+          rawSample: text.slice(0, 400),
+          snapshot
+        });
+      }
+      res.json({
+        ok: true,
+        summary: parsed.summary || '',
+        suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
+        snapshot,
+        ts: Date.now()
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // Lets the UI inspect the raw snapshot too (for debugging / "what does the AI see")
+  app.get('/api/ai/suggestions/snapshot', async (req, res) => {
+    try {
+      const snap = await _buildOrionSnapshot();
+      res.json(snap);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+    app.post('/api/sf/ai/test', async (req, res) => {
     try {
       const result = await callAI('You are a test assistant.', 'Reply with exactly: "AI connection OK"');
       res.json({ ok: true, message: `${sfConfig.aiProvider||'ai'} responded: "${result.slice(0,80)}"` });
@@ -1982,14 +3103,655 @@ module.exports = function mountStreamForge(app, orion) {
 
   // ── Config ──────────────────────────────────────────────────────────────────
   app.get('/api/sf/config', (req, res) => res.json(sfConfig));
-  app.put('/api/sf/config', (req, res) => {
-    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','outputProtocol','srtPort','rtspPort','rtmpPort','udpBase','udpPort','presegDir','presegTempDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
+  app.put('/api/sf/config', async (req, res) => {
+    const allowed = ['baseUrl','epgDaysAhead','xcUser','xcPass','videoCodec','videoProfile','hwAccel','hwAccelEnabled','hwDecode','gpuCount','videoBitrate','videoMaxBitrate','videoBufferSize','videoCrf','audioCodec','audioBitrate','audioChannels','audioLanguage','hlsSegmentSeconds','hlsListSize','hlsIdleTimeoutSecs','prebufferMode','adaptiveQuality','maxResolution','presegWorkers','outputProtocol','srtPort','rtspPort','rtmpPort','udpBase','udpPort','presegDir','presegTempDir','aiProvider','anthropicApiKey','openaiApiKey','openaiModel','ollamaUrl','ollamaModel','openwebUIUrl','openwebUIKey','openwebUIModel','customAiUrl','customAiKey','customAiModel','videoResolution','sdUsername','sdPassword','sdLineupId','sdAutoUpdate'];
     allowed.forEach(k => { if (req.body[k] !== undefined) sfConfig[k] = req.body[k]; });
-    saveJson(SF_CFG, sfConfig); res.json({ ok:true });
+    saveJson(SF_CFG, sfConfig);
+
+    // [FORWARD_v3] Mirror preseg-relevant fields to orion-preseg when externalized
+    if (_externalPresegEnabled()) {
+      const payload = {};
+      if (req.body.presegWorkers !== undefined) payload.workers = parseInt(req.body.presegWorkers, 10);
+      if (req.body.hwAccel !== undefined) payload.hwAccel = String(req.body.hwAccel).toLowerCase();
+      if (req.body.gpuCount !== undefined) payload.gpuCount = parseInt(req.body.gpuCount, 10);
+      if (Object.keys(payload).length > 0) {
+        try {
+          await _httpToPreseg('PUT', '/config', payload);
+          console.log('[SF/Preseg] mirrored config to orion-preseg:', JSON.stringify(payload));
+        } catch (e) {
+          console.error('[SF/Preseg] mirror config to orion-preseg failed:', e.message);
+        }
+      }
+    }
+    res.json({ ok:true });
   });
 
   // ── Channels ─────────────────────────────────────────────────────────────────
-  app.get('/api/sf/channels', (req, res) => res.json(sfDb.channels));
+  // [ENRICH_v2] /api/sf/channels — done from orion.db hls_status (the truth), transient state from orion-preseg
+  let _orionDbCache = null;
+  function _getOrionDbReadonly() {
+    if (_orionDbCache) return _orionDbCache;
+    try {
+      const Database = require('better-sqlite3');
+      const dbPath = process.env.ORION_DB || '/var/lib/orion/orion.db';
+      _orionDbCache = new Database(dbPath, { readonly: true, fileMustExist: true });
+      return _orionDbCache;
+    } catch (e) {
+      console.error('[SF/Channels] cannot open orion.db:', e.message);
+      return null;
+    }
+  }
+  app.get('/api/sf/channels', async (req, res) => {
+    const _norm = (x) => (x||'').toLowerCase().replace(/[^a-z0-9]/g, '');
+    // Resolve the list of mediaIds belonging to a channel (same logic as queue-channel)
+    const _channelMediaIds = (ch) => {
+      try {
+        if (ch.genreLoops?.length || ch.genreLoop) {
+          const idx = getNetworkIndex();
+          const loops = ch.genreLoops?.length ? ch.genreLoops : [ch.genreLoop];
+          const out = [];
+          for (const l of loops) {
+            const list = idx.get((l.genre||'').toLowerCase()) || [];
+            for (const m of list) if (m.id) out.push(m.id);
+          }
+          return out;
+        }
+        if (ch.seriesSchedule) {
+          const showTitlesArr = Array.isArray(ch.seriesSchedule.showTitles)
+            ? ch.seriesSchedule.showTitles
+            : (ch.seriesSchedule.showTitle ? [ch.seriesSchedule.showTitle] : []);
+          if (showTitlesArr.length > 0) {
+            const targets = showTitlesArr.map(_norm);
+            return getMediaCombined().filter(m => {
+              if (m.season == null || m.episode == null) return false;
+              const t = _norm(m.seriesTitle || m.showName || m.title || m.filename);
+              return targets.some(target => t === target || t.startsWith(target));
+            }).map(m => m.id).filter(Boolean);
+          }
+          if (ch.seriesSchedule.episodes?.length) {
+            return ch.seriesSchedule.episodes.map(e => e.id || e.mediaId).filter(Boolean);
+          }
+        }
+        if (ch.playout?.length) return ch.playout.map(p => p.mediaId).filter(Boolean);
+      } catch {}
+      return [];
+    };
+
+    // Load ALL done mediaIds from orion.db hls_status (1 query, hashmap lookup per channel)
+    let doneMids = new Set();
+    const odb = _getOrionDbReadonly();
+    if (odb) {
+      try {
+        const rows = odb.prepare("SELECT mediaId FROM hls_status WHERE status = 'done'").all();
+        for (const r of rows) doneMids.add(r.mediaId);
+      } catch (e) {
+        console.error('[SF/Channels] hls_status query failed:', e.message);
+      }
+    }
+
+    // Transient state (processing/queued/error) still comes from orion-preseg
+    let byChannel = {};
+    if (_externalPresegEnabled()) {
+      try { byChannel = await _getFromPreseg('/status/by-channel'); }
+      catch (e) { console.error('[SF/Channels] failed to fetch by-channel transient counts:', e.message); }
+    } else {
+      for (const mid in presegDb) {
+        const v = presegDb[mid];
+        const ch = v.channelId || '_none';
+        if (!byChannel[ch]) byChannel[ch] = { processing: 0, queued: 0, error: 0, skipped: 0 };
+        const s = v.status;
+        if (s === 'processing') byChannel[ch].processing++;
+        else if (s === 'queued') byChannel[ch].queued++;
+        else if (s === 'error') byChannel[ch].error++;
+        else if (s && s.indexOf('skipped') === 0) byChannel[ch].skipped++;
+      }
+    }
+
+    const enriched = sfDb.channels.map(ch => {
+      const mediaIds = _channelMediaIds(ch);
+      const total = mediaIds.length;
+      let done = 0;
+      for (const mid of mediaIds) if (doneMids.has(mid)) done++;
+      const counts = byChannel[ch.id] || {};
+      return {
+        ...ch,
+        presegStats: {
+          total,
+          done,
+          processing: counts.processing || 0,
+          queued:     counts.queued     || 0,
+          error:      counts.error      || 0,
+          skipped:    counts.skipped    || 0
+        }
+      };
+    });
+    res.json(enriched);
+  });
+  // === [services_v1] Service management — list, start, stop, restart ===
+  // === [convert_fwd] orion-convert HTTP forwarders ===
+  function _httpToConvert(method, urlPath, body) {
+    return new Promise((resolve, reject) => {
+      const http = require('http');
+      const data = body ? JSON.stringify(body) : null;
+      const req = http.request({
+        host: '127.0.0.1', port: 3003, path: urlPath, method,
+        headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}
+      }, (res) => {
+        let chunks = '';
+        res.on('data', (c) => chunks += c);
+        res.on('end', () => {
+          try { resolve({ status: res.statusCode, body: chunks ? JSON.parse(chunks) : null }); }
+          catch { resolve({ status: res.statusCode, body: chunks }); }
+        });
+      });
+      req.on('error', reject);
+      if (data) req.write(data);
+      req.end();
+    });
+  }
+  app.get('/api/sf/convert/status', async (req, res) => {
+    try { const r = await _httpToConvert('GET', '/status'); res.status(r.status).json(r.body); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.get('/api/sf/convert/items', async (req, res) => {
+    const q = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
+    try { const r = await _httpToConvert('GET', '/items' + q); res.status(r.status).json(r.body); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.post('/api/sf/convert/queue', async (req, res) => {
+    try { const r = await _httpToConvert('POST', '/queue', req.body); res.status(r.status).json(r.body); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.post('/api/sf/convert/queue/all-10bit', async (req, res) => {
+    try { const r = await _httpToConvert('POST', '/queue/all-10bit', req.body || {}); res.status(r.status).json(r.body); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.put('/api/sf/convert/config', async (req, res) => {
+    try { const r = await _httpToConvert('PUT', '/config', req.body); res.status(r.status).json(r.body); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.get('/api/sf/convert/config', async (req, res) => {
+    try { const r = await _httpToConvert('GET', '/config'); res.status(r.status).json(r.body); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+  app.delete('/api/sf/convert/item/:mediaId', async (req, res) => {
+    try { const r = await _httpToConvert('DELETE', '/item/' + req.params.mediaId); res.status(r.status).json(r.body); }
+    catch (e) { res.status(502).json({ error: e.message }); }
+  });
+
+
+  // ─── Encode Jobs (Video + Audio) ─────────────────────────────────
+  const encodeJobs = new Map(); // jobId -> job object
+  let encodeJobCounter = 0;
+  const ENCODE_MAX_JOBS_KEPT = 50;
+
+  function _cleanupEncodeJobs() {
+    if (encodeJobs.size <= ENCODE_MAX_JOBS_KEPT) return;
+    const arr = Array.from(encodeJobs.values()).sort((a, b) => b.startedAt - a.startedAt);
+    for (let i = ENCODE_MAX_JOBS_KEPT; i < arr.length; i++) {
+      if (arr[i].status !== 'running') encodeJobs.delete(arr[i].id);
+    }
+  }
+
+  function _buildVideoArgs(body) {
+    const { inputPath, encoder, preset, qualityCq, gpu, resolution, audio } = body;
+    const validEncoders = ['h264_nvenc', 'hevc_nvenc', 'libx264', 'libx265'];
+    if (!validEncoders.includes(encoder)) throw new Error('invalid video encoder');
+
+    const isNvenc = encoder.endsWith('_nvenc');
+    const validPresets = isNvenc
+      ? ['p1','p2','p3','p4','p5','p6','p7']
+      : ['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'];
+    const usePreset = validPresets.includes(preset) ? preset : (isNvenc ? 'p4' : 'medium');
+    const useQuality = Math.max(15, Math.min(35, Number(qualityCq) || 21));
+    const useGpu = isNvenc ? Math.max(0, Math.min(7, Number(gpu) || 0)) : null;
+    const validResolutions = ['original', '3840x2160', '1920x1080', '1280x720', '854x480'];
+    const useResolution = validResolutions.includes(resolution) ? resolution : 'original';
+    const validAudio = ['copy', 'aac_128k', 'ac3_640k'];
+    const useAudio = validAudio.includes(audio) ? audio : 'copy';
+
+    const args = [];
+    if (isNvenc) {
+      args.push('-hwaccel', 'cuda', '-hwaccel_device', String(useGpu));
+      args.push('-hwaccel_output_format', 'cuda');
+    }
+    args.push('-i', inputPath);
+
+    // NVENC h264/hevc on Pascal needs 8-bit output (yuv420p); use scale_cuda even when no resize
+    const filters = [];
+    if (isNvenc) {
+      if (useResolution !== 'original') {
+        const parts = useResolution.split('x');
+        filters.push('scale_cuda=' + parts[0] + ':' + parts[1] + ':format=yuv420p');
+      } else {
+        filters.push('scale_cuda=format=yuv420p');
+      }
+    } else if (useResolution !== 'original') {
+      const parts = useResolution.split('x');
+      filters.push('scale=' + parts[0] + ':' + parts[1]);
+    }
+    if (filters.length > 0) args.push('-vf', filters.join(','));
+
+    args.push('-c:v', encoder);
+    args.push('-preset', usePreset);
+    if (isNvenc) args.push('-cq', String(useQuality));
+    else args.push('-crf', String(useQuality));
+
+    if (useAudio === 'copy') args.push('-c:a', 'copy');
+    else if (useAudio === 'aac_128k') args.push('-c:a', 'aac', '-b:a', '128k');
+    else if (useAudio === 'ac3_640k') args.push('-c:a', 'ac3', '-b:a', '640k');
+
+    return {
+      args,
+      outputExt: '.mp4',
+      meta: { mediaType: 'video', encoder, preset: usePreset, qualityCq: useQuality, gpu: useGpu, resolution: useResolution, audio: useAudio },
+    };
+  }
+
+  function _buildAudioArgs(body) {
+    const { inputPath, encoder, bitrate, sampleRate, channels, compressionLevel } = body;
+    const validEncoders = ['aac', 'libmp3lame', 'flac', 'libopus', 'ac3'];
+    if (!validEncoders.includes(encoder)) throw new Error('invalid audio encoder');
+
+    const extByCodec = { aac: '.m4a', libmp3lame: '.mp3', flac: '.flac', libopus: '.opus', ac3: '.ac3' };
+    const outputExt = extByCodec[encoder];
+
+    const validBitrates = ['64k','96k','128k','160k','192k','256k','320k','640k'];
+    const useBitrate = validBitrates.includes(bitrate) ? bitrate : '192k';
+    const useSampleRate = (sampleRate && sampleRate !== 'source') ? String(sampleRate) : null;
+    const chMap = { mono: '1', stereo: '2', '5.1': '6' };
+    const useChannels = (channels && channels !== 'source' && chMap[channels]) ? chMap[channels] : null;
+    const useCompression = Math.max(0, Math.min(12, Number(compressionLevel) || 8));
+
+    const args = ['-i', inputPath, '-vn', '-c:a', encoder];
+
+    if (encoder === 'flac') {
+      args.push('-compression_level', String(useCompression));
+    } else {
+      args.push('-b:a', useBitrate);
+    }
+
+    if (useSampleRate) args.push('-ar', useSampleRate);
+    if (useChannels) args.push('-ac', useChannels);
+
+    return {
+      args,
+      outputExt,
+      meta: {
+        mediaType: 'audio', encoder,
+        bitrate: encoder === 'flac' ? null : useBitrate,
+        sampleRate: useSampleRate, channels: channels,
+        compressionLevel: encoder === 'flac' ? useCompression : null,
+      },
+    };
+  }
+
+  app.post('/api/sf/encode/start', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const { inputPath, outputPath } = body;
+      const mediaType = body.mediaType === 'audio' ? 'audio' : 'video';
+
+      if (!inputPath) return res.status(400).json({ error: 'inputPath is required' });
+      if (!fs.existsSync(inputPath)) return res.status(404).json({ error: 'input file not found: ' + inputPath });
+
+      let built;
+      try {
+        built = (mediaType === 'audio') ? _buildAudioArgs(body) : _buildVideoArgs(body);
+      } catch (e) {
+        return res.status(400).json({ error: e.message });
+      }
+
+      const ext = path.extname(inputPath);
+      const base = ext ? inputPath.slice(0, -ext.length) : inputPath;
+      const useOutput = outputPath || (base + '.encoded' + built.outputExt);
+
+      try { fs.mkdirSync(path.dirname(useOutput), { recursive: true }); } catch (e) {}
+
+      const finalArgs = built.args.slice();
+      finalArgs.push('-y', useOutput);
+
+      const ffmpeg = (typeof ffmpegPath === 'string' && ffmpegPath) ? ffmpegPath : 'ffmpeg';
+      const proc = spawn(ffmpeg, finalArgs);
+
+      const jobId = 'enc_' + Date.now() + '_' + (++encodeJobCounter);
+      const job = Object.assign({
+        id: jobId, inputPath, outputPath: useOutput,
+        pid: proc.pid, status: 'running',
+        progress: 0, timeSeconds: 0, durationSeconds: null,
+        stderr: '', startedAt: Date.now(), finishedAt: null,
+        exitCode: null, error: null,
+      }, built.meta);
+      encodeJobs.set(jobId, job);
+      _cleanupEncodeJobs();
+
+      proc.stderr.on('data', d => {
+        const text = d.toString();
+        job.stderr = (job.stderr + text).slice(-8192);
+        if (job.durationSeconds === null) {
+          const dm = text.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
+          if (dm) job.durationSeconds = (+dm[1] * 3600) + (+dm[2] * 60) + parseFloat(dm[3]);
+        }
+        const tms = text.match(/time=(\d+):(\d+):(\d+\.\d+)/g);
+        if (tms && tms.length) {
+          const last = tms[tms.length - 1].match(/time=(\d+):(\d+):(\d+\.\d+)/);
+          if (last) {
+            job.timeSeconds = (+last[1] * 3600) + (+last[2] * 60) + parseFloat(last[3]);
+            if (job.durationSeconds) job.progress = Math.min(100, (job.timeSeconds / job.durationSeconds) * 100);
+          }
+        }
+      });
+      proc.on('error', err => { job.status = 'error'; job.error = err.message; job.finishedAt = Date.now(); });
+      proc.on('exit', (code, signal) => {
+        job.finishedAt = Date.now();
+        job.exitCode = code;
+        if (job.status === 'cancelled') return;
+        if (code === 0) { job.status = 'done'; job.progress = 100; }
+        else {
+          job.status = 'error';
+          const lastLines = job.stderr.split('\n').filter(l => l.trim()).slice(-6).join(' | ');
+          job.error = signal ? ('Killed by ' + signal) : ('Exit ' + code + ': ' + lastLines.slice(0, 400));
+        }
+      });
+
+      res.json({ jobId, status: 'started', outputPath: useOutput, pid: proc.pid });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/sf/encode/jobs', (req, res) => {
+    const out = Array.from(encodeJobs.values())
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .map(j => {
+        const base = {
+          id: j.id, inputPath: j.inputPath, outputPath: j.outputPath,
+          mediaType: j.mediaType || 'video', encoder: j.encoder,
+          status: j.status, progress: j.progress,
+          timeSeconds: j.timeSeconds, durationSeconds: j.durationSeconds,
+          startedAt: j.startedAt, finishedAt: j.finishedAt,
+          error: j.error,
+        };
+        if ((j.mediaType || 'video') === 'video') {
+          return Object.assign(base, { preset: j.preset, qualityCq: j.qualityCq, gpu: j.gpu, resolution: j.resolution, audio: j.audio });
+        } else {
+          return Object.assign(base, { bitrate: j.bitrate, sampleRate: j.sampleRate, channels: j.channels, compressionLevel: j.compressionLevel });
+        }
+      });
+    res.json({ jobs: out });
+  });
+
+  app.delete('/api/sf/encode/jobs/:id', (req, res) => {
+    const job = encodeJobs.get(req.params.id);
+    if (!job) return res.status(404).json({ error: 'not found' });
+    if (job.status === 'running' && job.pid) {
+      try {
+        process.kill(job.pid, 'SIGTERM');
+        setTimeout(() => { try { process.kill(job.pid, 'SIGKILL'); } catch (_) {} }, 5000);
+      } catch (e) {}
+      job.status = 'cancelled';
+      job.finishedAt = Date.now();
+    } else if (job.status !== 'running') {
+      encodeJobs.delete(req.params.id);
+    }
+    res.json({ ok: true });
+  });
+
+  app.get('/api/services', (req, res) => {
+    try {
+      const { execSync } = require('child_process');
+      const cfgRoot = JSON.parse(fs.readFileSync('/var/lib/orion/config.json', 'utf8'));
+      const svcs = cfgRoot.services || {};
+      const out = [];
+      for (const name of Object.keys(svcs)) {
+        const svc = svcs[name] || {};
+        let active = false, enabled = false;
+        if (svc.systemdUnit) {
+          try { active = execSync(`systemctl is-active ${svc.systemdUnit}`, { encoding: 'utf8', stdio: ['ignore','pipe','ignore'] }).trim() === 'active'; } catch {}
+          try { enabled = execSync(`systemctl is-enabled ${svc.systemdUnit}`, { encoding: 'utf8', stdio: ['ignore','pipe','ignore'] }).trim() === 'enabled'; } catch {}
+        }
+        out.push({
+          name,
+          description: svc.description || name,
+          port: svc.port || null,
+          systemdUnit: svc.systemdUnit || null,
+          configEnabled: svc.enabled !== false,
+          active,
+          enabledOnBoot: enabled
+        });
+      }
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // === [system_gpus] live per-GPU stats from nvidia-smi (cached 2s) ===
+  let _gpuStatsCache = null;
+  let _gpuStatsCacheAt = 0;
+  app.get('/api/system/gpus', (req, res) => {
+    const now = Date.now();
+    if (_gpuStatsCache && (now - _gpuStatsCacheAt) < 2000) return res.json(_gpuStatsCache);
+    const { exec } = require('child_process');
+    exec(
+      'nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.encoder,utilization.decoder,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits',
+      { timeout: 3000 },
+      (err, stdout) => {
+        if (err) return res.json([]); // no GPUs / nvidia-smi missing — empty array, UI handles
+        try {
+          const gpus = stdout.trim().split('\n').filter(Boolean).map(line => {
+            const parts = line.split(',').map(s => s.trim());
+            return {
+              index: parseInt(parts[0], 10),
+              name: parts[1],
+              utilization: parseInt(parts[2], 10) || 0,
+              encoder: parseInt(parts[3], 10) || 0,
+              decoder: parseInt(parts[4], 10) || 0,
+              memoryUsedMb: parseInt(parts[5], 10) || 0,
+              memoryTotalMb: parseInt(parts[6], 10) || 0,
+              temperature: parseInt(parts[7], 10) || 0
+            };
+          });
+          _gpuStatsCache = gpus;
+          _gpuStatsCacheAt = now;
+          res.json(gpus);
+        } catch (e) {
+          res.json([]);
+        }
+      }
+    );
+  });
+
+    // === [system_stats] /proc-based CPU/memory/disk/network stats (cached 1s) ===
+  const _fs = require('fs');
+  let _statsCache = null, _statsCacheAt = 0;
+  let _lastCpuSample = null, _lastDiskSample = null, _lastNetSample = null;
+
+  function _readCpuStat() {
+    const out = {};
+    try {
+      _fs.readFileSync('/proc/stat', 'utf8').split('\n').forEach(line => {
+        const m = line.match(/^(cpu\d*)\s+(.+)$/);
+        if (!m) return;
+        const f = m[2].trim().split(/\s+/).map(Number);
+        const total = f.slice(0, 8).reduce((a, b) => a + (b || 0), 0);
+        const idle = (f[3] || 0) + (f[4] || 0);
+        out[m[1]] = { total, idle };
+      });
+    } catch (e) {}
+    return out;
+  }
+
+  function _readMemInfo() {
+    const m = {};
+    try {
+      _fs.readFileSync('/proc/meminfo', 'utf8').split('\n').forEach(line => {
+        const [k, v] = line.split(':');
+        if (!v) return;
+        m[k.trim()] = parseInt(v.trim().split(/\s+/)[0], 10) * 1024;
+      });
+    } catch (e) {}
+    return {
+      total:      m.MemTotal || 0,
+      available:  m.MemAvailable || 0,
+      free:       m.MemFree || 0,
+      cached:    (m.Cached || 0) + (m.Buffers || 0),
+      swapTotal:  m.SwapTotal || 0,
+      swapFree:   m.SwapFree || 0
+    };
+  }
+
+  function _readDiskStats() {
+    const out = {};
+    try {
+      _fs.readFileSync('/proc/diskstats', 'utf8').split('\n').forEach(line => {
+        const f = line.trim().split(/\s+/);
+        if (f.length < 14) return;
+        const name = f[2];
+        // Real block devices only
+        if (!/^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+|mmcblk\d+|xvd[a-z]+)$/.test(name)) return;
+        out[name] = {
+          readSectors:  parseInt(f[5], 10) || 0,
+          writeSectors: parseInt(f[9], 10) || 0
+        };
+      });
+    } catch (e) {}
+    return out;
+  }
+
+  function _readNetStats() {
+    const out = {};
+    try {
+      const lines = _fs.readFileSync('/proc/net/dev', 'utf8').split('\n').slice(2);
+      lines.forEach(line => {
+        const m = line.match(/^\s*(\S+):\s*(.+)$/);
+        if (!m) return;
+        const name = m[1];
+        if (name === 'lo') return;
+        const f = m[2].trim().split(/\s+/).map(Number);
+        out[name] = { rxBytes: f[0] || 0, txBytes: f[8] || 0 };
+      });
+    } catch (e) {}
+    return out;
+  }
+
+  app.get('/api/system/stats', (req, res) => {
+    const now = Date.now();
+    if (_statsCache && (now - _statsCacheAt) < 1000) return res.json(_statsCache);
+
+    const cpuSample  = _readCpuStat();
+    const diskSample = _readDiskStats();
+    const netSample  = _readNetStats();
+    const mem        = _readMemInfo();
+
+    // CPU delta
+    let cpuOverall = 0;
+    const cores = [];
+    if (_lastCpuSample) {
+      for (const key of Object.keys(cpuSample)) {
+        const cur = cpuSample[key];
+        const prev = _lastCpuSample[key];
+        if (!prev) continue;
+        const td = cur.total - prev.total;
+        const id = cur.idle - prev.idle;
+        const usage = td > 0 ? Math.max(0, Math.min(100, (1 - id / td) * 100)) : 0;
+        if (key === 'cpu') cpuOverall = usage;
+        else cores.push({ index: parseInt(key.slice(3), 10), usage });
+      }
+    }
+    cores.sort((a, b) => a.index - b.index);
+    _lastCpuSample = cpuSample;
+
+    // Disk delta
+    const disks = [];
+    if (_lastDiskSample) {
+      const dt = (now - _lastDiskSample.t) / 1000;
+      for (const name of Object.keys(diskSample)) {
+        const cur = diskSample[name], prev = _lastDiskSample.data[name];
+        if (!prev || dt <= 0) continue;
+        disks.push({
+          name,
+          readMbS:  ((cur.readSectors  - prev.readSectors)  * 512) / dt / 1e6,
+          writeMbS: ((cur.writeSectors - prev.writeSectors) * 512) / dt / 1e6
+        });
+      }
+    }
+    _lastDiskSample = { t: now, data: diskSample };
+
+    // Network delta
+    const nets = [];
+    if (_lastNetSample) {
+      const ndt = (now - _lastNetSample.t) / 1000;
+      for (const name of Object.keys(netSample)) {
+        const cur = netSample[name], prev = _lastNetSample.data[name];
+        if (!prev || ndt <= 0) continue;
+        nets.push({
+          name,
+          rxMbS: (cur.rxBytes - prev.rxBytes) / ndt / 1e6,
+          txMbS: (cur.txBytes - prev.txBytes) / ndt / 1e6
+        });
+      }
+    }
+    _lastNetSample = { t: now, data: netSample };
+
+    _statsCache = { cpu: { overall: cpuOverall, cores }, memory: mem, disk: disks, network: nets };
+    _statsCacheAt = now;
+    res.json(_statsCache);
+  });
+
+    app.post('/api/services/:name/:action', (req, res) => {
+    const { name, action } = req.params;
+    if (!['start', 'stop', 'restart', 'enable', 'disable'].includes(action)) {
+      return res.status(400).json({ error: 'action must be start|stop|restart|enable|disable' });
+    }
+    try {
+      const cfgRoot = JSON.parse(fs.readFileSync('/var/lib/orion/config.json', 'utf8'));
+      const svc = ((cfgRoot.services || {})[name]) || null;
+      if (!svc || !svc.systemdUnit) return res.status(404).json({ error: 'service not found or no systemd unit' });
+      // Safety: only allow orion-* units
+      if (!/^orion-[a-z0-9_-]+\.service$/.test(svc.systemdUnit)) {
+        return res.status(403).json({ error: 'unit not whitelisted' });
+      }
+      const { exec } = require('child_process');
+      exec(`sudo systemctl ${action} ${svc.systemdUnit}`, { timeout: 30000 }, (err, stdout, stderr) => {
+        if (err) {
+          console.error(`[services] systemctl ${action} ${svc.systemdUnit} failed:`, stderr || err.message);
+          return res.status(500).json({ error: stderr || err.message });
+        }
+        // Also reflect in config.json for "enable" / "disable"
+        if (action === 'enable' || action === 'disable') {
+          try {
+            cfgRoot.services[name].enabled = (action === 'enable');
+            fs.writeFileSync('/var/lib/orion/config.json', JSON.stringify(cfgRoot, null, 2));
+          } catch (e) { console.error('[services] config write failed:', e.message); }
+        }
+        res.json({ ok: true, action, service: name, unit: svc.systemdUnit });
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/services/:name/logs', (req, res) => {
+    const { name } = req.params;
+    const lines = parseInt(req.query.lines, 10) || 50;
+    try {
+      const cfgRoot = JSON.parse(fs.readFileSync('/var/lib/orion/config.json', 'utf8'));
+      const svc = ((cfgRoot.services || {})[name]) || null;
+      if (!svc || !svc.systemdUnit) return res.status(404).json({ error: 'service not found' });
+      if (!/^orion-[a-z0-9_-]+\.service$/.test(svc.systemdUnit)) {
+        return res.status(403).json({ error: 'unit not whitelisted' });
+      }
+      const { exec } = require('child_process');
+      exec(`sudo journalctl -u ${svc.systemdUnit} --no-pager -n ${lines} -o cat`, { timeout: 5000 }, (err, stdout) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ unit: svc.systemdUnit, lines: stdout.split('\n') });
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get('/api/sf/channels/:id', (req, res) => {
     const ch = sfDb.channels.find(c=>c.id===req.params.id);
     if (!ch) return res.status(404).json({ error:'not found' });
@@ -2312,11 +4074,16 @@ module.exports = function mountStreamForge(app, orion) {
     res.json({ ok:true, hlsUrl:`/sf/hls/${ch.id}/index.m3u8` });
   });
   app.delete('/api/sf/channels/:id/watch', (req, res) => {
-    const s = hlsSessions[req.params.id]; if (s) { try{s.proc.kill('SIGKILL');}catch{} delete hlsSessions[req.params.id]; }
+    // [PATCHED] No SIGKILL on DELETE /watch
     res.json({ ok:true });
   });
 
   // ── HLS serving ─────────────────────────────────────────────────────────────
+  // [PATCHED] /sf/stream/:id — IPTV M3U URL pattern; redirect to working HLS endpoint
+  app.get('/sf/stream/:channelId', (req, res) => {
+    res.redirect(302, '/sf/hls/' + req.params.channelId + '/index.m3u8');
+  });
+
   app.get('/sf/hls/:channelId/index.m3u8', (req, res) => {
     // Auto-start session if not running (e.g. server just restarted, channel not yet pre-buffered)
     const chk = sfDb.channels.find(c=>c.id===req.params.channelId);
@@ -2333,7 +4100,7 @@ module.exports = function mountStreamForge(app, orion) {
     let waited = 0;
     const tryServe = () => {
       if (fs.existsSync(m3u8)) { res.setHeader('Content-Type','application/vnd.apple.mpegurl'); res.setHeader('Cache-Control','no-cache'); res.setHeader('Access-Control-Allow-Origin','*'); return res.sendFile(m3u8); }
-      waited+=50; if(waited>5000) return res.status(503).send('HLS not ready — startup timeout');
+      waited+=50; if(waited>60000) return res.status(503).send('HLS not ready — startup timeout');
       setTimeout(tryServe, 50);
     };
     tryServe();
@@ -2560,14 +4327,25 @@ module.exports = function mountStreamForge(app, orion) {
   app.get('/sf/xmltv.xml', (req, res) => {
     res.setHeader('Content-Type','application/xml; charset=utf-8');
     const now=Date.now(), to=now+(sfConfig.epgDaysAhead||7)*86400000;
+    // [PATCHED] proper XML escape + enriched programme fields for Tivimate
+    const esc = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="Orion/StreamForge">\n`;
     sfDb.channels.filter(c=>c.active).forEach(ch => {
-      xml += `  <channel id="${ch.id}"><display-name>${ch.name}</display-name>${ch.logo?`<icon src="${ch.logo}"/>`:''}${ch.num?`<lcn>${ch.num}</lcn>`:''}</channel>\n`;
+      xml += `  <channel id="${esc(ch.id)}"><display-name>${esc(ch.name)}</display-name>${ch.logo?`<icon src="${esc(ch.logo)}"/>`:''}${ch.num?`<lcn>${esc(ch.num)}</lcn>`:''}</channel>\n`;
     });
     sfDb.channels.filter(c=>c.active).forEach(ch => {
       const progs = buildSchedule(ch, now, to);
       progs.forEach(p => {
-        xml += `  <programme channel="${ch.id}" start="${fmtDate(p.start)}" stop="${fmtDate(p.end)}"><title>${p.title}</title>${p.desc?`<desc>${p.desc}</desc>`:''}</programme>\n`;
+        let pgm = `  <programme channel="${esc(ch.id)}" start="${fmtDate(p.start)}" stop="${fmtDate(p.end)}">`;
+        pgm += `<title>${esc(p.title)}</title>`;
+        if (p.desc) pgm += `<desc>${esc(p.desc)}</desc>`;
+        if (p.season != null && p.episode != null) {
+          pgm += `<episode-num system="onscreen">S${String(p.season).padStart(2,'0')}E${String(p.episode).padStart(2,'0')}</episode-num>`;
+          pgm += `<episode-num system="xmltv_ns">${(p.season||1)-1}.${(p.episode||1)-1}.0/1</episode-num>`;
+        }
+        if (p.icon) pgm += `<icon src="${esc(p.icon)}"/>`;
+        pgm += `</programme>\n`;
+        xml += pgm;
       });
     });
     xml += '</tv>'; res.send(xml);
@@ -3299,6 +5077,80 @@ Do not repeat any show. Use all available shows spread across the week.`;
     saveAll(); res.json({ ok:true, added:newQueue.length });
   });
 
+  // ── Channel programming editor [PATCHED] ────────────────────────────────────
+  app.get('/api/sf/channels/:id/programming', (req, res) => {
+    const ch = sfDb.channels.find(c => c.id === req.params.id);
+    if (!ch) return res.status(404).json({ error: 'Channel not found' });
+    res.json({
+      id: ch.id, name: ch.name,
+      showTitles: ch.seriesSchedule?.showTitles || (ch.seriesSchedule?.showTitle ? [ch.seriesSchedule.showTitle] : []),
+      timeBlocks: ch.timeBlocks || [],
+      libraryLoop: ch.libraryLoop || null,
+      genreLoop: ch.genreLoop || null,
+      playoutCount: (ch.playout || []).length,
+    });
+  });
+  app.post('/api/sf/channels/:id/programming/show', (req, res) => {
+    const { showTitle } = req.body || {};
+    if (!showTitle) return res.status(400).json({ error: 'showTitle required' });
+    const idx = sfDb.channels.findIndex(c => c.id === req.params.id);
+    if (idx < 0) return res.status(404).json({ error: 'Channel not found' });
+    const ch = sfDb.channels[idx];
+    const norm = x => (x||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const target = norm(showTitle);
+    const found = (orionDb?.tvShows || []).some(s => norm(s.seriesTitle || '') === target);
+    if (!found) return res.status(404).json({ error: 'Show "' + showTitle + '" not found in library' });
+    if (!ch.seriesSchedule) ch.seriesSchedule = { showTitles: [], episodes: [{ mediaId:'placeholder', season:1, episode:1, duration:1800, title:'placeholder' }], rotationMode: 'mixed' };
+    if (!Array.isArray(ch.seriesSchedule.showTitles)) ch.seriesSchedule.showTitles = ch.seriesSchedule.showTitle ? [ch.seriesSchedule.showTitle] : [];
+    if (!ch.seriesSchedule.showTitles.includes(showTitle)) ch.seriesSchedule.showTitles.push(showTitle);
+    saveAll();
+    try { ensureChannelSchedule(ch, true); } catch(e) { console.warn('[SF] regen on show-add failed:', e.message); }
+    if (hlsSessions[req.params.id]) { try { hlsSessions[req.params.id].proc.kill('SIGTERM'); } catch {}; delete hlsSessions[req.params.id]; }
+    res.json({ ok: true, showTitles: ch.seriesSchedule.showTitles });
+  });
+  app.post('/api/sf/channels/:id/programming/timeblock', (req, res) => {
+    const { start, end, showTitle, daysOfWeek } = req.body || {};
+    if (!start || !end || !showTitle) return res.status(400).json({ error: 'start, end, showTitle required' });
+    if (!/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end)) return res.status(400).json({ error: 'start/end must be HH:MM' });
+    const idx = sfDb.channels.findIndex(c => c.id === req.params.id);
+    if (idx < 0) return res.status(404).json({ error: 'Channel not found' });
+    const ch = sfDb.channels[idx];
+    const norm = x => (x||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+    const target = norm(showTitle);
+    const found = (orionDb?.tvShows || []).some(s => norm(s.seriesTitle || '') === target);
+    if (!found) return res.status(404).json({ error: 'Show "' + showTitle + '" not found in library' });
+    if (!Array.isArray(ch.timeBlocks)) ch.timeBlocks = [];
+    ch.timeBlocks.push({ start, end, showTitle, daysOfWeek: daysOfWeek || 'daily' });
+    saveAll();
+    try { ensureChannelSchedule(ch, true); } catch(e) { console.warn('[SF] regen on tb-add failed:', e.message); }
+    if (hlsSessions[req.params.id]) { try { hlsSessions[req.params.id].proc.kill('SIGTERM'); } catch {}; delete hlsSessions[req.params.id]; }
+    res.json({ ok: true, timeBlocks: ch.timeBlocks });
+  });
+  app.delete('/api/sf/channels/:id/programming/show/:title', (req, res) => {
+    const idx = sfDb.channels.findIndex(c => c.id === req.params.id);
+    if (idx < 0) return res.status(404).json({ error: 'Channel not found' });
+    const ch = sfDb.channels[idx];
+    const t = decodeURIComponent(req.params.title);
+    if (ch.seriesSchedule?.showTitles) ch.seriesSchedule.showTitles = ch.seriesSchedule.showTitles.filter(s => s !== t);
+    if (Array.isArray(ch.timeBlocks)) ch.timeBlocks = ch.timeBlocks.filter(tb => tb.showTitle !== t);
+    saveAll();
+    try { ensureChannelSchedule(ch, true); } catch(e) { console.warn('[SF] regen on show-del failed:', e.message); }
+    if (hlsSessions[req.params.id]) { try { hlsSessions[req.params.id].proc.kill('SIGTERM'); } catch {}; delete hlsSessions[req.params.id]; }
+    res.json({ ok: true, showTitles: ch.seriesSchedule?.showTitles || [], timeBlocks: ch.timeBlocks || [] });
+  });
+  app.delete('/api/sf/channels/:id/programming/timeblock/:idx', (req, res) => {
+    const cIdx = sfDb.channels.findIndex(c => c.id === req.params.id);
+    if (cIdx < 0) return res.status(404).json({ error: 'Channel not found' });
+    const ch = sfDb.channels[cIdx];
+    const tbIdx = parseInt(req.params.idx, 10);
+    if (!Array.isArray(ch.timeBlocks) || isNaN(tbIdx) || tbIdx < 0 || tbIdx >= ch.timeBlocks.length) return res.status(404).json({ error: 'Time block index out of range' });
+    ch.timeBlocks.splice(tbIdx, 1);
+    saveAll();
+    try { ensureChannelSchedule(ch, true); } catch(e) { console.warn('[SF] regen on tb-del failed:', e.message); }
+    if (hlsSessions[req.params.id]) { try { hlsSessions[req.params.id].proc.kill('SIGTERM'); } catch {}; delete hlsSessions[req.params.id]; }
+    res.json({ ok: true, timeBlocks: ch.timeBlocks });
+  });
+
   // ── Create channels from EPG ─────────────────────────────────────────────────
   app.post('/api/sf/channels/create-from-epg', async (req, res) => {
     const { epgChannelIds } = req.body;
@@ -3476,3 +5328,53 @@ Do not repeat any show. Use all available shows spread across the week.`;
 
   console.log('[SF] All routes mounted at /api/sf/* and /sf/*');
 };
+
+// ── PlayoutEngine boot ────────────────────────────────────────────────────────
+setTimeout(() => {
+  try {
+    if (typeof playoutEngine !== 'undefined' && playoutEngine.init && !playoutEngine._inited) {
+      const channels = (typeof sfDb !== 'undefined' && sfDb && sfDb.channels) ? sfDb.channels : [];
+      playoutEngine.init({
+        channels: channels,
+        getChannels: () => channels,
+        getMediaById: (id) => {
+          try {
+            if (typeof _mediaById !== 'undefined' && _mediaById && _mediaById.get) return _mediaById.get(id);
+            if (typeof getMediaCombined === 'function') return getMediaCombined().find(m => m.id === id);
+          } catch (e) {}
+          return null;
+        },
+        getMediaCombined: typeof getMediaCombined === 'function' ? getMediaCombined : () => [],
+        pickNextEpisode: typeof pickNextEpisode === 'function' ? pickNextEpisode : null,
+      });
+      playoutEngine._inited = true;
+      if (playoutEngine.start) playoutEngine.start();
+      console.log('[PlayoutEngine] booted (' + channels.length + ' channels)');
+    }
+  } catch (e) {
+    console.error('[PlayoutEngine] init failed:', e && e.message ? e.message : e);
+  }
+}, 10000);
+
+// === [DBOPT_v1] cleanupPresegOrphans ===
+;(function attachCleanup(){
+  if (!module.exports || typeof module.exports !== 'object') return;
+  module.exports.cleanupPresegOrphans = function cleanupPresegOrphans() {
+    const fsL = require('fs');
+    const pathL = require('path');
+    let dropped = 0;
+    if (typeof presegDb !== 'object' || !presegDb) return 0;
+    for (const mid of Object.keys(presegDb)) {
+      const fp = presegDb[mid] && presegDb[mid].filePath;
+      if (fp && !fsL.existsSync(fp)) { delete presegDb[mid]; dropped++; }
+    }
+    if (dropped > 0) {
+      try {
+        const dir = (typeof SF_DIR !== 'undefined') ? SF_DIR : '/var/lib/orion/sf';
+        fsL.writeFileSync(pathL.join(dir, 'preseg.json'), JSON.stringify(presegDb));
+      } catch(e) {}
+    }
+    console.log('[StreamForge] cleanupPresegOrphans dropped ' + dropped);
+    return dropped;
+  };
+})();

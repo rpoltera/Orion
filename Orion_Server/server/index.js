@@ -83,6 +83,14 @@ function saveBlockedVideoIds()  { try { fs.writeFileSync(PATHS.BLOCKED_VIDEO_IDS
 // Hardware detection
 async function detectHardwareAccel() {
   if (cachedEncoder) return cachedEncoder;
+  // NVIDIA short-circuit (Pascal P40 prefers NVENC, AMF would be wrong)
+  try {
+    if (require('fs').existsSync('/dev/nvidia0')) {
+      cachedEncoder = 'h264_nvenc';
+      console.log('[Server] Hardware encoder: h264_nvenc (NVIDIA detected via /dev/nvidia0)');
+      return 'h264_nvenc';
+    }
+  } catch (e) {}
   return new Promise((resolve) => {
     ffmpeg.getAvailableEncoders((err, encoders) => {
       if (err) { cachedEncoder = 'libx264'; return resolve('libx264'); }
@@ -332,8 +340,88 @@ async function start() {
       if (backed) console.log(`[Scheduler] Backup written: ${backed}`);
 
     } else if (type.includes('optimize')) {
-      const OrionDB = require('./database');
-      OrionDB.optimize();
+      // [DBOPT_v1] full cleanup
+      const fs = require('fs');
+      const pathMod = require('path');
+      const summary = { startTime: Date.now() };
+      for (const libType of ['movies','tvShows','music','musicVideos']) {
+        const before = (db[libType] || []).length;
+        if (!before) continue;
+        const kept = (db[libType] || []).filter(it => {
+          const fp = it && (it.filePath || it.path);
+          if (!fp) return true;
+          try { return fs.existsSync(fp); } catch { return true; }
+        });
+        const dropped = before - kept.length;
+        if (dropped > 0) {
+          db[libType] = kept;
+          saveDB(true, libType);
+          summary['lib_' + libType + '_dropped'] = dropped;
+        }
+      }
+      try {
+        const sf = require('./streamforge');
+        if (typeof sf.cleanupPresegOrphans === 'function') {
+          summary.preseg_dropped = sf.cleanupPresegOrphans();
+        }
+      } catch (e) { console.error('[Scheduler/optimize] preseg:', e.message); }
+      const SF_DIR = '/var/lib/orion/sf';
+      try {
+        const tempBase = pathMod.join(SF_DIR, 'preseg_temp');
+        const queuePath = pathMod.join(SF_DIR, 'preseg-queue.json');
+        let activeIds = new Set();
+        if (fs.existsSync(queuePath)) {
+          try {
+            const q = JSON.parse(fs.readFileSync(queuePath, 'utf8'));
+            if (Array.isArray(q)) for (const it of q) if (it && it.mediaId) activeIds.add(it.mediaId);
+          } catch {}
+        }
+        if (fs.existsSync(tempBase)) {
+          const cutoff = Date.now() - 24*60*60*1000;
+          let deleted = 0;
+          for (const ent of fs.readdirSync(tempBase, { withFileTypes: true })) {
+            if (!ent.isDirectory()) continue;
+            if (activeIds.has(ent.name)) continue;
+            const dp = pathMod.join(tempBase, ent.name);
+            try {
+              const st = fs.statSync(dp);
+              if (st.mtimeMs < cutoff) { fs.rmSync(dp, { recursive: true, force: true }); deleted++; }
+            } catch {}
+          }
+          summary.preseg_temp_deleted = deleted;
+        }
+      } catch (e) { console.error('[Scheduler/optimize] preseg_temp:', e.message); }
+      try {
+        const presegBase = pathMod.join(SF_DIR, 'preseg');
+        const presegPath = pathMod.join(SF_DIR, 'preseg.json');
+        let knownIds = new Set();
+        if (fs.existsSync(presegPath)) {
+          try {
+            const pdb = JSON.parse(fs.readFileSync(presegPath, 'utf8'));
+            knownIds = new Set(Object.keys(pdb));
+          } catch {}
+        }
+        if (fs.existsSync(presegBase)) {
+          let deleted = 0;
+          for (const ent of fs.readdirSync(presegBase, { withFileTypes: true })) {
+            if (!ent.isDirectory()) continue;
+            if (knownIds.has(ent.name)) continue;
+            const dp = pathMod.join(presegBase, ent.name);
+            try { fs.rmSync(dp, { recursive: true, force: true }); deleted++; } catch {}
+          }
+          summary.preseg_orphan_deleted = deleted;
+        }
+      } catch (e) { console.error('[Scheduler/optimize] preseg orphans:', e.message); }
+      try {
+        const OrionDB = require('./database');
+        const dbStats = OrionDB.optimize();
+        if (dbStats) {
+          summary.vacuum_ok = dbStats.vacuumOk;
+          summary.vacuum_bytes_freed = (dbStats.vacuumBefore || 0) - (dbStats.vacuumAfter || 0);
+        }
+      } catch (e) { console.error('[Scheduler/optimize] DB optimize:', e.message); }
+      summary.durationMs = Date.now() - summary.startTime;
+      console.log('[Scheduler/optimize] DONE: ' + JSON.stringify(summary));
 
     } else if (type.includes('clearlog') || type.includes('clear debug')) {
       console.log('[Scheduler] Debug log cleared');
@@ -371,6 +459,37 @@ async function start() {
   };
 
   try { api.use('/', require('./routes/scheduler')({ ...deps(), runTask })); } catch(e) { console.error('[Routes] scheduler failed:', e.message); }
+
+  // SCHEDULER_TICK_v1 — fire due tasks every 60s
+  setInterval(() => {
+    try {
+      const tasks = db.scheduledTasks || [];
+      const now = new Date();
+      const curHour = now.getHours();
+      const curMin  = now.getMinutes();
+      const minuteStart = new Date(now); minuteStart.setSeconds(0,0);
+      const curDate = now.toISOString().slice(0,10);
+      for (const task of tasks) {
+        if (!task.enabled) continue;
+        const st = task.scheduleTime || (task.hour!=null ? `${String(task.hour).padStart(2,'0')}:${String(task.minute||0).padStart(2,'0')}` : '03:00');
+        const [taskHour, taskMin] = st.split(':').map(Number);
+        if (curHour !== taskHour || curMin !== taskMin) continue;
+        const lastRun = task.lastRun ? new Date(task.lastRun) : null;
+        if (lastRun && lastRun >= minuteStart) continue;  // already ran this minute
+        const sched = (task.schedule || task.frequency || 'daily').toLowerCase();
+        let shouldRun = false;
+        if (sched === 'hourly')      shouldRun = !lastRun || (now - lastRun) > 50*60*1000;
+        else if (sched === 'daily')  shouldRun = !lastRun || lastRun.toISOString().slice(0,10) !== curDate;
+        else if (sched === 'weekly') shouldRun = !lastRun || (now - lastRun) > 6.5*24*60*60*1000;
+        else if (sched === 'monthly')shouldRun = !lastRun || (now - lastRun) > 29*24*60*60*1000;
+        if (shouldRun) {
+          console.log(`[Scheduler] tick firing: ${task.name}`);
+          Promise.resolve(runTask(task)).catch(e => console.error('[Scheduler] task error:', e && e.message));
+        }
+      }
+    } catch (e) { console.error('[Scheduler] tick error:', e.message); }
+  }, 60 * 1000);
+  console.log('[Scheduler] periodic tick started (60s)');
   try { api.use('/', require('./routes/stream')(deps())); } catch(e) { console.error('[Routes] stream failed:', e.message); }
   try { api.use('/', require('./routes/trailers')(deps())); } catch(e) { console.error('[Routes] trailers failed:', e.message); }
   try { api.use('/', require('./routes/images')(deps())); } catch(e) { console.error('[Routes] images failed:', e.message); }

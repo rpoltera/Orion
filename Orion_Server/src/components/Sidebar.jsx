@@ -1,12 +1,35 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useApp } from '../contexts/AppContext';
 import { groupEpisodesToShows } from '../utils/helpers';
 import {
   Home, Film, Tv, Music, Video, Radio, Tv2, Settings,
-  Search, Zap, HardDrive, Plus, Grid, Users } from 'lucide-react';
+  Search, Zap, HardDrive, Plus, Grid, Users, FolderOpen, Tag,
+  Cpu, RefreshCw, Layers } from 'lucide-react';
 
 export default function Sidebar() {
   const { activeSection, setActiveSection, library, iptvChannels, search, searchQuery, hardwareInfo, currentUser, setCurrentUser, scanStatus } = useApp();
+
+  // [services_toggle] read /api/services to know which features are enabled
+  const [orionServices, setOrionServices] = useState({});
+  const [mediaOpen, setMediaOpen] = useState(true);
+  const [encoderOpen, setEncoderOpen] = useState(true);
+  useEffect(() => {
+    const load = () => fetch('/api/services').then(r => r.json()).then(arr => {
+      const m = {};
+      for (const s of (arr || [])) m[s.name] = s;
+      setOrionServices(m);
+    }).catch(() => {});
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, []);
+  const streamforgeEnabled = orionServices.streamforge ? orionServices.streamforge.configEnabled !== false : true;
+  // If user is currently viewing streamforge but it's been disabled, redirect away
+  useEffect(() => {
+    if (!streamforgeEnabled && activeSection === 'streamforge') {
+      setActiveSection('home');
+    }
+  }, [streamforgeEnabled, activeSection, setActiveSection]);
 
   const hasMovies      = (library.movies?.length      || 0) > 0;
   const hasTVShows     = (library.tvShows?.length     || 0) > 0;
@@ -64,39 +87,39 @@ export default function Sidebar() {
         <div className="sidebar-section">BROWSE</div>
         {navItem('home', Home, 'Home', null)}
 
-        {/* Library — only show when content exists */}
-        {hasMovies      && navItem('movies',      Film,  'Movies',       library.movies?.length)}
-        {hasTVShows     && navItem('tvshows',      Tv,    'TV Shows',     tvSeriesCount)}
-        {hasMusic       && navItem('music',        Music, 'Music',        library.music?.length)}
-        {hasMusicVideos && navItem('musicvideos',  Video, 'Music Videos', library.musicVideos?.length)}
-
-        {/* Add Library shortcut */}
-        {!hasAnyLibrary && (
-          <div className="sidebar-item" onClick={() => { setActiveSection('settings'); search(''); }}
-            style={{ color: 'var(--text-muted)', border: '1px dashed var(--border)', marginTop: 4 }}>
-            <Plus size={16} />
-            <span style={{ fontSize: 13 }}>Add Library</span>
+        {/* ── MEDIA ──────────────────────────────────────────────────────── */}
+        <div className="sidebar-section" style={{ marginTop: 8 }}>
+          <div
+            onClick={() => setMediaOpen(o => !o)}
+            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, userSelect: 'none' }}
+          >
+            <span>MEDIA</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{mediaOpen ? '▾' : '▸'}</span>
           </div>
+        </div>
+        {mediaOpen && (
+          <>
+            {hasMovies      && navItem('movies',      Film,  'Movies',       library.movies?.length)}
+            {hasTVShows     && navItem('tvshows',      Tv,    'TV Shows',     tvSeriesCount)}
+            {hasMusic       && navItem('music',        Music, 'Music',        library.music?.length)}
+            {hasMusicVideos && navItem('musicvideos',  Video, 'Music Videos', library.musicVideos?.length)}
+            {!hasAnyLibrary && (
+              <div className="sidebar-item" onClick={() => { setActiveSection('media-library'); search(''); }}
+                style={{ color: 'var(--text-muted)', border: '1px dashed var(--border)', marginTop: 4 }}>
+                <Plus size={16} />
+                <span style={{ fontSize: 13 }}>Add Library</span>
+              </div>
+            )}
+            <div style={{ height: 1, background: 'var(--border)', margin: '6px 14px', opacity: 0.5 }} />
+            {navItem('media-library',  FolderOpen, 'Library',           null)}
+            {navItem('media-metadata', Tag,        'Metadata',          null)}
+          </>
         )}
 
-        {/* ── LIVE & STREAMING ───────────────────────────────────────────── */}
-        <div className="sidebar-section" style={{ marginTop: 8 }}>LIVE & STREAMING</div>
+        {/* ── MEDIA MANAGEMENT ───────────────────────────────────────────── */}
+        <div className="sidebar-section" style={{ marginTop: 8 }}>MEDIA MANAGEMENT</div>
         {navItem('livetv', Radio, 'Live TV (IPTV)', iptvChannels?.length || null)}
-        {/* StreamForge — custom logo entry */}
-        <div
-          className={`sidebar-item ${activeSection === 'streamforge' ? 'active' : ''}`}
-          onClick={() => { setActiveSection('streamforge'); search(''); }}
-          style={{ gap: 8 }}
-        >
-          <img
-            src="https://raw.githubusercontent.com/rpoltera/streamforge/main/public/logo.png"
-            alt="StreamForge"
-            style={{ width: 56, height: 56, objectFit: 'contain', flexShrink: 0, borderRadius: 4 }}
-            onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'inline'; }}
-          />
-          <Tv2 size={16} style={{ display: 'none', flexShrink: 0 }} />
-          <span>StreamForge</span>
-        </div>
+{streamforgeEnabled && navItem('streamforge', Tv2, 'Channels', null)}
         {navItem('streaming', Grid, 'Streaming Services', null)}
         {[
           { id:'pluto',     label:'Pluto TV',          icon:'📺', free:true  },
@@ -119,6 +142,22 @@ export default function Sidebar() {
             {s.free && <span className="badge" style={{ background:'var(--tag-bg)', color:'var(--tag-color)', fontSize:'9px' }}>FREE</span>}
           </div>
         ))}
+        {/* ── ENCODER ────────────────────────────────────────────────────── */}
+        <div className="sidebar-section" style={{ marginTop: 8 }}>
+          <div onClick={() => setEncoderOpen(o => !o)}
+            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, userSelect: 'none' }}>
+            <span>ENCODER</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{encoderOpen ? '▾' : '▸'}</span>
+          </div>
+        </div>
+        {encoderOpen && (
+          <>
+            {navItem('encoder-video',   Film,      'Encoder',           null)}
+            {navItem('encoder-convert', RefreshCw, '10-bit Converter',  null)}
+            {navItem('encoder-preseg',  Layers,    'Pre-segmenter',     null)}
+          </>
+        )}
+
         {/* ── SYSTEM ─────────────────────────────────────────────────────── */}
         <div className="sidebar-section" style={{ marginTop: 8 }}>SYSTEM</div>
         {currentUser?.role === 'admin' && navItem('users', Users, 'Users', null)}

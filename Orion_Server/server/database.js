@@ -158,17 +158,22 @@ function backup(dataDir) {
 }
 
 function optimize() {
-  if (!db_conn) return false;
+  // [DBOPT_v1] VACUUM + pragma optimize, with stats
+  const fs = require('fs');
+  const stats = { vacuumOk:false, vacuumBefore:0, vacuumAfter:0, pragmaOk:false };
   try {
-    db_conn.pragma('optimize');
-    db_conn.exec('VACUUM');
-    db_conn.exec('ANALYZE');
-    console.log('[DB] Optimized (VACUUM + ANALYZE)');
-    return true;
-  } catch (e) {
-    console.error('[DB] optimize error:', e.message);
-    return false;
-  }
+    const dbPath = db_conn && db_conn.name;
+    if (dbPath) { try { stats.vacuumBefore = fs.statSync(dbPath).size; } catch {} }
+    try {
+      db_conn.exec('VACUUM');
+      stats.vacuumOk = true;
+      if (dbPath) { try { stats.vacuumAfter = fs.statSync(dbPath).size; } catch {} }
+      console.log('[DB] VACUUM: ' + stats.vacuumBefore + ' -> ' + stats.vacuumAfter + ' bytes (saved ' + (stats.vacuumBefore - stats.vacuumAfter) + ')');
+    } catch (e) { console.error('[DB] vacuum error:', e.message); }
+    try { db_conn.pragma('optimize'); stats.pragmaOk = true; }
+    catch (e) { console.error('[DB] pragma optimize error:', e.message); }
+  } catch (e) { console.error('[DB] optimize error:', e.message); }
+  return stats;
 }
 
 function getDetail(id) {
