@@ -1135,7 +1135,7 @@ password=${password||''}
     if (!q) return res.json({ results: [] });
     try {
       const config = getConfig();
-      const key = config.tmdbApiKey || 'b6f5b9a45520b77151c75f69af5a95af';
+      const key = config.tmdbApiKey || ' ';
       const endpoint = type === 'tv'
         ? `https://api.themoviedb.org/3/search/tv?api_key=${key}&query=${encodeURIComponent(q)}`
         : `https://api.themoviedb.org/3/search/movie?api_key=${key}&query=${encodeURIComponent(q)}`;
