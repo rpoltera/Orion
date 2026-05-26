@@ -80,6 +80,39 @@ try { if (fs.existsSync(PATHS.BLOCKED_VIDEO_IDS_FILE)) JSON.parse(fs.readFileSyn
 function saveTrailerOverrides() { try { fs.writeFileSync(PATHS.TRAILER_OVERRIDES_FILE, JSON.stringify(_trailerOverrides, null, 2)); } catch {} }
 function saveBlockedVideoIds()  { try { fs.writeFileSync(PATHS.BLOCKED_VIDEO_IDS_FILE, JSON.stringify([..._blockedVideoIds])); } catch {} }
 
+
+// ── Path traversal protection ──────────────────────────────────────────────
+// Validates that a requested file path is under one of the allowed library
+// or cache roots. Used by /api/localimage and /api/thumb to prevent arbitrary
+// file reads (/etc/passwd, /var/lib/orion/orion.db, ssh keys, etc).
+function getAllowedImageRoots() {
+  const roots = new Set();
+  try {
+    const lp = (db && db.libraryPaths) || {};
+    for (const arr of Object.values(lp)) {
+      if (Array.isArray(arr)) for (const r of arr) if (r) roots.add(path.resolve(r));
+    }
+  } catch {}
+  try {
+    const cfg = getConfig() || {};
+    for (const k of ['moviePaths','tvShowPaths','musicPaths','musicVideoPaths']) {
+      const arr = cfg[k];
+      if (Array.isArray(arr)) for (const r of arr) if (r) roots.add(path.resolve(r));
+    }
+  } catch {}
+  try { if (PATHS.THUMBS_DIR) roots.add(path.resolve(PATHS.THUMBS_DIR)); } catch {}
+  return [...roots];
+}
+function isPathAllowed(filePath) {
+  if (!filePath) return false;
+  let resolved;
+  try { resolved = path.resolve(filePath); } catch { return false; }
+  const roots = getAllowedImageRoots();
+  if (!roots.length) return false;
+  return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
+}
+const ALLOWED_IMAGE_EXT = new Set(['.jpg','.jpeg','.png','.gif','.webp','.bmp']);
+
 // Hardware detection
 async function detectHardwareAccel() {
   if (cachedEncoder) return cachedEncoder;
@@ -1148,10 +1181,15 @@ password=${password||''}
   api.get('/localimage', (req, res) => {
     const { path: imgPath } = req.query;
     if (!imgPath) return res.status(400).end();
+    const ext = path.extname(imgPath).toLowerCase();
+    if (!ALLOWED_IMAGE_EXT.has(ext)) return res.status(403).end();
+    if (!isPathAllowed(imgPath)) {
+      console.warn(`[Security] Blocked /localimage outside allowed roots: ${imgPath}`);
+      return res.status(403).end();
+    }
     try {
       if (!fs.existsSync(imgPath)) return res.status(404).end();
-      const ext = require('path').extname(imgPath).toLowerCase();
-      const mime = { '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.gif':'image/gif', '.webp':'image/webp' }[ext] || 'image/jpeg';
+      const mime = { '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.png':'image/png', '.gif':'image/gif', '.webp':'image/webp', '.bmp':'image/bmp' }[ext] || 'application/octet-stream';
       res.setHeader('Content-Type', mime);
       res.setHeader('Cache-Control', 'public, max-age=86400');
       fs.createReadStream(imgPath).pipe(res);
@@ -1162,6 +1200,12 @@ password=${password||''}
   api.get('/thumb', async (req, res) => {
     const { path: imgPath } = req.query;
     if (!imgPath) return res.status(400).end();
+    const ext = path.extname(imgPath).toLowerCase();
+    if (!ALLOWED_IMAGE_EXT.has(ext)) return res.status(403).end();
+    if (!isPathAllowed(imgPath)) {
+      console.warn(`[Security] Blocked /thumb outside allowed roots: ${imgPath}`);
+      return res.status(403).end();
+    }
     try {
       if (!fs.existsSync(imgPath)) return res.status(404).end();
       res.setHeader('Content-Type', 'image/jpeg');
