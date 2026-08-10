@@ -85,6 +85,42 @@ function saveBlockedVideoIds()  { try { fs.writeFileSync(PATHS.BLOCKED_VIDEO_IDS
 // Validates that a requested file path is under one of the allowed library
 // or cache roots. Used by /api/localimage and /api/thumb to prevent arbitrary
 // file reads (/etc/passwd, /var/lib/orion/orion.db, ssh keys, etc).
+// Roots the directory browser may list. Unlike getAllowedImageRoots,
+// this cannot be limited to configured libraries: /browse exists so the
+// user can navigate to a folder that is not a library yet. It allows the
+// usual mount points for media plus anything already configured.
+// Override with ORION_BROWSE_ROOTS=/mnt:/srv/media
+function getAllowedBrowseRoots() {
+  const roots = new Set();
+
+  const fromEnv = (process.env.ORION_BROWSE_ROOTS || '')
+    .split(':').map(x => x.trim()).filter(Boolean);
+
+  if (fromEnv.length) {
+    for (const r of fromEnv) roots.add(path.resolve(r));
+    return [...roots];
+  }
+
+  for (const r of ['/mnt', '/media', '/srv', '/home', '/data', '/volume1']) {
+    try { if (fs.existsSync(r)) roots.add(path.resolve(r)); } catch {}
+  }
+
+  // Anything already configured as a library, in case it lives elsewhere.
+  try {
+    for (const r of getAllowedImageRoots()) roots.add(r);
+  } catch {}
+
+  return [...roots];
+}
+
+function isBrowseAllowed(p) {
+  let resolved;
+  try { resolved = path.resolve(p); } catch { return false; }
+  return getAllowedBrowseRoots().some(root =>
+    resolved === root || resolved.startsWith(root + path.sep)
+  );
+}
+
 function getAllowedImageRoots() {
   const roots = new Set();
   try {
@@ -746,6 +782,24 @@ password=${password||''}
     // so a large or unresponsive directory cannot freeze the process.
     if (typeof dirPath !== 'string' || dirPath.includes('..') || dirPath.includes('\0')) {
       return res.status(400).json({ error: 'invalid path' });
+    }
+
+    // Root '/' is a special case: rather than listing the filesystem
+    // root, return the allowed roots as the starting points.
+    if (dirPath === '/') {
+      return res.json({
+        path: '/',
+        dirs: getAllowedBrowseRoots().sort().map(r => ({ name: r, path: r })),
+        files: []
+      });
+    }
+
+    if (!isBrowseAllowed(dirPath)) {
+      console.warn('[Security] Blocked /browse outside allowed roots: ' + dirPath);
+      return res.status(403).json({
+        error: 'path outside allowed roots',
+        allowed: getAllowedBrowseRoots()
+      });
     }
 
     try {
