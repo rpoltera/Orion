@@ -1271,6 +1271,46 @@ function _buildScheduleOld(ch, fromMs, toMs) {
   return programs;
 }
 
+// ── GPU allocation ───────────────────────────────────────────────────────────
+// Split the cards between background work and live playback so a viewer
+// never queues behind a batch job. Derived from detected hardware, so a
+// single-GPU machine shares one card rather than reserving its only one.
+function _gpuAllocation() {
+  let total = 1;
+  try { total = require('./capabilities')().gpuCount || 1; } catch (_) {}
+  if (sfConfig && parseInt(sfConfig.gpuCount)) {
+    total = Math.min(total, parseInt(sfConfig.gpuCount));
+  }
+  total = Math.max(1, total);
+
+  // Explicit override wins: reservedLiveGpu = -1 disables the reservation.
+  const override = sfConfig && sfConfig.reservedLiveGpu;
+  if (override !== undefined && override !== null && override !== '') {
+    const n = parseInt(override, 10);
+    if (n === -1) return { total, live: null, normalizer: [0], preseg: total };
+    if (Number.isFinite(n) && n >= 0 && n < total) {
+      return {
+        total,
+        live: n,
+        normalizer: [Math.max(0, n - 1)],
+        preseg: Math.max(1, n - 1)
+      };
+    }
+  }
+
+  if (total >= 4) {
+    return { total, live: total - 1, normalizer: [total - 2], preseg: total - 2 };
+  }
+  if (total === 3) {
+    return { total, live: 2, normalizer: [1], preseg: 1 };
+  }
+  if (total === 2) {
+    return { total, live: 1, normalizer: [0], preseg: 1 };
+  }
+  // Single GPU: nothing to reserve.
+  return { total, live: null, normalizer: [0], preseg: 1 };
+}
+
 // ── Multi-GPU round-robin (for Proxmox + multiple P40s) ──────────────────────
 let _nextGpuIdx = 0;
 const _gpuWorkerCount = {};
@@ -1280,6 +1320,15 @@ function assignGpu() {
     parseInt(sfConfig.gpuCount) || _caps.gpuCount || 1,
     _caps.gpuCount || 1
   ));
+  // Prefer the standby card so a viewer starting a channel lands on an
+  // idle GPU instead of queueing behind preseg or normalization. If it is
+  // already serving someone, fall through to least-loaded.
+  const _alloc = _gpuAllocation();
+  if (_alloc.live !== null && (_gpuWorkerCount[_alloc.live] || 0) === 0) {
+    _gpuWorkerCount[_alloc.live] = 1;
+    return _alloc.live;
+  }
+
   let minLoad = Infinity, bestGpu = 0;
   for (let i = 0; i < count; i++) {
     const load = _gpuWorkerCount[i] || 0;
@@ -3708,14 +3757,11 @@ module.exports = function mountStreamForge(app, orion) {
     // No GPU: single CPU worker. Never oversubscribe a small box.
     if (!caps.hasNvenc || caps.gpuCount === 0) return [0];
 
-    const all = caps.gpuIds;
-    const h = new Date().getHours();
-
-    // Overnight: use everything detected.
-    if (h >= 23 || h < 6) return all;
-
-    // Daytime: leave headroom for playback. Always at least one.
-    return all.slice(0, Math.max(1, Math.ceil(all.length / 2)));
+    // Fixed allocation rather than a time-of-day split: the card set is
+    // chosen so preseg and live playback each keep their own, and the
+    // playbackPolicy check in the dispatcher handles backing off further
+    // when someone is actually watching.
+    return _gpuAllocation().normalizer;
   }
 
   async function _normalizerPresegBusy() {
@@ -4318,6 +4364,7 @@ module.exports = function mountStreamForge(app, orion) {
       scanTotal: normalizerState.scanTotal || 0,
       roots: NORMALIZER_ROOTS,
       gpuIds: _normalizerGpuIds(),
+      gpuAllocation: _gpuAllocation(),
       current: normalizerState.current,
       stats: normalizerState.stats
     });
