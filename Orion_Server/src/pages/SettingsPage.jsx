@@ -2639,7 +2639,6 @@ const TAB_GROUPS = [
     label: 'Metadata',
     tabs: [
       { id: 'metadata',    icon: Key,       label: 'Metadata Source' },
-      { id: 'apis',        icon: GitBranch, label: 'API Keys' },
     ]
   },
   {
@@ -2659,6 +2658,7 @@ const TAB_GROUPS = [
   {
     label: 'System',
     tabs: [
+      { id: 'apis',        icon: GitBranch, label: 'API Keys' },
       { id: 'services',    icon: Zap,       label: 'Background Services' },
       { id: 'systemstatus', icon: Activity,  label: 'System Status' },
       { id: 'scheduler',   icon: Clock,     label: 'Scheduler' },

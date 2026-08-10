@@ -538,13 +538,11 @@ function PlayoutBuilder({ call, initialChannelId }) {
     Promise.all([
       call('GET','/api/sf/channels'),
       call('GET','/api/sf/streams'),
-      call('GET','/api/sf/media?type=movie&limit=50000'),
       call('GET','/api/sf/libraries'),
       call('GET','/api/sf/media/genres').catch(()=>[]),
-    ]).then(([chs,sts,med,libs,gns])=>{
+    ]).then(([chs,sts,libs,gns])=>{
       setChannels(chs);
       setStreams(sts);
-      setMediaItems(med.items||med);
       setLibraries(libs||[]);
       setGenres(gns?.genres||[]); setNetworks(gns?.networks||[]);
     }).catch(()=>{});
@@ -572,13 +570,30 @@ function PlayoutBuilder({ call, initialChannelId }) {
 
   const addItem=(m)=>{ console.log('[Queue] addItem', m.id, m.title); setQueue(q=>{ const n=[...q,{mediaId:m.id,title:m.episodeTitle||m.title}]; console.log('[Queue] new length:', n.length); return n; }); };
   const remove=(i)=>setQueue(q=>q.filter((_,j)=>j!==i));
+  // fix-15: load media for the active tab only, searching server-side.
+  // Loading the whole library and filtering in the browser meant the
+  // Episodes tab was always empty (the fetch asked for movies) and every
+  // visit shipped thousands of records.
+  const [mediaLoading,setMediaLoading] = useState(false);
+  useEffect(()=>{
+    let cancelled = false;
+    const t = setTimeout(()=>{
+      setMediaLoading(true);
+      const qs = new URLSearchParams({ type: mediaType, limit: '200' });
+      if (mediaSearch.trim()) qs.set('q', mediaSearch.trim());
+      call('GET','/api/sf/media?'+qs.toString())
+        .then(d=>{ if(!cancelled) setMediaItems(d.items||d||[]); })
+        .catch(()=>{ if(!cancelled) setMediaItems([]); })
+        .finally(()=>{ if(!cancelled) setMediaLoading(false); });
+    }, mediaSearch ? 300 : 0);
+    return ()=>{ cancelled = true; clearTimeout(t); };
+  },[mediaType, mediaSearch, call]);
+
   const move=(i,dir)=>setQueue(q=>{const n=[...q];const j=i+dir;if(j<0||j>=n.length)return q;[n[i],n[j]]=[n[j],n[i]];return n;});
 
   // Filter media — exclude live streams entirely from playout builder
-  const episodes = mediaItems.filter(m=>(m.type==='episode'||m.season!=null)&&m.season!=null);
-  const movies   = mediaItems.filter(m=>m.type==='movie'||(!m.season&&!m.episode&&m.filePath));
-  const displayItems = (mediaType==='episode' ? episodes : movies)
-    .filter(m=>!mediaSearch||m.title?.toLowerCase().includes(mediaSearch.toLowerCase())||(m.episodeTitle||'').toLowerCase().includes(mediaSearch.toLowerCase()));
+  // Server returns exactly the requested type, already search-filtered.
+  const displayItems = mediaItems;
 
   const filteredShows = shows; // shows already filtered server-side
 
@@ -941,7 +956,8 @@ function PlayoutBuilder({ call, initialChannelId }) {
               placeholder={`Search ${mediaType==='episode'?'episodes':'movies'}…`}
               style={{...sm,width:'100%',marginBottom:8,boxSizing:'border-box'}}/>
             <div style={{maxHeight:460,overflowY:'auto',display:'flex',flexDirection:'column',gap:2}}>
-              {displayItems.length===0&&<div style={{padding:20,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>No {mediaType==='episode'?'episodes':'movies'} found{mediaSearch?` matching "${mediaSearch}"`:''}</div>}
+              {mediaLoading&&<div style={{padding:20,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>Loading\u2026</div>}
+              {!mediaLoading&&displayItems.length===0&&<div style={{padding:20,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>No {mediaType==='episode'?'episodes':'movies'} found{mediaSearch?` matching "${mediaSearch}"`:''}</div>}
               {displayItems.slice(0,150).map(m=>(
                 <div key={m.id} onClick={()=>addItem(m)}
                   style={{padding:'7px 10px',background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:'var(--radius)',cursor:'pointer',fontSize:12}}

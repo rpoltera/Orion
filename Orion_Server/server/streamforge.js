@@ -5737,7 +5737,14 @@ module.exports = function mountStreamForge(app, orion) {
   app.get('/api/sf/media', (req, res) => {
     let items = getMediaCombined();
     if (req.query.type)  items = items.filter(m=>m.type===req.query.type);
-    if (req.query.q)     { const q=req.query.q.toLowerCase(); items=items.filter(m=>m.title?.toLowerCase().includes(q)); }
+    if (req.query.q)     {
+      const q = req.query.q.toLowerCase();
+      items = items.filter(m =>
+        m.title?.toLowerCase().includes(q) ||
+        m.episodeTitle?.toLowerCase().includes(q) ||
+        m.seriesTitle?.toLowerCase().includes(q)
+      );
+    }
     if (req.query.lib)   items = items.filter(m=>m.libraryId===req.query.lib);
     // M1: cap page size. Returning 50k rows serialises for seconds and
     // can exhaust memory on a small box. Clients should paginate.
