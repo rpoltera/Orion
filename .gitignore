@@ -23,3 +23,22 @@ npm-debug.log*
 # Environment
 .env.local
 .env.production.local
+
+# personal / environment
+.gitconfig
+.npm/
+.claude/
+
+# patch-script backups
+*.bak
+*.bak.*
+*.broken.*
+*.removed.*
+*.pre-*
+server.prev-*
+build.broken.*
+
+# runtime state
+auth-tokens.json
+node_modules/
+*.bak-*

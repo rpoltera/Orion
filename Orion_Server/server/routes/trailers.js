@@ -260,12 +260,14 @@ module.exports = function trailerRoutes(deps) {
 
   // ── Movie trailer management ───────────────────────────────────────────────
 
-  router.get('/trailers/:movieId', (req, res) => {
+  router.get('/trailers/:movieId', async (req, res) => {
     const movie = findById('movies', req.params.movieId);
     if (!movie?.filePath) return res.json({ trailers: [] });
     const movieDir = path.dirname(movie.filePath);
     try {
-      const files = fs.readdirSync(movieDir)
+      // H2: media lives on NFS here; a sync readdir blocks every other
+      // request while the mount responds.
+      const files = (await fs.promises.readdir(movieDir))
         .filter(f => f.match(/^trailer-[A-Za-z0-9_-]+\.mp4$/))
         .map(f => ({ file: f, url: `/api/ytdlp/cached?movieId=${req.params.movieId}&file=${encodeURIComponent(f)}` }));
       res.json({ trailers: files });

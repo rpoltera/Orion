@@ -483,7 +483,7 @@ export function CustomLibrariesSettings({ API }) {
 }
 
 export function AutoCollectionsEmbedded() {
-  const API = 'http://localhost:3001/api';
+  const API = window.location.origin + '/api';
   const [cfg, setCfg] = React.useState(null);
   const [running, setRunning] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -1033,7 +1033,7 @@ function hexToRgba(hex, alpha = 1) {
 }
 
 function ThemeBuilder({ currentTheme, changeTheme }) {
-  const API = 'http://localhost:3001/api';
+  const API = window.location.origin + '/api';
   const [customThemes, setCustomThemes] = React.useState(() => {
     try { return JSON.parse(localStorage.getItem('orion_custom_themes') || '[]'); } catch { return []; }
   });
@@ -1277,7 +1277,7 @@ function ThumbnailGeneratorRow({ libSettings, updateLibSettings, API }) {
     (async () => {
       try {
         const { io } = await import('socket.io-client');
-        sock = io('http://localhost:3001');
+        sock = io(window.location.origin);
         socketRef.current = sock;
         sock.on('thumbnail:progress', (data) => {
           setProgress(data);
@@ -1426,7 +1426,7 @@ function HomeLayoutSettings() {
   const [dragOver, setDragOver] = React.useState(null);
 
   React.useEffect(() => {
-    fetch('http://localhost:3001/api/config').then(r => r.json()).then(d => {
+    fetch(window.location.origin + '/api/config').then(r => r.json()).then(d => {
       if (d.homeLayout?.length) {
         // Merge saved layout with defaults (in case new sections were added)
         const savedIds = new Set(d.homeLayout.map(s => s.id));
@@ -1442,7 +1442,7 @@ function HomeLayoutSettings() {
   }, []);
 
   const save = async () => {
-    await fetch('http://localhost:3001/api/config', {
+    await fetch(window.location.origin + '/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ homeLayout: sections })
@@ -1507,7 +1507,7 @@ function HomeLayoutSettings() {
   );
 }
 function MovieSmartDedup() {
-  const API = 'http://localhost:3001/api';
+  const API = window.location.origin + '/api';
   const [scanning, setScanning] = React.useState(false);
   const [popup, setPopup] = React.useState(null); // { groups: [...] }
   const [choices, setChoices] = React.useState({}); // groupIdx -> 'merge'|'remove'|'skip'
@@ -1613,7 +1613,7 @@ function MovieSmartDedup() {
 }
 
 function TVShowSmartDedup() {
-  const API = 'http://localhost:3001/api';
+  const API = window.location.origin + '/api';
   const [scanning, setScanning] = React.useState(false);
   const [popup, setPopup] = React.useState(null);
   const [choices, setChoices] = React.useState({});
@@ -1712,7 +1712,7 @@ function TVShowSmartDedup() {
 }
 
 function MovieFolderCleanup() {
-  const API = 'http://localhost:3001/api';
+  const API = window.location.origin + '/api';
   const [status, setStatus] = React.useState(null);
   const [running, setRunning] = React.useState(false);
   const [preview, setPreview] = React.useState(null);

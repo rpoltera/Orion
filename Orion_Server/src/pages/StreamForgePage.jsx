@@ -68,14 +68,22 @@ function useSFApi() {
   const { API } = useApp();
   const base = API.replace('/api', ''); // http://localhost:3001
   return useCallback(async (method, endpoint, body) => {
-    const res = await fetch(`${base}${endpoint}`, {
-      method,
-      headers: body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
-      body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : undefined,
-    });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const ct = res.headers.get('content-type') || '';
-    return ct.includes('json') ? res.json() : res.text();
+    // [UI-FIX] 5-second timeout so a hung endpoint doesn't lock the whole page
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const res = await fetch(`${base}${endpoint}`, {
+        method,
+        signal: ctrl.signal,
+        headers: body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+        body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : undefined,
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const ct = res.headers.get('content-type') || '';
+      return ct.includes('json') ? res.json() : res.text();
+    } finally {
+      clearTimeout(timer);
+    }
   }, [base]);
 }
 
@@ -213,16 +221,19 @@ function Channels({ call, onWatch, onPlayout }) {
 
   const load = useCallback(() => {
     setLoading(true);
-    Promise.all([
+    // [UI-FIX] allSettled so one slow/hung endpoint doesn't block the whole page.
+    Promise.allSettled([
       call('GET','/api/sf/channels'),
       call('GET','/api/sf/streams'),
       call('GET','/api/sf/epg?enabledOnly=1'),
       call('GET','/api/iptv/channels'),
-    ]).then(([chs,sts,epg,iptv]) => {
-      setChannels(chs); setStreams(sts);
-      setEpgChannels(epg.channels||[]);
-      setOrionChannels(iptv.channels||[]);
-    }).catch(()=>{}).finally(()=>setLoading(false));
+    ]).then(results => {
+      const [chs, sts, epg, iptv] = results.map(r => r.status === 'fulfilled' ? r.value : null);
+      if (chs)  setChannels(chs);
+      if (sts)  setStreams(sts);
+      if (epg)  setEpgChannels(epg.channels || []);
+      if (iptv) setOrionChannels(iptv.channels || []);
+    }).finally(() => setLoading(false));
   },[call]);
   useEffect(()=>{load();},[load]);
 
@@ -527,7 +538,7 @@ function PlayoutBuilder({ call, initialChannelId }) {
     Promise.all([
       call('GET','/api/sf/channels'),
       call('GET','/api/sf/streams'),
-      call('GET','/api/sf/media?type=movie&limit=5000'),
+      call('GET','/api/sf/media?type=movie&limit=50000'),
       call('GET','/api/sf/libraries'),
       call('GET','/api/sf/media/genres').catch(()=>[]),
     ]).then(([chs,sts,med,libs,gns])=>{

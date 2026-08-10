@@ -159,6 +159,8 @@ async function scanDirectory(dirPath, type = 'movies', { onProgress, findLocalIm
         if (isExtrasFolder) continue;
         if (type === 'movies' && isTrailerOrExtra(entry.name)) continue;
         const ext = path.extname(entry.name).toLowerCase();
+        // [BAK-FILTER] Skip backup files left over from convert-service
+        if (/\.bak\./.test(entry.name) || /\.bak$/.test(entry.name)) continue;
         const isVideo = VIDEO_EXTS.includes(ext);
         const isAudio = AUDIO_EXTS.includes(ext);
         if ((type === 'music' && isAudio) || (type !== 'music' && isVideo)) {

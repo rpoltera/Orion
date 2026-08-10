@@ -46,6 +46,8 @@ export default function EncoderPage({ initialTab = 'video' }) {
       {tab === 'video'   && <VideoEncoderTab />}
       {tab === 'convert' && <ServiceTab serviceName="Convert" baseUrl={CONVERT_API} description="Bulk converts 10-bit HEVC sources to 8-bit so they play on Pascal NVENC and older clients. Outputs go to /dev/shm during encode, then move atomically back to NFS." configKeys={CONVERT_CONFIG_KEYS} />}
       {tab === 'preseg'  && <ServiceTab serviceName="Preseg"  baseUrl={PRESEG_API}  description="Pre-segments media into HLS chunks so playback starts instantly when a channel is tuned." configKeys={PRESEG_CONFIG_KEYS} />}
+      {tab === 'preseg'  && <PresegActions baseUrl={PRESEG_API} />}
+      {tab === 'preseg'  && <HideUnsegmentedPanel />}
     </div>
   );
 }
@@ -75,6 +77,131 @@ function VideoEncoderTab() {
   const [jobs, setJobs] = useState([]);
   const [starting, setStarting] = useState(false);
   const [formError, setFormError] = useState(null);
+  const [normalizer, setNormalizer] = useState(null);
+  const [normalizerBusy, setNormalizerBusy] = useState(false);
+
+  const loadNormalizer = useCallback(async function() {
+    try {
+      const r = await fetch('/api/sf/normalizer/status');
+      if (r.ok) setNormalizer(await r.json());
+    } catch (e) {}
+  }, []);
+
+  // fix-08: persist Normalizer safety settings
+  // fix-12: nightly normalize task, read from the real scheduler list
+  const [normTask, setNormTask] = React.useState(null);
+  const [normBusy2, setNormBusy2] = React.useState(false);
+  const [normMsg, setNormMsg] = React.useState('');
+
+  const loadNormTask = React.useCallback(async function () {
+    try {
+      const r = await fetch('/api/scheduler');
+      if (!r.ok) return;
+      const d = await r.json();
+      const t = (d.tasks || []).find(function (x) {
+        return (x.type || '').toLowerCase().indexOf('normalize') !== -1;
+      });
+      setNormTask(t || null);
+    } catch (e) { /* non-fatal */ }
+  }, []);
+
+  React.useEffect(function () { loadNormTask(); }, [loadNormTask]);
+
+  async function runScheduledNormalize() {
+    setNormBusy2(true);
+    setNormMsg('');
+    try {
+      const r = await fetch('/api/sf/normalizer/queue-scheduled', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const d = await r.json().catch(function () { return {}; });
+      if (!r.ok) {
+        setNormMsg('Failed: ' + (d.error || ('HTTP ' + r.status)));
+      } else {
+        setNormMsg(
+          d.considered + ' scheduled \u2022 ' +
+          d.queued + ' queued for conversion \u2022 ' +
+          d.alreadyOk + ' already fine' +
+          (d.missing ? ' \u2022 ' + d.missing + ' missing' : '')
+        );
+      }
+    } catch (e) {
+      setNormMsg('Failed: ' + e.message);
+    }
+    setNormBusy2(false);
+  }
+
+  async function toggleNightly(on, time) {
+    setNormBusy2(true);
+    try {
+      if (on) {
+        await fetch('/api/scheduler', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tasks: [{
+              name: 'Normalize Scheduled Media',
+              description: 'Convert upcoming scheduled episodes to H.264 8-bit + AAC',
+              icon: '\u2699\ufe0f',
+              type: 'normalize',
+              schedule: 'daily',
+              scheduleTime: time || '02:00',
+              enabled: true
+            }]
+          })
+        });
+      } else if (normTask && normTask.id) {
+        await fetch('/api/scheduler/' + normTask.id, { method: 'DELETE' });
+      }
+      await loadNormTask();
+    } catch (e) {
+      setNormMsg('Failed: ' + e.message);
+    }
+    setNormBusy2(false);
+  }
+
+  async function normalizerSettings(patch) {
+    try {
+      const r = await fetch('/api/sf/normalizer/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      if (r.status === 401) {
+        alert('Not authorised. Please log in again.');
+        return;
+      }
+      if (!r.ok) {
+        const d = await r.json().catch(function() { return {}; });
+        alert('Could not save: ' + (d.error || ('HTTP ' + r.status)));
+        return;
+      }
+      // status refreshes on the next poll
+    } catch (err) {
+      alert('Could not save: ' + err.message);
+    }
+  }
+
+  async function normalizerAction(action) {
+    setNormalizerBusy(true);
+
+    try {
+      await fetch('/api/sf/normalizer/' + action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+
+      await loadNormalizer();
+    } catch (e) {
+      setFormError(e.message);
+    }
+
+    setNormalizerBusy(false);
+  }
+
 
   const videoEncoding = params.videoMode === 'encode';
   const audioEncoding = params.audioMode === 'encode';
@@ -100,9 +227,13 @@ function VideoEncoderTab() {
 
   useEffect(function() {
     loadJobs();
-    const t = setInterval(loadJobs, 2000);
+    loadNormalizer();
+    const t = setInterval(function() {
+      loadJobs();
+      loadNormalizer();
+    }, 2000);
     return function() { clearInterval(t); };
-  }, [loadJobs]);
+  }, [loadJobs, loadNormalizer]);
 
   async function start() {
     if (!params.inputPath.trim()) { setFormError('Input path is required'); return; }
@@ -154,6 +285,412 @@ function VideoEncoderTab() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+      {/* Library Normalizer */}
+      <div style={{
+        background: 'var(--bg-card)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)',
+        padding: 20
+      }}>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 16,
+          marginBottom: 16
+        }}>
+          <div>
+            <h3 style={{
+              fontSize: 15,
+              fontWeight: 700,
+              marginBottom: 4
+            }}>
+              Library Normalizer
+            </h3>
+
+            <div style={{
+              fontSize: 12,
+              color: 'var(--text-muted)'
+            }}>
+              Gradually converts TV episodes to H.264 8-bit + AAC
+              so Pre-segmenter can use the fast REMUX path.
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="btn btn-secondary"
+              disabled={normalizerBusy}
+              onClick={function() {
+                normalizerAction('rescan');
+              }}
+            >
+              Rescan
+            </button>
+
+            {normalizer && normalizer.enabled ? (
+              <button
+                className="btn btn-secondary"
+                disabled={normalizerBusy}
+                onClick={function() {
+                  normalizerAction('pause');
+                }}
+              >
+                Pause
+              </button>
+            ) : (
+              <button
+                className="btn btn-primary"
+                disabled={normalizerBusy}
+                onClick={function() {
+                  normalizerAction('start');
+                }}
+              >
+                Start Normalizer
+              </button>
+            )}
+          </div>
+        </div>
+
+        {normalizer && (
+          <>
+            {normalizer.scanning && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: 12,
+                  marginBottom: 6
+                }}>
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    Scanning library&hellip;
+                  </span>
+                  <span style={{ color: 'var(--accent)', fontWeight: 700 }}>
+                    {(normalizer.scanDone || 0).toLocaleString()}
+                    {' / '}
+                    {(normalizer.scanTotal || 0).toLocaleString()}
+                    {normalizer.scanTotal
+                      ? '  (' + Math.round(
+                          (normalizer.scanDone || 0) /
+                          normalizer.scanTotal * 100
+                        ) + '%)'
+                      : ''}
+                  </span>
+                </div>
+                <div style={{
+                  height: 6,
+                  background: 'var(--bg-tertiary)',
+                  borderRadius: 3,
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    height: '100%',
+                    width: (normalizer.scanTotal
+                      ? Math.min(100,
+                          (normalizer.scanDone || 0) /
+                          normalizer.scanTotal * 100)
+                      : 0) + '%',
+                    background: 'var(--accent)',
+                    borderRadius: 3,
+                    transition: 'width 0.4s ease'
+                  }} />
+                </div>
+              </div>
+            )}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 14,
+              flexWrap: 'wrap',
+              padding: '12px 14px',
+              marginBottom: 14,
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <label style={{ fontSize: 12, fontWeight: 600 }}>
+                  When converting:
+                </label>
+                <select
+                  value={normalizer.outputMode || 'alongside'}
+                  onChange={function(e) {
+                    var mode = e.target.value;
+                    if (mode === 'replace') {
+                      var ok = window.confirm(
+                        'Replace original files?\n\n' +
+                        'Each converted episode will overwrite its source file. ' +
+                        'This cannot be undone unless "keep backup" is enabled.\n\n' +
+                        'Choose OK only if you are sure.'
+                      );
+                      if (!ok) return;
+                    }
+                    normalizerSettings({ outputMode: mode });
+                  }}
+                  style={{
+                    padding: '6px 10px',
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius)',
+                    color: 'var(--text-primary)',
+                    fontSize: 12,
+                    fontFamily: 'inherit'
+                  }}
+                >
+                  <option value="alongside">
+                    Keep original — write a new .h264 file
+                  </option>
+                  <option value="replace">
+                    Replace original — saves disk space
+                  </option>
+                </select>
+              </div>
+
+              {normalizer.outputMode === 'replace' && (
+                <label style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 12,
+                  cursor: 'pointer'
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={normalizer.keepBackup !== false}
+                    onChange={function(e) {
+                      normalizerSettings({ keepBackup: e.target.checked });
+                    }}
+                  />
+                  Keep backup of each original until conversion is verified
+                </label>
+              )}
+
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 12,
+                cursor: 'pointer',
+                marginLeft: 'auto'
+              }}>
+                <input
+                  type="checkbox"
+                  checked={!!normalizer.dryRun}
+                  onChange={function(e) {
+                    normalizerSettings({ dryRun: e.target.checked });
+                  }}
+                />
+                Dry run (report only, convert nothing)
+              </label>
+
+              {/* fix-12: scheduled-scope + nightly run */}
+              <div style={{
+                width: '100%',
+                borderTop: '1px solid var(--border)',
+                marginTop: 10,
+                paddingTop: 10,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                flexWrap: 'wrap'
+              }}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  disabled={normBusy2}
+                  onClick={runScheduledNormalize}
+                  title="Queue only episodes scheduled in the next few days"
+                >
+                  {normBusy2 ? 'Working\u2026' : 'Normalize Scheduled'}
+                </button>
+
+                <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  Look ahead
+                  <select
+                    value={normalizer.scheduledDays || 3}
+                    onChange={function (e) {
+                      normalizerSettings({ scheduledDays: Number(e.target.value) });
+                    }}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--bg-card)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius)',
+                      color: 'var(--text-primary)',
+                      fontSize: 12
+                    }}
+                  >
+                    <option value={1}>1 day</option>
+                    <option value={3}>3 days</option>
+                    <option value={7}>7 days</option>
+                    <option value={14}>14 days</option>
+                  </select>
+                </label>
+
+                <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  While watching
+                  <select
+                    value={normalizer.playbackPolicy || 'pause'}
+                    onChange={function (e) {
+                      normalizerSettings({ playbackPolicy: e.target.value });
+                    }}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--bg-card)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius)',
+                      color: 'var(--text-primary)',
+                      fontSize: 12
+                    }}
+                  >
+                    <option value="pause">Pause</option>
+                    <option value="reduce">Reduce to one worker</option>
+                    <option value="ignore">Keep running</option>
+                  </select>
+                </label>
+
+                <label style={{
+                  fontSize: 12,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  cursor: 'pointer',
+                  marginLeft: 'auto'
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={!!normTask}
+                    disabled={normBusy2}
+                    onChange={function (e) {
+                      toggleNightly(e.target.checked, (normTask && normTask.scheduleTime) || '02:00');
+                    }}
+                  />
+                  Run nightly at
+                  <input
+                    type="time"
+                    value={(normTask && normTask.scheduleTime) || '02:00'}
+                    disabled={!normTask || normBusy2}
+                    onChange={function (e) {
+                      toggleNightly(true, e.target.value);
+                    }}
+                    style={{
+                      padding: '3px 6px',
+                      background: 'var(--bg-card)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius)',
+                      color: 'var(--text-primary)',
+                      fontSize: 12
+                    }}
+                  />
+                </label>
+
+                {normMsg && (
+                  <div style={{
+                    width: '100%',
+                    fontSize: 11,
+                    color: normMsg.indexOf('Failed') === 0 ? '#ef4444' : 'var(--text-muted)'
+                  }}>
+                    {normMsg}
+                  </div>
+                )}
+
+                {normTask && normTask.lastRun && (
+                  <div style={{ width: '100%', fontSize: 11, color: 'var(--text-muted)' }}>
+                    Last nightly run: {new Date(normTask.lastRun).toLocaleString()}
+                  </div>
+                )}
+              </div>
+
+              {normalizer.outputMode === 'replace' &&
+               normalizer.keepBackup === false && (
+                <div style={{
+                  width: '100%',
+                  fontSize: 11,
+                  color: '#fbbf24'
+                }}>
+                  Originals will be permanently replaced with no backup.
+                </div>
+              )}
+            </div>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns:
+                'repeat(auto-fit, minmax(120px, 1fr))',
+              gap: 10
+            }}>
+              {[
+                ['Found', normalizer.stats?.discovered || 0],
+                ['Ready', normalizer.stats?.compatible || 0],
+                ['Queued', normalizer.stats?.queued || 0],
+                ['Converted', normalizer.stats?.converted || 0],
+                ['Errors', normalizer.stats?.errors || 0],
+                ['Running',
+                  Object.keys(normalizer.current || {}).length]
+              ].map(function(x) {
+                return (
+                  <div
+                    key={x[0]}
+                    style={{
+                      background: 'var(--bg-tertiary)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius)',
+                      padding: 12
+                    }}
+                  >
+                    <div style={{
+                      fontSize: 11,
+                      color: 'var(--text-muted)'
+                    }}>
+                      {x[0]}
+                    </div>
+
+                    <div style={{
+                      fontSize: 20,
+                      fontWeight: 700,
+                      marginTop: 3
+                    }}>
+                      {x[1]}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{
+              marginTop: 12,
+              fontSize: 12,
+              color: 'var(--text-muted)'
+            }}>
+              Status: <b>
+                {normalizer.scanning
+                  ? 'Scanning'
+                  : normalizer.enabled
+                    ? 'Running'
+                    : 'Paused'}
+              </b>
+              {' • '}
+              Normalizer GPUs available now:
+              {' '}
+              {(normalizer.gpuIds || []).join(', ')}
+              {' • '}
+              Preseg has priority
+            </div>
+
+            {(normalizer.stats?.errors || 0) > 0 && (
+              <button
+                className="btn btn-secondary btn-sm"
+                style={{ marginTop: 10 }}
+                onClick={function() {
+                  normalizerAction('retry-errors');
+                }}
+              >
+                Retry Errors
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
       {/* Encode form */}
       <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: 20 }}>
         <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>New Encode Job</h3>
@@ -478,6 +1015,10 @@ const PRESEG_CONFIG_KEYS = [
   { key: 'maxCpuPreseg',    label: 'Max CPU Workers',     type: 'number', min: 0, max: 16 },
   { key: 'skip10Bit',       label: 'Skip 10-bit Sources', type: 'bool',   hint: 'Lets convert handle 10-bit content first' },
   { key: 'route10BitToCpu', label: 'Route 10-bit to CPU', type: 'bool',   hint: 'Use CPU for 10-bit decode (rare hardware fallback)' },
+
+  { key: 'dailyScheduleEnabled', label: 'Daily Scheduled Media Only', type: 'bool', hint: 'Pre-segment only media scheduled on today’s channels' },
+  { key: 'dailyScheduleTime', label: 'Daily Run Time', type: 'text', hint: '00:00 = midnight' },
+  { key: 'purgeUnscheduled', label: 'Purge Unscheduled HLS', type: 'bool', hint: 'Delete Orion HLS not required by today’s schedule' },
 ];
 
 function ServiceTab({ serviceName, baseUrl, description, configKeys }) {
@@ -525,6 +1066,40 @@ function ServiceTab({ serviceName, baseUrl, description, configKeys }) {
 
   const valueOf = (k) => (k in edits ? edits[k] : (config ? config[k] : ''));
   const setVal  = (k, v) => setEdits(p => ({ ...p, [k]: v }));
+
+  const runDailyNow = async () => {
+    setError(null);
+
+    try {
+      const r = await fetch(`${baseUrl}/daily-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+
+      const d = await r.json();
+
+      if (!r.ok) {
+        throw new Error(d.error || ('HTTP ' + r.status));
+      }
+
+      alert(
+        "Today's scheduled preseg started\n\n" +
+        'Scheduled: ' + (d.scheduled ?? 0) + '\n' +
+        'Queued: ' + (d.queued ?? 0) + '\n' +
+        'Existing: ' + (d.existing ?? d.alreadyDone ?? 0) + '\n' +
+        'Purged: ' + (d.purged ?? 0) + '\n' +
+        'Missing: ' + (d.missing ?? 0)
+      );
+
+      loadStatus();
+      loadConfig();
+
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
 
   if (!config) {
     return <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>Loading {serviceName} config…</div>;
@@ -575,6 +1150,18 @@ function ServiceTab({ serviceName, baseUrl, description, configKeys }) {
               onClick={save}
               style={{ opacity: (saving || Object.keys(edits).length === 0) ? 0.5 : 1 }}
             ><Save size={13} /> Save Changes</button>
+
+            {serviceName === 'Preseg' && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={runDailyNow}
+              >
+                <Play size={13} />
+                <span style={{ marginLeft: 6 }}>
+                  Run Today's Schedule Now
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -622,3 +1209,236 @@ function ConfigField({ field, value, onChange, dirty }) {
     </div>
   );
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Preseg Actions — Scan Library / Add Folder / Add File buttons
+ * ────────────────────────────────────────────────────────────────────────── */
+function PresegActions({ baseUrl }) {
+  const [folderPath, setFolderPath] = useState('');
+  const [filePath, setFilePath] = useState('');
+  const [busy, setBusy] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const call = useCallback(async (endpoint, body, label) => {
+    setBusy(label); setMsg(null);
+    try {
+      const r = await fetch(`${baseUrl}/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) {
+        setMsg({ type: 'error', text: data.error || `HTTP ${r.status}` });
+      } else {
+        const parts = [];
+        if (data.candidates != null) parts.push(`${data.candidates} found`);
+        if (data.found != null)      parts.push(`${data.found} found`);
+        if (data.queued != null)     parts.push(`${data.queued} queued`);
+        if (data.skipped != null)    parts.push(`${data.skipped} skipped`);
+        setMsg({ type: 'ok', text: parts.join(', ') || 'done' });
+      }
+    } catch (e) {
+      setMsg({ type: 'error', text: e.message });
+    } finally {
+      setBusy(null);
+    }
+  }, [baseUrl]);
+
+  const btnStyle = (active) => ({
+    padding: '8px 14px',
+    background: active ? 'var(--accent)' : 'var(--bg-elevated)',
+    color: active ? 'white' : 'var(--text)',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    cursor: 'pointer',
+    fontSize: 13,
+    fontWeight: 600,
+    opacity: busy && busy !== active ? 0.5 : 1,
+  });
+  const inputStyle = {
+    flex: 1,
+    padding: '8px 10px',
+    background: 'var(--bg-elevated)',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    color: 'var(--text)',
+    fontSize: 13,
+  };
+
+  return (
+    <div style={{
+      marginTop: 16,
+      padding: 16,
+      background: 'var(--bg-card)',
+      border: '1px solid var(--border)',
+      borderRadius: 8,
+    }}>
+      <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>Library Actions</h3>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+        Scan the entire library for unsegmented files, or manually queue a folder/file by absolute path.
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+        {/* Scan Library */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button
+            onClick={() => call('scan-library', {}, 'scan')}
+            disabled={!!busy}
+            style={btnStyle('scan')}
+          >
+            {busy === 'scan' ? 'Scanning…' : 'Scan Library'}
+          </button>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Walks every TV show + movie, queues files not yet presegged.
+          </span>
+        </div>
+
+        {/* Add Folder */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="text"
+            placeholder="/mnt/jbod1/media/tv_shows/Some Show"
+            value={folderPath}
+            onChange={e => setFolderPath(e.target.value)}
+            style={inputStyle}
+          />
+          <button
+            onClick={() => call('add-folder', { folderPath }, 'folder')}
+            disabled={!!busy || !folderPath.trim()}
+            style={btnStyle('folder')}
+          >
+            {busy === 'folder' ? 'Scanning…' : 'Add Folder'}
+          </button>
+        </div>
+
+        {/* Add File */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="text"
+            placeholder="/mnt/jbod1/media/movies/Some Movie/movie.mkv"
+            value={filePath}
+            onChange={e => setFilePath(e.target.value)}
+            style={inputStyle}
+          />
+          <button
+            onClick={() => call('add-file', { filePath }, 'file')}
+            disabled={!!busy || !filePath.trim()}
+            style={btnStyle('file')}
+          >
+            {busy === 'file' ? 'Adding…' : 'Add File'}
+          </button>
+        </div>
+
+        {msg && (
+          <div style={{
+            marginTop: 4,
+            padding: '8px 12px',
+            borderRadius: 6,
+            fontSize: 12,
+            background: msg.type === 'error' ? 'rgba(220,38,38,0.15)' : 'rgba(34,197,94,0.15)',
+            color: msg.type === 'error' ? '#ef4444' : '#22c55e',
+            border: `1px solid ${msg.type === 'error' ? '#dc2626' : '#16a34a'}`,
+          }}>
+            {msg.text}
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+/* Hide-Unsegmented toggle + searchable skipped panel */
+function HideUnsegmentedPanel() {
+  const [enabled, setEnabled] = useState(false);
+  const [q, setQ] = useState('');
+  const [data, setData] = useState({ total: 0, matched: 0, items: [] });
+  const [loading, setLoading] = useState(false);
+
+  // Load current setting
+  useEffect(() => {
+    fetch('/api/sf/config').then(r => r.json()).then(c => {
+      setEnabled(!!c.hideUnsegmented);
+    }).catch(() => {});
+  }, []);
+
+  const search = useCallback(async (query) => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/sf/media/skipped?q=' + encodeURIComponent(query || ''));
+      const d = await r.json();
+      setData(d);
+    } catch {}
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => search(q), 250);
+    return () => clearTimeout(t);
+  }, [q, search]);
+
+  const toggle = async () => {
+    const next = !enabled;
+    setEnabled(next);
+    await fetch('/api/sf/media/hide-unsegmented', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+    if (next) search('');
+  };
+
+  return (
+    <div style={{
+      marginTop: 16, padding: 16, background: 'var(--bg-card)',
+      border: '1px solid var(--border)', borderRadius: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 700 }}>Hide Unsegmented Items</h3>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input type="checkbox" checked={enabled} onChange={toggle} />
+          <span style={{ fontSize: 13 }}>{enabled ? 'Enabled' : 'Disabled'}</span>
+        </label>
+      </div>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+        When enabled, library and channels exclude any file that doesn't have a 'done' preseg entry. Use the search below to see what's being skipped and why.
+      </p>
+      <>
+          <input
+            type="text" placeholder="Search skipped items (title, path, reason)..."
+            value={q} onChange={e => setQ(e.target.value)}
+            style={{
+              width: '100%', padding: '8px 10px', marginBottom: 8,
+              background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+              borderRadius: 6, color: 'var(--text)', fontSize: 13,
+            }}
+          />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+            {loading ? 'Loading…' : `${data.matched} of ${data.total} skipped items${data.matched > 500 ? ' (showing first 500)' : ''}`}
+          </div>
+          <div style={{
+            maxHeight: 360, overflowY: 'auto', border: '1px solid var(--border)',
+            borderRadius: 6, background: 'var(--bg-elevated)',
+          }}>
+            {data.items.length === 0 && !loading && (
+              <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>No matches.</div>
+            )}
+            {data.items.map((it, i) => (
+              <div key={(it.id || '') + i} style={{
+                padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12,
+              }}>
+                <div style={{ fontWeight: 600 }}>
+                  {it.title}{it.episodeTitle ? ` — ${it.episodeTitle}` : ''}
+                  {it.season != null && it.episode != null ? ` (S${it.season}E${it.episode})` : ''}
+                </div>
+                <div style={{ color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 11 }}>{it.path}</div>
+                <div style={{ color: '#f59e0b', marginTop: 2 }}>Reason: {it.reason}</div>
+              </div>
+            ))}
+          </div>
+      </>
+    </div>
+  );
+}
+

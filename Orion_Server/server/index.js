@@ -312,6 +312,19 @@ async function start() {
   loadConfig();
   await loadDB();
 
+  // ── API authentication (fix-05) ────────────────────────────────
+  // Registered before any /api route so it covers both the `api`
+  // router and streamforge's directly-mounted /api/sf/* handlers.
+  // /sf/* (HLS, m3u, xmltv) is deliberately NOT covered — players
+  // cannot send an Authorization header.
+  const orionAuth = require('./auth');
+  if (process.env.ORION_DISABLE_AUTH === '1') {
+    console.warn('[Auth] ORION_DISABLE_AUTH=1 — API authentication is OFF');
+  } else {
+    app.use('/api', orionAuth.middleware);
+    console.log('[Auth] API authentication enabled');
+  }
+
   // Mount routes AFTER db is loaded
   const api = express.Router();
   api.get('/health', (_, res) => res.json({ ok: true, movies: db.movies.length, tv: db.tvShows.length }));
@@ -325,7 +338,42 @@ async function start() {
     const type = (task.type || task.name || '').toLowerCase();
     console.log(`[Scheduler] Running task: ${task.name} (${type})`);
 
-    if (type.includes('scan') && !type.includes('metadata')) {
+    if (type.includes('normalize')) {
+      // Queue media scheduled in the configured window, then let the
+      // Normalizer drain it. Conversion itself is rate-limited by the
+      // dispatcher and its playback policy.
+      try {
+        const http = require('http');
+        const body = JSON.stringify({});
+        await new Promise((resolve, reject) => {
+          const rq = http.request({
+            host: '127.0.0.1', port: 3001,
+            path: '/api/sf/normalizer/queue-scheduled',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(body),
+              'X-Orion-Internal': '1'
+            },
+            timeout: 120000
+          }, r => {
+            let out = '';
+            r.on('data', c => out += c);
+            r.on('end', () => {
+              console.log('[Scheduler] normalize queued:', out.slice(0, 200));
+              resolve();
+            });
+          });
+          rq.on('error', reject);
+          rq.on('timeout', () => { rq.destroy(); reject(new Error('timeout')); });
+          rq.write(body);
+          rq.end();
+        });
+      } catch (e) {
+        console.error('[Scheduler] normalize task failed:', e.message);
+      }
+
+    } else if (type.includes('scan') && !type.includes('metadata')) {
       // Scan all library paths
       const paths = db.libraryPaths || { movies:[], tvShows:[], music:[], musicVideos:[] };
       for (const [libType, libPaths] of Object.entries(paths)) {
@@ -690,10 +738,18 @@ password=${password||''}
   });
 
   // Directory browser — lets the web UI browse server filesystem
-  api.get('/browse', (req, res) => {
+  api.get('/browse', async (req, res) => {
     const dirPath = req.query.path || '/';
+
+    // H2 + safety: this endpoint runs as root and reads any path the
+    // caller names. Reject traversal sequences, and read asynchronously
+    // so a large or unresponsive directory cannot freeze the process.
+    if (typeof dirPath !== 'string' || dirPath.includes('..') || dirPath.includes('\0')) {
+      return res.status(400).json({ error: 'invalid path' });
+    }
+
     try {
-      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
       const dirs = entries
         .filter(e => e.isDirectory() && !e.name.startsWith('.'))
         .map(e => ({
@@ -1024,11 +1080,11 @@ password=${password||''}
 
   // Intro detection
   api.get('/intro-detect', (req, res) => res.json({ status: 'idle' }));
-  api.post('/intro-detect', (req, res) => res.json({ ok: true }));
+  api.post('/intro-detect', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Logs
   api.get('/logs', (_, res) => res.json({ logs: [] }));
-  api.delete('/logs', (_, res) => res.json({ ok: true }));
+  api.delete('/logs', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Random media
   api.get('/random/:type', (req, res) => {
@@ -1037,14 +1093,14 @@ password=${password||''}
   });
 
   // Bandwidth
-  api.post('/bandwidth', (req, res) => res.json({ ok: true }));
+  api.post('/bandwidth', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
   api.get('/bandwidth', (req, res) => res.json({ history: [] }));
 
   // Watch party
   api.post('/party/create', (req, res) => res.json({ roomId: require('crypto').randomBytes(4).toString('hex') }));
   api.get('/party/:roomId', (req, res) => res.json({ roomId: req.params.roomId, members: [] }));
-  api.put('/party/:roomId/sync', (req, res) => res.json({ ok: true }));
-  api.post('/party/:roomId/join', (req, res) => res.json({ ok: true }));
+  api.put('/party/:roomId/sync', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.post('/party/:roomId/join', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Ratings, favorites, queue
   api.get('/ratings/:userId', (req, res) => res.json({}));
@@ -1053,21 +1109,21 @@ password=${password||''}
     if (item) { item.userRating = req.body.rating; saveDB(false); }
     res.json({ ok: true });
   });
-  api.delete('/ratings/:userId/:mediaId', (req, res) => res.json({ ok: true }));
+  api.delete('/ratings/:userId/:mediaId', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
   api.get('/favorites/:userId', (req, res) => res.json({ favorites: [] }));
-  api.post('/favorites/:userId/:mediaId', (req, res) => res.json({ ok: true }));
-  api.delete('/favorites/:userId/:mediaId', (req, res) => res.json({ ok: true }));
+  api.post('/favorites/:userId/:mediaId', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.delete('/favorites/:userId/:mediaId', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
   api.get('/queue/:userId', (req, res) => res.json({ queue: [] }));
-  api.put('/queue/:userId', (req, res) => res.json({ ok: true }));
-  api.delete('/queue/:userId', (req, res) => res.json({ ok: true }));
+  api.put('/queue/:userId', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.delete('/queue/:userId', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Device
-  api.post('/device/register', (req, res) => res.json({ ok: true }));
+  api.post('/device/register', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
   api.get('/device/profiles', (_, res) => res.json({ profiles: [] }));
 
   // Webhooks
-  api.put('/webhooks', (req, res) => res.json({ ok: true }));
-  api.post('/webhooks/test', (req, res) => res.json({ ok: true }));
+  api.put('/webhooks', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.post('/webhooks/test', (req, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Home page
   api.get('/home/:userId', (req, res) => res.json({ sections: [] }));
@@ -1094,12 +1150,12 @@ password=${password||''}
 
   // Poster cache
   api.get('/postercache/status', (_, res) => res.json({ status: 'idle', cached: 0 }));
-  api.post('/postercache/start', (_, res) => res.json({ ok: true }));
+  api.post('/postercache/start', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Pretranscode
   api.get('/pretranscode/status', (_, res) => res.json({ status: 'idle' }));
-  api.post('/pretranscode/start', (_, res) => res.json({ ok: true }));
-  api.post('/pretranscode/stop', (_, res) => res.json({ ok: true }));
+  api.post('/pretranscode/start', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.post('/pretranscode/stop', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Metadata reset per type
   api.post('/library/:type/metadata/reset', async (req, res) => {
@@ -1157,10 +1213,10 @@ password=${password||''}
   api.put('/autocollections/config', (req, res) => { updateConfig({ autocollections: { ...(getConfig().autocollections||{}), ...req.body } }); res.json(getConfig().autocollections); });
   api.post('/autocollections/run', (_, res) => res.json({ ok: true, status: 'started' }));
   api.get('/autocollections/status', (_, res) => res.json({ running: false, phase: 'idle', done: 0, total: 0, current: '' }));
-  api.post('/autocollections/franchises', (_, res) => res.json({ ok: true }));
-  api.post('/autocollections/refresh-thumbnails', (_, res) => res.json({ ok: true }));
+  api.post('/autocollections/franchises', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.post('/autocollections/refresh-thumbnails', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
   api.get('/autocollections/streaming/status', (_, res) => res.json({ running: false, done: 0, total: 0 }));
-  api.post('/autocollections/streaming/run', (_, res) => res.json({ ok: true }));
+  api.post('/autocollections/streaming/run', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // TMDB search proxy
   api.get('/tmdb/search', async (req, res) => {
@@ -1224,8 +1280,8 @@ password=${password||''}
     });
   });
   api.get('/metadata/providers/status', (_, res) => res.json({ status: 'idle' }));
-  api.post('/metadata/providers/refresh', (_, res) => res.json({ ok: true }));
-  api.post('/metadata/providers/stop', (_, res) => res.json({ ok: true }));
+  api.post('/metadata/providers/refresh', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.post('/metadata/providers/stop', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
 
   // Streaming services
   api.get('/streaming-services', (_, res) => res.json({ services: db.streamingServices || [] }));

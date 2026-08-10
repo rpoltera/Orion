@@ -28,3 +28,17 @@ NUL
 
 # Logs
 *.log
+
+# backups from patch scripts
+*.bak
+*.bak.*
+*.broken.*
+*.removed.*
+*.pre-*
+server.prev-*
+build.broken.*
+
+# runtime
+auth-tokens.json
+node_modules/
+.claude/

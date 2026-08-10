@@ -611,12 +611,34 @@ function regeneratePlaylist(ch) {
     }
     if (swaps > 0) console.log('[PlayoutEngine] ' + ch.name + ': back-to-back killed (' + swaps + ' swaps, ' + (passes+1) + ' passes)');
   })();
-  const anchor = (items[0] && items[0]._scheduledStart) ? items[0]._scheduledStart : (ch.playoutStart ? new Date(ch.playoutStart).getTime() : new Date(new Date().toISOString().slice(0,10)+'T00:00:00Z').getTime());
-  const total = items.reduce(function(a,b){return a+b.duration;}, 0);
-  const elapsed = Math.floor((Date.now()-anchor)/1000);
-  const inLoop = ((elapsed%total)+total)%total;
-  let cur=0, idx=0, ip=0;
-  for (let i=0;i<items.length;i++) { if(cur+items[i].duration>inLoop){idx=i;ip=inLoop-cur;break;} cur+=items[i].duration; }
+  // [RESUME-FIX] First try absolute wall-clock lookup against items' scheduledStart/End windows.
+  // This survives orion restarts because scheduledPrograms persists in channels.json with the
+  // original start times — we just need to find which item's window contains "now".
+  let idx = 0, ip = 0;
+  const _now = Date.now();
+  let _foundByTime = false;
+  if (items[0] && items[0]._scheduledStart && items[0]._scheduledEnd) {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it._scheduledStart && it._scheduledEnd && _now >= it._scheduledStart && _now < it._scheduledEnd) {
+        idx = i;
+        ip = Math.max(0, Math.floor((_now - it._scheduledStart) / 1000));
+        _foundByTime = true;
+        console.log('[PlayoutEngine] ' + ch.name + ': [RESUME] idx=' + idx + ' ip=' + ip + 's into "' + (it.title || '?').slice(0,40) + '"');
+        break;
+      }
+    }
+  }
+  // Fallback: legacy loop-based math (when items lack scheduledStart, or schedule has aged out)
+  if (!_foundByTime) {
+    const anchor = (items[0] && items[0]._scheduledStart) ? items[0]._scheduledStart : (ch.playoutStart ? new Date(ch.playoutStart).getTime() : new Date(new Date().toISOString().slice(0,10)+'T00:00:00Z').getTime());
+    const total = items.reduce(function(a,b){return a+b.duration;}, 0);
+    const elapsed = Math.floor((Date.now()-anchor)/1000);
+    const inLoop = ((elapsed%total)+total)%total;
+    let cur=0;
+    for (let i=0;i<items.length;i++) { if(cur+items[i].duration>inLoop){idx=i;ip=inLoop-cur;break;} cur+=items[i].duration; }
+    console.log('[PlayoutEngine] ' + ch.name + ': [RESUME-FALLBACK] idx=' + idx + ' ip=' + ip + 's (loop math)');
+  }
   // libraryLoop: metadata duration unreliable, skip wallclock seek and start at top
   // [PATCHED] wallclock seek RE-ENABLED — keep idx/ip from calculation above
   // [PATCHED] Probe first file: clamp ip if it exceeds actual duration OR if source is HEVC (NVDEC seek artifacts)
@@ -630,23 +652,79 @@ function regeneratePlaylist(ch) {
     if (_realDur > 0 && ip > _realDur - 30) {
       console.log('[PlayoutEngine] ' + ch.name + ': ip=' + ip + 's exceeds actual ' + _realDur + 's — using 0');
       ip = 0;
-    } else if (_codec === 'hevc' || _codec === 'h265') {
-      console.log('[PlayoutEngine] ' + ch.name + ': source is ' + _codec + ' — disabling inpoint (NVDEC seek artifacts)');
-      ip = 0;
     }
+    // [RESUME-FIX3] HEVC inpoint-zeroing removed entirely.
+    // Trade-off: HEVC seek may show 1-2s of visual artifacts; in return channels actually resume.
   } catch (e) {}
   const ord=[Object.assign({},items[idx],{inpoint:ip})].concat(items.slice(idx+1)).concat(items.slice(0,idx));
   const file=path.join(PLAYLIST_BASE, ch.id+'.txt');
   const out=[];
+
+  // [LOCKSTEP-PRESEG] Load preseg registry, build mediaId/filePath -> hlsDir index
+  let _presegIdx = {};
+  try {
+    const _presegData = JSON.parse(fs.readFileSync('/var/lib/orion/sf/preseg.json', 'utf8'));
+    for (const [pk, pv] of Object.entries(_presegData)) {
+      if (pv && pv.status === 'done' && pv.hlsDir && pv.filePath) {
+        try { fs.accessSync(pv.hlsDir); _presegIdx[pk] = pv.hlsDir; _presegIdx[pv.filePath] = pv.hlsDir; } catch {}
+      }
+    }
+  } catch {}
+
+  let _presegHits = 0, _presegMisses = 0;
+  let _allPreseg = true;
   for (const it of ord) {
+    const _hlsDir = _presegIdx[it.mediaId] || _presegIdx[it.filePath] || _presegIdx[it._filePath];
+    if (_hlsDir) {
+      try {
+        const _m3u8 = fs.readFileSync(path.join(_hlsDir, 'index.m3u8'), 'utf8');
+        // Parse #EXTINF durations so we can skip segments to honor inpoint
+        const _lines = _m3u8.split('\n').map(l => l.trim());
+        const _tsList = [];  // [{file, duration}]
+        let _pendingDur = 0;
+        for (const _l of _lines) {
+          if (_l.startsWith('#EXTINF:')) {
+            const _m = _l.match(/#EXTINF:([\d.]+)/);
+            _pendingDur = _m ? parseFloat(_m[1]) : 2;
+          } else if (_l && !_l.startsWith('#')) {
+            _tsList.push({file: _l, duration: _pendingDur || 2});
+            _pendingDur = 0;
+          }
+        }
+        // [RESUME-FIX2] If this is the FIRST item (current playback position), skip segments to honor inpoint
+        let _skipped = 0;
+        const _wantSkip = (it.inpoint || 0);
+        let _accumulated = 0;
+        let _startIdx = 0;
+        if (_wantSkip > 0) {
+          for (let i = 0; i < _tsList.length; i++) {
+            if (_accumulated + _tsList[i].duration > _wantSkip) { _startIdx = i; break; }
+            _accumulated += _tsList[i].duration;
+          }
+          _skipped = _startIdx;
+        }
+        for (let i = _startIdx; i < _tsList.length; i++) {
+          const _full = path.join(_hlsDir, _tsList[i].file);
+          out.push("file '" + _full.replace(/'/g, "'\\''") + "'");
+        }
+        if (_skipped > 0) console.log('[PlayoutEngine] ' + ch.name + ': preseg resumed at segment ' + _skipped + ' (skipped ' + Math.round(_accumulated) + 's)');
+        _presegHits++;
+        continue;
+      } catch (e) {}
+    }
+    // Fallback: source file (no preseg) — needs GPU encode
+    _allPreseg = false;
+    _presegMisses++;
     out.push("file '" + it.filePath.replace(/'/g, "'\\''") + "'");
     if (it.inpoint > 0) out.push('inpoint ' + it.inpoint);
   }
   fs.writeFileSync(file, out.join('\n')+'\n');
+  console.log('[PlayoutEngine] ' + ch.name + ': preseg ' + _presegHits + '/' + ord.length + ' items (allPreseg=' + _allPreseg + ')');
+
   ord[0]._effectiveDuration=Math.max(1,ord[0].duration-(ord[0].inpoint||0));
   for (let i=1;i<ord.length;i++) ord[i]._effectiveDuration=ord[i].duration;
   const durationMs=ord.reduce(function(a,b){return a+(b._effectiveDuration||b.duration)*1000;},0);
-  playlists.set(ch.id, {items:ord, generatedAt:Date.now(), durationMs, file});
+  playlists.set(ch.id, {items:ord, generatedAt:Date.now(), durationMs, file, useCopyMode: _allPreseg});
   console.log('[PlayoutEngine] '+ch.name+' wall-clock anchored');
   return items;
 }
@@ -680,6 +758,26 @@ function startChannelStream(ch) {
     return null;
   }
 
+  // [PRESEG-DIRECT] zero-ffmpeg serve when channel is opted-in and fully pre-segmented
+  if (ch.presegDirect) {
+    try {
+      const _pd = require('./preseg-direct');
+      const _vs = _pd.startVirtual({
+        ch, playlist,
+        hlsDir: path.join(HLS_BASE, ch.id),
+        regenerate: () => { try { regeneratePlaylist(ch); } catch {} return playlists.get(ch.id); },
+      });
+      if (_vs) {
+        streams.set(ch.id, _vs);
+        console.log(`[PlayoutEngine] Starting "${ch.name}" [PRESEG-DIRECT zero-ffmpeg] — ${playlist.items.length} items queued`);
+        return _vs;
+      }
+      console.warn(`[PlayoutEngine] "${ch.name}" presegDirect set but not fully pre-segmented — using ffmpeg`);
+    } catch (e) {
+      console.error(`[PlayoutEngine] preseg-direct error for "${ch.name}": ${e.message} — using ffmpeg`);
+    }
+  }
+
   // Prepare HLS directory
   const hlsDir = path.join(HLS_BASE, ch.id);
   try { fs.mkdirSync(hlsDir, { recursive: true }); } catch {}
@@ -690,15 +788,34 @@ function startChannelStream(ch) {
   } catch {}
 
   const _gpuId = _gpuForChannel(ch.id);
-  // [PATCHED] Determine if we can use NVDEC (h264 only)
   let _firstFile = null;
   try { const fc = fs.readFileSync(playlist.file, 'utf8'); const m = fc.match(/^file '(.+)'$/m); _firstFile = m && m[1]; } catch {}
   const _codec = _firstFile ? _detectCodecSync(_firstFile) : 'unknown';
-  const _useHwaccel = ['h264','hevc','mpeg2video','mpeg4','vc1','vp8','unknown'].includes(_codec);  // [PATCHED cpufix] failed detection still tries GPU  // [PATCHED] HEVC NVDEC produces corrupt frames on P40 — fall back to SW decode for HEVC
-  // Build ffmpeg args — one persistent ffmpeg using concat demuxer
+  // [LOCKSTEP-PRESEG-H264] Stream-copy when: all items pre-segmented OR source is h264 (TS-compatible, no GPU needed)
+  const _useCopyMode = (playlist.useCopyMode === true) || (_codec === 'h264');
+  const _useHwaccel = !_useCopyMode && ['hevc','mpeg2video','mpeg4','vc1','vp8','unknown'].includes(_codec);
   const W = deps.outputWidth;
   const H = deps.outputHeight;
-  const args = [
+  const args = _useCopyMode ? [
+    '-hide_banner', '-loglevel', 'warning',
+    '-fflags', '+genpts+discardcorrupt',
+    '-err_detect', 'ignore_err',
+    '-re',
+    '-f', 'concat', '-safe', '0',
+    '-i', playlist.file,
+    '-map', '0:v:0?', '-map', '0:a:0?',
+    '-c', 'copy',
+    '-avoid_negative_ts', 'make_zero',
+    '-f', 'hls',
+    '-hls_time', '1',
+    '-hls_list_size', '30',
+    '-hls_flags', 'delete_segments+append_list+independent_segments+omit_endlist',
+    '-hls_segment_type', 'mpegts',
+    '-hls_allow_cache', '0',
+    '-flush_packets', '1',
+    '-hls_segment_filename', path.join(hlsDir, 'seg%05d.ts'),
+    path.join(hlsDir, 'index.m3u8'),
+  ] : [
     '-hide_banner', '-loglevel', 'warning',
     '-threads', '2',  // [PATCHED cpufix] cap per-process threads
     '-fflags', '+genpts+discardcorrupt',
@@ -714,13 +831,13 @@ function startChannelStream(ch) {
     '-vcodec', 'h264_nvenc', '-gpu', String(_gpuId),
     '-preset', 'p1', '-rc:v', 'vbr', '-cq:v', '23',
     '-b:v', '4M', '-maxrate:v', '8M', '-bufsize:v', '8M',
-    '-g', '60', '-keyint_min', '60', '-sc_threshold', '0',
-    '-force_key_frames', 'expr:gte(t,n_forced*2)',
+    '-g', '30', '-keyint_min', '30', '-sc_threshold', '0',
+    '-force_key_frames', 'expr:gte(t,n_forced*1)',
     '-acodec', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000',
     '-avoid_negative_ts', 'make_zero',
     '-f', 'hls',
-    '-hls_time', '2',
-    '-hls_list_size', '90',
+    '-hls_time', '1',
+    '-hls_list_size', '30',
     '-hls_flags', 'delete_segments+append_list+independent_segments+omit_endlist',
     '-hls_segment_type', 'mpegts',
     '-hls_allow_cache', '0',
@@ -729,7 +846,7 @@ function startChannelStream(ch) {
     path.join(hlsDir, 'index.m3u8'),
   ];
 
-  console.log(`[PlayoutEngine] Starting "${ch.name}" on GPU ${_gpuId} [${_codec}/${_useHwaccel ? "nvdec" : "cpu"}] — ${playlist.items.length} items queued`);
+  console.log(`[PlayoutEngine] Starting "${ch.name}" ${_useCopyMode ? '[STREAM-COPY no GPU]' : `on GPU ${_gpuId} [${_codec}/${_useHwaccel ? "nvdec" : "cpu"}]`} — ${playlist.items.length} items queued`);
   const proc = spawn(deps.ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
   const stream = { proc, startedAt: Date.now(), channelId: ch.id, restarts: 0, gpuId: _gpuId };
   // [PATCHED] Reserve GPU slot for load balancer

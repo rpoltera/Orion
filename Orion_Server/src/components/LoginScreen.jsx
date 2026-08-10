@@ -51,6 +51,7 @@ export default function LoginScreen({ onLogin }) {
         body: JSON.stringify({ username: setupName.trim(), password: setupPass }),
       });
       const data = await res.json();
+      if (data.token) window.orionSetToken(data.token);
       if (data.ok) {
         onLogin({ ...data.user, avatar: setupAvatar });
         // Save avatar
@@ -80,6 +81,7 @@ export default function LoginScreen({ onLogin }) {
         body: JSON.stringify({ name, password }),
       });
       const data = await res.json();
+      if (data.token) window.orionSetToken(data.token);
       if (data.ok) { onLogin(data.user); }
       else { setError(data.error || 'Invalid username or password'); setPassword(''); }
     } catch (e) {

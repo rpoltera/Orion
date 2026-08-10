@@ -13,6 +13,7 @@ const fs      = require('fs');
 const fsp     = require('fs').promises;
 const { v4: uuidv4 }          = require('uuid');
 const { spawn, execSync }      = require('child_process');
+const express = require('express');
 const multer  = require('multer');
 const crypto  = require('crypto');
 const playoutEngine = require('./playout-engine');
@@ -21,6 +22,7 @@ const playoutEngine = require('./playout-engine');
 let SF_DIR, SF_CFG, SF_CHANNELS, SF_LIBRARIES, SF_MEDIA, SF_EPG, SF_STREAMS, SF_EPG_DISABLED;
 
 // ── State ─────────────────────────────────────────────────────────────────────
+let _procCache = null;   // H2: short-lived /proc read cache
 let sfDb = {};
 let sfConfig = {};
 let ffmpegExe = '', ffprobeExe = '', hwEncoder = 'libx264';
@@ -33,7 +35,35 @@ let _mediaCombinedDirty = true;
 let _showsCache = null; // pre-built show index, rebuilt when media cache rebuilds
 const _mediaById = new Map(); // id -> item for O(1) lookups
 
-let _networkIndex = new Map(); // network -> [items]
+let _networkIndex = new Map();
+
+// === [PRESEG-FILTER] Skipped items tracking for hideUnsegmented mode ===
+let _skippedItems = [];
+let _presegDoneSet = null;
+let _presegDoneSetTime = 0;
+function _loadPresegDoneSet() {
+  const now = Date.now();
+  if (_presegDoneSet && (now - _presegDoneSetTime) < 30000) return _presegDoneSet;
+  const set = new Set();
+  try {
+    const p = path.join(SF_DIR, 'preseg.json');
+    if (fs.existsSync(p)) {
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      for (const v of Object.values(data)) {
+        if (v && v.status === 'done' && v.filePath) set.add(v.filePath);
+      }
+    }
+  } catch (e) { console.error('[PRESEG-FILTER] load failed:', e.message); }
+  _presegDoneSet = set;
+  _presegDoneSetTime = now;
+  return set;
+}
+function _invalidatePresegDoneSet() {
+  _presegDoneSet = null;
+  _mediaCombinedDirty = true;
+  _mediaCombinedCache = null;
+}
+ // network -> [items]
 
 function invalidateMediaCache() {
   _mediaCombinedDirty = true;
@@ -204,6 +234,31 @@ function getMediaCombined() {
   const ids = new Set(sfOwn.map(m => m.id));
   const orionNew = mapped.filter(m => !ids.has(m.id));
   const combined = [...sfOwn, ...orionNew];
+  // === [PRESEG-FILTER] Always compute skipped list; filter only when flag is on ===
+  _skippedItems = [];
+  const _doneSet = _loadPresegDoneSet();
+  for (const item of combined) {
+    if (item.path && _doneSet.has(item.path)) continue;
+    _skippedItems.push({
+      id: item.id,
+      title: item.title || '',
+      episodeTitle: item.episodeTitle || null,
+      path: item.path || '',
+      type: item.type,
+      season: item.season,
+      episode: item.episode,
+      reason: !item.path ? 'no file path in DB' : 'not preseg-segmented',
+    });
+  }
+  if (sfConfig && sfConfig.hideUnsegmented) {
+    const kept = combined.filter(item => item.path && _doneSet.has(item.path));
+    combined.length = 0;
+    combined.push(...kept);
+    console.log('[PRESEG-FILTER] active: kept=' + kept.length + ' skipped=' + _skippedItems.length);
+  } else if (_skippedItems.length > 0) {
+    console.log('[PRESEG-FILTER] tracking ' + _skippedItems.length + ' unsegmented items (filter OFF)');
+  }
+
   // Build id index
   _mediaById.clear();
   for (const item of combined) _mediaById.set(item.id, item);
@@ -665,20 +720,38 @@ function _ps_buildEpisodeListSchedule(ch, fromMs, toMs) {
   const eps = (ch.seriesSchedule || {}).episodes || [];
   if (!eps.length) return [];
   const allMedia = _ps_getAllMedia();
+  const _norm = v => String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');
   const byId = new Map();
-  for (const m of allMedia) if (m.id) byId.set(m.id, m);
+  const bySeriesEp = new Map();
+  const showTitle = (ch.seriesSchedule || {}).showTitle || '';
+  for (const m of allMedia) {
+    if (m.id) byId.set(m.id, m);
+    if (m.seriesTitle && m.season != null && m.episode != null) {
+      const k = _norm(m.seriesTitle) + '|' + m.season + '|' + m.episode;
+      if (!bySeriesEp.has(k)) bySeriesEp.set(k, m);
+    }
+  }
   const programs = [];
   let t = fromMs, idx = 0, safety = 0;
+  let primaryHits = 0, secondaryHits = 0, missed = 0;
   while (t < toMs && safety++ < 20000) {
     const ref = eps[idx % eps.length]; idx++;
-    const full = (ref.mediaId && byId.get(ref.mediaId)) || ref;
-    if (!full) { t += 1800000; continue; }
+    // [STALE-FIX] Primary lookup by mediaId. If stale (library rescanned, new IDs), recover by (showTitle, season, episode).
+    let full = ref.mediaId && byId.get(ref.mediaId);
+    if (full) primaryHits++;
+    if (!full && ref.season != null && ref.episode != null && showTitle) {
+      const k = _norm(showTitle) + '|' + ref.season + '|' + ref.episode;
+      full = bySeriesEp.get(k);
+      if (full) secondaryHits++;
+    }
+    if (!full) { missed++; t += 1800000; continue; }
     const dur = (full.duration || ref.duration || 1800) * 1000;
     const end = Math.min(t + dur, toMs);
     const p = _ps_makeProgram(t, end, full, ch.name);
     if (p) programs.push(p);
     t = end;
   }
+  if (secondaryHits || missed) console.log('[SF] ' + ch.name + ' episode-list: primary=' + primaryHits + ' secondary=' + secondaryHits + ' missed=' + missed);
   return programs;
 }
 
@@ -850,14 +923,32 @@ function generateChannelSchedule(ch, fromMs, toMs) {
 
   const showIndex = new Map();
   for (const it of tvShows) {
-    const st = it.seriesTitle || '';
-    if (!st || it.season == null || it.episode == null) continue;
+    const st = it.seriesTitle || it.showName || '';
+    if (!st) continue;
     const p = it.path || it.filePath || '';
     if (!p) continue;
+    // [ROTFIX] Tolerate missing season/episode by falling back to seasonNum + filename parse
+    let _season = it.season;
+    if (_season == null) _season = it.seasonNum;
+    let _episode = it.episode;
+    if (_episode == null) {
+      const m = (it.fileName || it.filePath || '').match(/[Ss]\d{1,3}[Ee](\d{1,3})/);
+      if (m) _episode = parseInt(m[1]);
+    }
+    if (_season == null && _episode == null) {
+      // also try filename for both
+      const m = (it.fileName || it.filePath || '').match(/[Ss](\d{1,3})[Ee](\d{1,3})/);
+      if (m) { _season = parseInt(m[1]); _episode = parseInt(m[2]); }
+    }
+    if (_season == null || _episode == null) continue;
+    // Annotate item with resolved values so downstream code (sort, lookup) works
+    it.season = _season;
+    it.episode = _episode;
     const k = norm(st);
     if (!showIndex.has(k)) showIndex.set(k, []);
     showIndex.get(k).push(it);
   }
+  console.log("[DEBUG-ROT] ch=" + ch.name + " showIdxSize=" + showIndex.size + " animaniacs=" + ((showIndex.get("animaniacs")||[]).length) + " teentitansgo=" + ((showIndex.get("teentitansgo")||[]).length) + " phineasandferb=" + ((showIndex.get("phineasandferb")||[]).length));
   for (const arr of showIndex.values()) {
     arr.sort((a,b)=> (a.season-b.season) || (a.episode-b.episode));
   }
@@ -1016,15 +1107,32 @@ function _buildScheduleRotation(ch, fromMs, toMs) {
   const tvShows = (orionDb && Array.isArray(orionDb.tvShows)) ? orionDb.tvShows : [];
 
   // Build show->episodes index once
+  // [ROTFIX2] Tolerate missing season/episode by falling back to seasonNum + filename parse
   const showIndex = new Map();
   for (const it of tvShows) {
-    const st = it.seriesTitle || '';
-    if (!st || it.season == null || it.episode == null) continue;
+    const st = it.seriesTitle || it.showName || '';
+    if (!st) continue;
+    let _season = it.season;
+    if (_season == null) _season = it.seasonNum;
+    let _episode = it.episode;
+    // [REPEAT-FIX] Parse season AND episode from filename whenever EITHER is missing.
+    // Previous logic required BOTH null, so an episode whose DB record had episode set but season null
+    // would be skipped — collapsing shows to whatever single episode had full metadata, looping forever.
+    if (_season == null || _episode == null) {
+      const m = (it.fileName || it.filePath || '').match(/[Ss](\d{1,3})[Ee](\d{1,3})/);
+      if (m) {
+        if (_season == null) _season = parseInt(m[1]);
+        if (_episode == null) _episode = parseInt(m[2]);
+      }
+    }
+    if (_season == null || _episode == null) continue;
+    it.season = _season;
+    it.episode = _episode;
     const k = norm(st);
     if (!showIndex.has(k)) showIndex.set(k, []);
     showIndex.get(k).push(it);
   }
-  // Sort each show's episodes by (season, episode)
+  console.log("[DEBUG-ROT] ch=" + ch.name + " showIdxSize=" + showIndex.size + " animaniacs=" + ((showIndex.get("animaniacs")||[]).length) + " teentitansgo=" + ((showIndex.get("teentitansgo")||[]).length) + " phineasandferb=" + ((showIndex.get("phineasandferb")||[]).length));
   for (const arr of showIndex.values()) {
     arr.sort((a,b)=> (a.season-b.season) || (a.episode-b.episode));
   }
@@ -1167,7 +1275,11 @@ function _buildScheduleOld(ch, fromMs, toMs) {
 let _nextGpuIdx = 0;
 const _gpuWorkerCount = {};
 function assignGpu() {
-  const count = Math.max(1, parseInt(sfConfig.gpuCount) || 1);
+  const _caps = require('./capabilities')();
+  const count = Math.max(1, Math.min(
+    parseInt(sfConfig.gpuCount) || _caps.gpuCount || 1,
+    _caps.gpuCount || 1
+  ));
   let minLoad = Infinity, bestGpu = 0;
   for (let i = 0; i < count; i++) {
     const load = _gpuWorkerCount[i] || 0;
@@ -2079,12 +2191,22 @@ function _startHlsSessionOld(ch, opts={}) {
       const restartDelay = isError
         ? Math.min(2000 * Math.pow(3, Math.min(crashes, 5)), 300000)
         : 2000;
+      // H3: give up after repeated fast failures instead of retrying forever.
+      const MAX_FAST_CRASHES = parseInt(process.env.ORION_MAX_CRASHES, 10) || 8;
+      if (crashes >= MAX_FAST_CRASHES) {
+        const deadCh = sfDb.channels.find(c=>c.id===channelId);
+        console.error('[SF/HLS] Giving up on "' + (deadCh ? deadCh.name : channelId) +
+          '" after ' + crashes + ' consecutive fast failures. ' +
+          'Marked unavailable — fix the source and restart the channel.');
+        if (deadCh) { deadCh._unavailable = true; deadCh._unavailableAt = Date.now(); }
+        return;
+      }
       setTimeout(() => {
         const stillCh = sfDb.channels.find(c=>c.id===channelId);
         if (stillCh && !hlsSessions[channelId]) {
           if (crashes > 0) console.log(`[SF/HLS] Auto-restarting keepAlive channel "${stillCh.name}" (delay=${restartDelay}ms, crash #${crashes})`);
           const s = startHlsSession(stillCh, { keepAlive: true });
-          if (s) s._crashCount = crashes > 5 ? 0 : crashes; // reset after long backoff
+          if (s) s._crashCount = crashes; // keep counting; do not reset
         }
       }, restartDelay);
     }
@@ -2164,9 +2286,29 @@ function getAdaptiveResolution() {
 
 setInterval(() => {
   const now = Date.now(), idleMs = (sfConfig.hlsIdleTimeoutSecs||60)*1000;
-  Object.entries(hlsSessions).forEach(([id,sess]) => {
-    if (sess.keepAlive) return; // never idle-kill always-on channels
-    if(now-sess.lastRequest>idleMs) { try{sess.proc.kill('SIGKILL');}catch{} delete hlsSessions[id]; }
+  const caps = require('./capabilities')();
+  const keepAliveIdleMs = idleMs * 10; // generous, but not infinite
+
+  const entries = Object.entries(hlsSessions);
+  const keepAlives = entries.filter(([,s]) => s.keepAlive);
+
+  // H4: if more always-on sessions than this machine can sustain, retire the
+  // least recently requested ones. They restart on demand when tuned.
+  if (keepAlives.length > caps.maxKeepAlive) {
+    keepAlives
+      .sort((a,b) => a[1].lastRequest - b[1].lastRequest)
+      .slice(0, keepAlives.length - caps.maxKeepAlive)
+      .forEach(([id,sess]) => {
+        console.log('[SF/HLS] Retiring keepAlive session over capacity:', id);
+        try{sess.proc.kill('SIGKILL');}catch{}
+        delete hlsSessions[id];
+      });
+  }
+
+  entries.forEach(([id,sess]) => {
+    if (!hlsSessions[id]) return;
+    const limit = sess.keepAlive ? keepAliveIdleMs : idleMs;
+    if(now-sess.lastRequest>limit) { try{sess.proc.kill('SIGKILL');}catch{} delete hlsSessions[id]; }
   });
 }, 5000);
 
@@ -2454,6 +2596,9 @@ function buildAIPrompt(epgChannelName, programs, showMap, movieList, userPrompt,
 // Export invalidateMediaCache so index.js can call it after library scans
 let _externalInvalidate = null;
 module.exports.invalidateMediaCache = () => { if (_externalInvalidate) _externalInvalidate(); };
+module.exports.getSkippedItems = () => _skippedItems.slice();
+module.exports.invalidatePresegDoneSet = _invalidatePresegDoneSet;
+
 
 module.exports = function mountStreamForge(app, orion) {
   _externalInvalidate = invalidateMediaCache;
@@ -2658,6 +2803,19 @@ module.exports = function mountStreamForge(app, orion) {
   });
 
   // Reset presegDb entries so they get re-validated on next queue
+  // Daily scheduled-media preseg — handled by the external preseg service.
+  app.post('/api/sf/preseg/daily-run', async (req, res) => {
+    if (!_externalPresegEnabled()) {
+      return res.status(409).json({ error: 'external preseg service is not enabled' });
+    }
+    try {
+      const result = await _postToPreseg('/daily-run', req.body || {});
+      res.json(result);
+    } catch (e) {
+      res.status(502).json({ error: 'orion-preseg daily-run failed: ' + e.message });
+    }
+  });
+
   app.post('/api/sf/preseg/reset', (req, res) => {
     const { mediaId } = req.body;
     if (mediaId) {
@@ -2673,6 +2831,80 @@ module.exports = function mountStreamForge(app, orion) {
     savePresegDb();
     res.json({ ok:true });
   });
+
+  // ─── Proxy: forward /api/sf/preseg/* and /api/sf/convert/* to service ports ─
+  function proxyService_orion(targetPort) {
+    return (req, res) => {
+      const http = require('http');
+      const targetPath = req.originalUrl.replace(/^\/api\/sf\/(preseg|convert)/, '') || '/';
+      const opts = {
+        host: '127.0.0.1', port: targetPort, path: targetPath, method: req.method,
+        timeout: 2000,
+        headers: { ...req.headers, host: '127.0.0.1:' + targetPort }
+      };
+      const pr = http.request(opts, (pres) => {
+        res.status(pres.statusCode);
+        Object.entries(pres.headers).forEach(([k,v]) => { try { res.setHeader(k,v); } catch(e){} });
+        pres.pipe(res);
+      });
+      pr.on('timeout', () => { pr.destroy(new Error('upstream timeout')); });
+      pr.on('error', err => _presegFallback(req, res, targetPort, err));
+      req.pipe(pr);
+    };
+  }
+
+  // [PRESEG-FALLBACK] When preseg-service (3002) is stopped, synth status/config from disk
+  function _presegFallback(req, res, targetPort, err) {
+    try {
+      if (targetPort === 3002 && req.method === 'GET') {
+        const path = require('path');
+        if (req.originalUrl.includes('/preseg/status')) {
+          const presegPath = path.join(SF_DIR, 'preseg.json');
+          const db = JSON.parse(fs.readFileSync(presegPath, 'utf8'));
+          const counts = { done: 0, queued: 0, processing: 0, error: 0, skipped: 0, pending: 0 };
+          for (const v of Object.values(db)) {
+            if (!v || typeof v !== 'object') continue;
+            const st = v.status || 'unknown';
+            if (st === 'done') counts.done++;
+            else if (st === 'queued') counts.queued++;
+            else if (st === 'processing') counts.processing++;
+            else if (st === 'error') counts.error++;
+            else if (st === 'pending') counts.pending++;
+            else if (st.startsWith('skipped')) counts.skipped++;
+          }
+          let maxW = 8, maxG = 8, gc = 4;
+          try {
+            const cfgRoot = JSON.parse(fs.readFileSync('/var/lib/orion/config.json', 'utf8'));
+            const pc = (cfgRoot.services && cfgRoot.services.preseg && cfgRoot.services.preseg.config) || {};
+            maxW = pc.workers || 8; gc = pc.gpuCount || 4; maxG = (pc.maxGpuPreseg || 2) * gc;
+          } catch {}
+          return res.json({
+            ...counts,
+            workers: 0, maxWorkers: maxW,
+            gpuWorkers: 0, cpuWorkers: 0, maxGpu: maxG, maxCpu: 0,
+            gpuPerGpu: Array(gc).fill(0),
+            enabled: true, serviceRunning: false,
+            total: Object.keys(db).length,
+            queueLen: counts.queued,
+          });
+        }
+        if (req.originalUrl.includes('/preseg/config')) {
+          const cfgRoot = JSON.parse(fs.readFileSync('/var/lib/orion/config.json', 'utf8'));
+          const pc = (cfgRoot.services && cfgRoot.services.preseg && cfgRoot.services.preseg.config) || {};
+          return res.json({ enabled: true, port: 3002, ...pc, serviceRunning: false });
+        }
+      }
+    } catch (e) {
+      console.error('[PRESEG-FALLBACK]', e.message);
+    }
+    res.status(502).json({ error: 'proxy', detail: err.message, serviceRunning: false });
+  }
+  app.get('/api/sf/preseg/status', proxyService_orion(3002));
+  app.get('/api/sf/preseg/config', proxyService_orion(3002));
+  app.put('/api/sf/preseg/config', proxyService_orion(3002));
+  app.get('/api/sf/convert/status', proxyService_orion(3003));
+  app.get('/api/sf/convert/config', proxyService_orion(3003));
+  app.put('/api/sf/convert/config', proxyService_orion(3003));
 
   app.post('/api/sf/preseg/queue-channel', async (req, res) => {
     const { channelId } = req.body;
@@ -2814,6 +3046,12 @@ module.exports = function mountStreamForge(app, orion) {
 
     // System: /proc reads
     try {
+      // H2: this endpoint is polled every 2s per open tab. Re-reading
+      // /proc on each call is wasted syscalls; the numbers do not move
+      // meaningfully inside a 2s window.
+      if (_procCache && Date.now() - _procCache.at < 2000) {
+        return _procCache.value;
+      }
       const loadavg = _fs.readFileSync('/proc/loadavg', 'utf8').trim().split(' ').slice(0,3);
       const mem = {};
       _fs.readFileSync('/proc/meminfo', 'utf8').split('\n').forEach(l => {
@@ -3278,6 +3516,1084 @@ module.exports = function mountStreamForge(app, orion) {
     try { const r = await _httpToConvert('DELETE', '/item/' + req.params.mediaId); res.status(r.status).json(r.body); }
     catch (e) { res.status(502).json({ error: e.message }); }
   });
+
+
+
+  // =====================================================================
+  // ORION_LIBRARY_NORMALIZER_V1
+  // Gradually normalize TV episodes for fast HLS remux:
+  //   H.264 / yuv420p / AAC
+  // =====================================================================
+
+  const NORMALIZER_STATE_FILE = '/var/lib/orion/sf/library-normalizer.json';
+  const NORMALIZER_ROOTS = [
+    '/mnt/jbod1/media/tv_shows'
+  ];
+
+  let normalizerState = {
+    enabled: false,
+    scanning: false,
+
+    // ── Safety (fix-07) ──────────────────────────────────────────
+    // 'alongside' writes a new file and never modifies the source.
+    // 'replace' overwrites the original — opt-in only.
+    outputMode: 'alongside',
+    // When replacing, keep the .orion-backup copy rather than deleting it.
+    keepBackup: true,
+    // Report what would happen without encoding anything.
+    dryRun: false,
+
+    // What to do while someone is actually watching:
+    //   'pause'  stop entirely  (safest, default)
+    //   'reduce' one worker only
+    //   'ignore' run at full rate (sensible for a 3am window)
+    playbackPolicy: 'pause',
+
+    // How many days of schedule to normalise ahead. Today only would be
+    // too late — an episode airing in an hour will not finish converting
+    // in time — so look ahead by default.
+    scheduledDays: 3,
+
+    files: {},
+    current: {},
+    stats: {
+      discovered: 0,
+      compatible: 0,
+      queued: 0,
+      converted: 0,
+      errors: 0
+    }
+  };
+
+  function _normalizerLoad() {
+    try {
+      if (fs.existsSync(NORMALIZER_STATE_FILE)) {
+        const d = JSON.parse(fs.readFileSync(NORMALIZER_STATE_FILE, 'utf8'));
+        if (d && typeof d === 'object') {
+          normalizerState = Object.assign(normalizerState, d);
+          normalizerState.files = normalizerState.files || {};
+          normalizerState.current = {};
+          normalizerState.scanning = false;
+        }
+      }
+    } catch (e) {
+      console.error('[Normalizer] state load:', e.message);
+    }
+  }
+
+  function _normalizerSave() {
+    try {
+      fs.mkdirSync(path.dirname(NORMALIZER_STATE_FILE), { recursive: true });
+
+      const tmp = NORMALIZER_STATE_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(normalizerState, null, 2));
+      fs.renameSync(tmp, NORMALIZER_STATE_FILE);
+    } catch (e) {
+      console.error('[Normalizer] state save:', e.message);
+    }
+  }
+
+  function _normalizerExtensions(name) {
+    return /\.(mkv|mp4|m4v)$/i.test(name || '');
+  }
+
+  function _normalizerWalk(dir, out) {
+    let ents;
+    try {
+      ents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+
+    for (const ent of ents) {
+      if (ent.name === '.hls') continue;
+      if (ent.name.includes('.orion-normalizing')) continue;
+      if (ent.name.includes('.orion-backup')) continue;
+
+      const full = path.join(dir, ent.name);
+
+      if (ent.isDirectory()) {
+        _normalizerWalk(full, out);
+      } else if (ent.isFile() && _normalizerExtensions(ent.name)) {
+        out.push(full);
+      }
+    }
+  }
+
+  function _normalizerProbe(filePath) {
+    try {
+      const cp = require('child_process');
+
+      const r = cp.spawnSync(
+        'ffprobe',
+        [
+          '-v', 'error',
+          '-show_streams',
+          '-show_format',
+          '-of', 'json',
+          filePath
+        ],
+        {
+          encoding: 'utf8',
+          maxBuffer: 16 * 1024 * 1024,
+          timeout: 15000        // M4: never let one file wedge the queue
+        }
+      );
+
+      if (r.error && r.error.code === 'ETIMEDOUT') {
+        throw new Error('ffprobe timed out after 15s');
+      }
+
+      if (r.status !== 0) {
+        throw new Error((r.stderr || 'ffprobe failed').trim());
+      }
+
+      const d = JSON.parse(r.stdout || '{}');
+      const streams = Array.isArray(d.streams) ? d.streams : [];
+
+      const video = streams.find(x => x.codec_type === 'video');
+      const audio = streams.filter(x => x.codec_type === 'audio');
+
+      if (!video) throw new Error('no video stream');
+
+      const duration = Number(
+        (d.format && d.format.duration) ||
+        video.duration ||
+        0
+      );
+
+      return {
+        videoCodec: String(video.codec_name || '').toLowerCase(),
+        pixFmt: String(video.pix_fmt || '').toLowerCase(),
+        audioCodecs: audio.map(x =>
+          String(x.codec_name || '').toLowerCase()
+        ),
+        duration
+      };
+
+    } catch (e) {
+      throw new Error('probe: ' + e.message);
+    }
+  }
+
+  function _normalizerCompatible(probe) {
+    const videoOK =
+      probe.videoCodec === 'h264' &&
+      probe.pixFmt === 'yuv420p';
+
+    const audioOK =
+      probe.audioCodecs.length === 0 ||
+      probe.audioCodecs.every(c => c === 'aac');
+
+    return videoOK && audioOK;
+  }
+
+  function _normalizerNeedVideo(probe) {
+    return !(
+      probe.videoCodec === 'h264' &&
+      probe.pixFmt === 'yuv420p'
+    );
+  }
+
+  function _normalizerNeedAudio(probe) {
+    return !(
+      probe.audioCodecs.length === 0 ||
+      probe.audioCodecs.every(c => c === 'aac')
+    );
+  }
+
+  function _normalizerGpuIds() {
+    const caps = require('./capabilities')();
+
+    // No GPU: single CPU worker. Never oversubscribe a small box.
+    if (!caps.hasNvenc || caps.gpuCount === 0) return [0];
+
+    const all = caps.gpuIds;
+    const h = new Date().getHours();
+
+    // Overnight: use everything detected.
+    if (h >= 23 || h < 6) return all;
+
+    // Daytime: leave headroom for playback. Always at least one.
+    return all.slice(0, Math.max(1, Math.ceil(all.length / 2)));
+  }
+
+  async function _normalizerPresegBusy() {
+    try {
+      if (!_externalPresegEnabled()) return false;
+
+      const st = await _getFromPreseg('/status');
+
+      return (
+        Number(st.processing || 0) > 0 ||
+        Number(st.queued || 0) > 0 ||
+        Number(st.queueLen || 0) > 0 ||
+        Number(st.gpuWorkers || 0) > 0 ||
+        Number(st.cpuWorkers || 0) > 0
+      );
+    } catch (_) {
+      // If preseg status cannot be determined, play safe.
+      return true;
+    }
+  }
+
+  async function _normalizerScan() {
+    if (normalizerState.scanning) return;
+
+    normalizerState.scanning = true;
+    _normalizerSave();
+
+    console.log('[Normalizer] scanning TV library');
+
+    const found = [];
+
+    try {
+      for (const root of NORMALIZER_ROOTS) {
+        if (fs.existsSync(root)) {
+          _normalizerWalk(root, found);
+        }
+      }
+
+      const seen = new Set();
+      let processed = 0;
+      normalizerState.scanTotal = found.length;
+      normalizerState.scanDone = 0;
+      console.log('[Normalizer] walking', found.length, 'files');
+
+      for (const filePath of found) {
+        seen.add(filePath);
+
+        await new Promise(r => setImmediate(r));
+
+        normalizerState.scanDone = ++processed;
+        if (processed % 25 === 0) _normalizerRecount();
+        if (processed % 250 === 0) {
+          _normalizerSave();
+          console.log('[Normalizer] scan', processed + '/' + found.length);
+        }
+
+        let st;
+        try {
+          st = fs.statSync(filePath);
+        } catch (_) {
+          continue;
+        }
+
+        const old = normalizerState.files[filePath];
+
+        // File unchanged and already successfully classified/converted.
+        if (
+          old &&
+          old.size === st.size &&
+          old.mtimeMs === st.mtimeMs &&
+          ['compatible', 'converted'].includes(old.status)
+        ) {
+          continue;
+        }
+
+        try {
+          const probe = _normalizerProbe(filePath);
+
+          normalizerState.files[filePath] = {
+            size: st.size,
+            mtimeMs: st.mtimeMs,
+            status: _normalizerCompatible(probe)
+              ? 'compatible'
+              : 'queued',
+            videoCodec: probe.videoCodec,
+            pixFmt: probe.pixFmt,
+            audioCodecs: probe.audioCodecs,
+            duration: probe.duration,
+            error: null,
+            updatedAt: Date.now()
+          };
+
+        } catch (e) {
+          normalizerState.files[filePath] = {
+            size: st.size,
+            mtimeMs: st.mtimeMs,
+            status: 'error',
+            error: e.message,
+            updatedAt: Date.now()
+          };
+        }
+      }
+
+      // Remove files no longer present from state.
+      for (const filePath of Object.keys(normalizerState.files)) {
+        if (!seen.has(filePath) && !fs.existsSync(filePath)) {
+          delete normalizerState.files[filePath];
+        }
+      }
+
+    } finally {
+      normalizerState.scanning = false;
+      _normalizerRecount();
+      _normalizerSave();
+      console.log(
+        '[Normalizer] scan complete:',
+        normalizerState.stats
+      );
+    }
+  }
+
+  // M3: recount is O(n) over every known file and runs on every status
+  // poll (every 2s, per open tab). Memoise for a short window.
+  let _recountAt = 0;
+  let _recountDirty = true;
+
+  function _normalizerRecount(force) {
+    if (!force && !_recountDirty && Date.now() - _recountAt < 2000) return;
+    _recountAt = Date.now();
+    _recountDirty = false;
+
+    const vals = Object.values(normalizerState.files || {});
+
+    normalizerState.stats = {
+      discovered: vals.length,
+      compatible: vals.filter(x =>
+        x.status === 'compatible'
+      ).length,
+      queued: vals.filter(x =>
+        x.status === 'queued'
+      ).length,
+      converted: vals.filter(x =>
+        x.status === 'converted'
+      ).length,
+      errors: vals.filter(x =>
+        x.status === 'error'
+      ).length
+    };
+  }
+
+  // M2: serialising a 30k-entry object on every file completion is
+  // expensive and repeated. Coalesce writes into one per interval.
+  let _saveTimer = null;
+  function _normalizerSaveDebounced() {
+    _recountDirty = true;
+    if (_saveTimer) return;
+    _saveTimer = setTimeout(() => {
+      _saveTimer = null;
+      try { _normalizerSave(); } catch (e) {
+        console.error('[Normalizer] save:', e.message);
+      }
+    }, 5000);
+    _saveTimer.unref?.();
+  }
+
+  function _normalizerNextQueued() {
+    for (const [filePath, item] of
+      Object.entries(normalizerState.files || {})) {
+
+      if (item.status === 'queued' &&
+          !normalizerState.current[filePath]) {
+        return filePath;
+      }
+    }
+
+    return null;
+  }
+
+  function _normalizerTempPath(inputPath) {
+    const ext = path.extname(inputPath);
+    const base = inputPath.slice(0, -ext.length);
+
+    return base + '.orion-normalizing' + ext;
+  }
+
+  /**
+   * Where the converted file should end up.
+   * alongside → <dir>/<name>.h264.mkv   (original untouched)
+   * replace   → the original path        (original overwritten)
+   */
+  function _normalizerOutputPath(inputPath) {
+    if (normalizerState.outputMode === 'replace') return inputPath;
+    const ext  = path.extname(inputPath);
+    const base = inputPath.slice(0, -ext.length);
+    return base + '.h264' + ext;
+  }
+
+  /**
+   * Where the converted file should end up.
+   * alongside → <dir>/<name>.h264.mkv   (original untouched)
+   * replace   → the original path        (original overwritten)
+   */
+  function _normalizerOutputPath(inputPath) {
+    if (normalizerState.outputMode === 'replace') return inputPath;
+    const ext  = path.extname(inputPath);
+    const base = inputPath.slice(0, -ext.length);
+    return base + '.h264' + ext;
+  }
+
+  function _normalizerBackupPath(inputPath) {
+    const ext = path.extname(inputPath);
+    const base = inputPath.slice(0, -ext.length);
+
+    return base + '.orion-backup' + ext;
+  }
+
+  function _normalizerBuildArgs(inputPath, outputPath, gpu, probe) {
+    const needVideo = _normalizerNeedVideo(probe);
+    const needAudio = _normalizerNeedAudio(probe);
+
+    const args = ['-hide_banner', '-y'];
+
+    if (needVideo) {
+      args.push(
+        '-hwaccel', 'cuda',
+        '-hwaccel_device', String(gpu),
+        '-hwaccel_output_format', 'cuda'
+      );
+    }
+
+    args.push('-i', inputPath);
+
+    // Preserve every mapped stream where the container permits it.
+    args.push('-map', '0');
+
+    if (needVideo) {
+      args.push(
+        '-vf', 'scale_cuda=format=yuv420p',
+        '-c:v', 'h264_nvenc',
+        '-gpu', String(gpu),
+        '-preset', 'p4',
+        '-cq', '21'
+      );
+    } else {
+      args.push('-c:v', 'copy');
+    }
+
+    if (needAudio) {
+      args.push('-c:a', 'aac', '-b:a', '192k');
+    } else {
+      args.push('-c:a', 'copy');
+    }
+
+    args.push('-c:s', 'copy');
+    args.push('-c:d', 'copy');
+
+    args.push(outputPath);
+
+    return args;
+  }
+
+  function _normalizerVerify(originalProbe, outputPath) {
+    if (!fs.existsSync(outputPath)) {
+      throw new Error('temporary output missing');
+    }
+
+    const st = fs.statSync(outputPath);
+
+    if (st.size < 1024 * 1024) {
+      throw new Error('temporary output unexpectedly small');
+    }
+
+    const out = _normalizerProbe(outputPath);
+
+    if (!_normalizerCompatible(out)) {
+      throw new Error(
+        'verification codec failure: ' +
+        out.videoCodec + '/' + out.pixFmt +
+        ' audio=' + out.audioCodecs.join(',')
+      );
+    }
+
+    if (originalProbe.duration > 0 && out.duration > 0) {
+      const diff = Math.abs(originalProbe.duration - out.duration);
+      const allowed = Math.max(2, originalProbe.duration * 0.01);
+
+      if (diff > allowed) {
+        throw new Error(
+          'duration mismatch original=' +
+          originalProbe.duration.toFixed(2) +
+          ' output=' +
+          out.duration.toFixed(2)
+        );
+      }
+    }
+
+    return out;
+  }
+
+  function _normalizerReplaceOriginal(inputPath, tempPath) {
+    // ── alongside: never touch the source ──────────────────────────
+    if (normalizerState.outputMode !== 'replace') {
+      const outPath = _normalizerOutputPath(inputPath);
+      try {
+        if (fs.existsSync(outPath)) fs.rmSync(outPath, { force: true });
+        fs.renameSync(tempPath, outPath);
+        if (!fs.existsSync(outPath)) {
+          throw new Error('output file missing after move');
+        }
+        return outPath;
+      } catch (e) {
+        try { fs.rmSync(tempPath, { force: true }); } catch (_) {}
+        throw new Error('write alongside: ' + e.message);
+      }
+    }
+
+    // ── replace: opt-in, backup retained unless explicitly disabled ─
+    const backup = _normalizerBackupPath(inputPath);
+
+    try {
+      if (fs.existsSync(backup)) fs.rmSync(backup, { force: true });
+
+      fs.renameSync(inputPath, backup);
+
+      try {
+        fs.renameSync(tempPath, inputPath);
+      } catch (e) {
+        // Restore original immediately.
+        if (!fs.existsSync(inputPath) &&
+            fs.existsSync(backup)) {
+          fs.renameSync(backup, inputPath);
+        }
+
+        throw e;
+      }
+
+      // Verify replacement exists before touching the backup.
+      if (!fs.existsSync(inputPath)) {
+        throw new Error('replacement file disappeared');
+      }
+
+      // H1: keep the original by default. Verification is good but not
+      // proof — the user can reclaim the space deliberately.
+      if (normalizerState.keepBackup === false) {
+        fs.rmSync(backup, { force: true });
+      }
+
+      return inputPath;
+
+    } catch (e) {
+      throw new Error('replace: ' + e.message);
+    }
+  }
+
+  function _normalizerStartFile(inputPath, gpu) {
+    const item = normalizerState.files[inputPath];
+    if (!item) return;
+
+    // H1: dry run — mark and report, encode nothing.
+    if (normalizerState.dryRun) {
+      item.status = 'would-convert';
+      item.updatedAt = Date.now();
+      _normalizerRecount();
+      return;
+    }
+
+    // H1: dry run — mark and report, encode nothing.
+    if (normalizerState.dryRun) {
+      item.status = 'would-convert';
+      item.updatedAt = Date.now();
+      _normalizerRecount();
+      return;
+    }
+
+    let probe;
+
+    try {
+      probe = _normalizerProbe(inputPath);
+
+      if (_normalizerCompatible(probe)) {
+        item.status = 'compatible';
+        item.error = null;
+        item.updatedAt = Date.now();
+
+        _normalizerRecount();
+        _normalizerSave();
+        return;
+      }
+
+    } catch (e) {
+      item.status = 'error';
+      item.error = e.message;
+      item.updatedAt = Date.now();
+
+      _normalizerRecount();
+      _normalizerSave();
+      return;
+    }
+
+    const tempPath = _normalizerTempPath(inputPath);
+
+    try {
+      if (fs.existsSync(tempPath)) {
+        fs.rmSync(tempPath, { force: true });
+      }
+    } catch (_) {}
+
+    const args = _normalizerBuildArgs(
+      inputPath,
+      tempPath,
+      gpu,
+      probe
+    );
+
+    console.log(
+      '[Normalizer] GPU', gpu,
+      path.basename(inputPath),
+      _normalizerNeedVideo(probe)
+        ? 'video->h264'
+        : 'video-copy',
+      _normalizerNeedAudio(probe)
+        ? 'audio->aac'
+        : 'audio-copy'
+    );
+
+    const ffmpeg =
+      (typeof ffmpegPath === 'string' && ffmpegPath)
+        ? ffmpegPath
+        : 'ffmpeg';
+
+    const proc = spawn(ffmpeg, args);
+
+    normalizerState.current[inputPath] = {
+      gpu,
+      pid: proc.pid,
+      startedAt: Date.now(),
+      progress: 0
+    };
+
+    item.status = 'processing';
+    item.error = null;
+
+    _normalizerSave();
+
+    let stderr = '';
+
+    proc.stderr.on('data', d => {
+      stderr = (stderr + d.toString()).slice(-16384);
+    });
+
+    proc.on('error', err => {
+      delete normalizerState.current[inputPath];
+
+      item.status = 'error';
+      item.error = err.message;
+      item.updatedAt = Date.now();
+
+      try {
+        fs.rmSync(tempPath, { force: true });
+      } catch (_) {}
+
+      _normalizerRecount();
+      _normalizerSave();
+    });
+
+    proc.on('exit', code => {
+      delete normalizerState.current[inputPath];
+
+      if (code !== 0) {
+        item.status = 'error';
+        item.error =
+          'ffmpeg exit ' + code + ': ' +
+          stderr.split('\n')
+            .filter(Boolean)
+            .slice(-5)
+            .join(' | ')
+            .slice(0, 800);
+
+        try {
+          fs.rmSync(tempPath, { force: true });
+        } catch (_) {}
+
+        _normalizerRecount();
+        _normalizerSave();
+        return;
+      }
+
+      try {
+        const verified =
+          _normalizerVerify(probe, tempPath);
+
+        _normalizerReplaceOriginal(
+          inputPath,
+          tempPath
+        );
+
+        const st = fs.statSync(inputPath);
+
+        item.status = 'converted';
+        item.size = st.size;
+        item.mtimeMs = st.mtimeMs;
+        item.videoCodec = verified.videoCodec;
+        item.pixFmt = verified.pixFmt;
+        item.audioCodecs = verified.audioCodecs;
+        item.duration = verified.duration;
+        item.error = null;
+        item.updatedAt = Date.now();
+
+        console.log(
+          '[Normalizer] DONE:',
+          inputPath
+        );
+
+      } catch (e) {
+        item.status = 'error';
+        item.error = e.message;
+        item.updatedAt = Date.now();
+
+        try {
+          if (fs.existsSync(tempPath)) {
+            fs.rmSync(tempPath, { force: true });
+          }
+        } catch (_) {}
+
+        console.error(
+          '[Normalizer] VERIFY/REPLACE FAILED:',
+          inputPath,
+          e.message
+        );
+      }
+
+      _normalizerRecount();
+      _normalizerSave();
+    });
+  }
+
+  let normalizerDispatchBusy = false;
+
+  async function _normalizerDispatch() {
+    if (normalizerDispatchBusy) return;
+    if (!normalizerState.enabled) return;
+    if (normalizerState.scanning) return;
+
+    normalizerDispatchBusy = true;
+
+    try {
+      // Scheduled HLS preparation always wins.
+      if (await _normalizerPresegBusy()) return;
+
+      // Back off while someone is actually watching.
+      const policy = normalizerState.playbackPolicy || 'pause';
+      let gpuIds = _normalizerGpuIds();
+
+      if (policy !== 'ignore') {
+        const _now = Date.now();
+        const watching = Object.values(hlsSessions || {})
+          .some(x => x && (_now - (x.lastRequest || 0)) < 90000);
+        if (watching) {
+          if (policy === 'pause') return;
+          if (policy === 'reduce') gpuIds = gpuIds.slice(0, 1);
+        }
+      }
+
+      const inUse = new Set(
+        Object.values(normalizerState.current || {})
+          .map(x => Number(x.gpu))
+      );
+
+      for (const gpu of gpuIds) {
+        if (inUse.has(gpu)) continue;
+
+        const next = _normalizerNextQueued();
+        if (!next) break;
+
+        _normalizerStartFile(next, gpu);
+        inUse.add(gpu);
+      }
+
+    } finally {
+      normalizerDispatchBusy = false;
+    }
+  }
+
+  app.get('/api/sf/normalizer/status', (req, res) => {
+    _normalizerRecount();
+
+    res.json({
+      enabled: normalizerState.enabled,
+      scanning: normalizerState.scanning,
+      outputMode: normalizerState.outputMode,
+      keepBackup: normalizerState.keepBackup !== false,
+      dryRun: !!normalizerState.dryRun,
+      scheduledDays: normalizerState.scheduledDays || 3,
+      playbackPolicy: normalizerState.playbackPolicy || 'pause',
+      outputMode: normalizerState.outputMode,
+      keepBackup: normalizerState.keepBackup !== false,
+      dryRun: !!normalizerState.dryRun,
+      scheduledDays: normalizerState.scheduledDays || 3,
+      scanDone: normalizerState.scanDone || 0,
+      scanTotal: normalizerState.scanTotal || 0,
+      roots: NORMALIZER_ROOTS,
+      gpuIds: _normalizerGpuIds(),
+      current: normalizerState.current,
+      stats: normalizerState.stats
+    });
+  });
+
+  app.post('/api/sf/normalizer/start', async (req, res) => {
+    normalizerState.enabled = true;
+    _normalizerSave();
+
+    // Kick off scan in background; UI polls /status for progress.
+    if (!normalizerState.scanning) {
+      _normalizerScan().catch(e => console.error('[Normalizer] start:', e.message));
+    }
+
+    res.json({
+      ok: true,
+      enabled: true,
+      stats: normalizerState.stats
+    });
+  });
+
+  app.post('/api/sf/normalizer/pause', (req, res) => {
+    // Does NOT kill active FFmpeg jobs.
+    // They finish cleanly; no new jobs are dispatched.
+    normalizerState.enabled = false;
+    _normalizerSave();
+
+    res.json({
+      ok: true,
+      enabled: false
+    });
+  });
+
+  app.post('/api/sf/normalizer/rescan', (req, res) => {
+    if (normalizerState.scanning) {
+      return res.json({ ok: true, alreadyScanning: true, stats: normalizerState.stats });
+    }
+    _normalizerScan().catch(e => console.error('[Normalizer] rescan:', e.message));
+    res.json({ ok: true, scanning: true, stats: normalizerState.stats });
+  });
+
+  // H1: change safety settings. Switching to 'replace' is deliberate and
+  // must be sent explicitly — it is never the default.
+  app.post('/api/sf/normalizer/settings', (req, res) => {
+    const { outputMode, keepBackup, dryRun } = req.body || {};
+
+    if (outputMode !== undefined) {
+      if (!['alongside', 'replace'].includes(outputMode)) {
+        return res.status(400).json({ error: "outputMode must be 'alongside' or 'replace'" });
+      }
+      normalizerState.outputMode = outputMode;
+      if (outputMode === 'replace') {
+        console.warn('[Normalizer] outputMode=replace — source files WILL be overwritten' +
+          (normalizerState.keepBackup === false ? ' with NO backup retained' : ' (backups retained)'));
+      }
+    }
+
+    if (keepBackup !== undefined) normalizerState.keepBackup = !!keepBackup;
+    if (dryRun !== undefined)     normalizerState.dryRun     = !!dryRun;
+
+    const { playbackPolicy } = req.body || {};
+    if (playbackPolicy !== undefined) {
+      if (!['pause', 'reduce', 'ignore'].includes(playbackPolicy)) {
+        return res.status(400).json({ error: "playbackPolicy must be pause, reduce or ignore" });
+      }
+      normalizerState.playbackPolicy = playbackPolicy;
+    }
+
+    const { scheduledDays } = req.body || {};
+    if (scheduledDays !== undefined) {
+      normalizerState.scheduledDays =
+        Math.max(1, Math.min(14, parseInt(scheduledDays, 10) || 3));
+    }
+
+    _normalizerSave();
+
+    res.json({
+      ok: true,
+      outputMode: normalizerState.outputMode,
+      keepBackup: normalizerState.keepBackup !== false,
+      dryRun: !!normalizerState.dryRun
+    });
+  });
+
+  // H1: change safety settings. Switching to 'replace' is deliberate and
+  // must be sent explicitly — it is never the default.
+  app.post('/api/sf/normalizer/settings', (req, res) => {
+    const { outputMode, keepBackup, dryRun } = req.body || {};
+
+    if (outputMode !== undefined) {
+      if (!['alongside', 'replace'].includes(outputMode)) {
+        return res.status(400).json({ error: "outputMode must be 'alongside' or 'replace'" });
+      }
+      normalizerState.outputMode = outputMode;
+      if (outputMode === 'replace') {
+        console.warn('[Normalizer] outputMode=replace — source files WILL be overwritten' +
+          (normalizerState.keepBackup === false ? ' with NO backup retained' : ' (backups retained)'));
+      }
+    }
+
+    if (keepBackup !== undefined) normalizerState.keepBackup = !!keepBackup;
+    if (dryRun !== undefined)     normalizerState.dryRun     = !!dryRun;
+
+    const { playbackPolicy } = req.body || {};
+    if (playbackPolicy !== undefined) {
+      if (!['pause', 'reduce', 'ignore'].includes(playbackPolicy)) {
+        return res.status(400).json({ error: "playbackPolicy must be pause, reduce or ignore" });
+      }
+      normalizerState.playbackPolicy = playbackPolicy;
+    }
+
+    const { scheduledDays } = req.body || {};
+    if (scheduledDays !== undefined) {
+      normalizerState.scheduledDays =
+        Math.max(1, Math.min(14, parseInt(scheduledDays, 10) || 3));
+    }
+
+    _normalizerSave();
+
+    res.json({
+      ok: true,
+      outputMode: normalizerState.outputMode,
+      keepBackup: normalizerState.keepBackup !== false,
+      dryRun: !!normalizerState.dryRun
+    });
+  });
+
+  /**
+   * Queue only media scheduled in the next N days.
+   *
+   * Mirrors runDailyScheduledPreseg(): reads /api/sf/schedule for the
+   * window, collects unique local file paths, and queues the ones that
+   * fail the compatibility check. Remote/IPTV sources are skipped —
+   * there is no local file to convert.
+   */
+  app.post('/api/sf/normalizer/queue-scheduled', async (req, res) => {
+    if (normalizerState.scanning) {
+      return res.status(409).json({ error: 'a scan is already running' });
+    }
+
+    const days = Math.max(1, Math.min(14,
+      parseInt(req.body && req.body.days, 10) ||
+      normalizerState.scheduledDays || 3));
+
+    const from = new Date();
+    from.setHours(0, 0, 0, 0);
+    const to = new Date(from);
+    to.setDate(to.getDate() + days);
+
+    try {
+      const schedule = await new Promise((resolve, reject) => {
+        const mod = require('http');
+        const port = (sfConfig && sfConfig.port) || 3001;
+        const url = '/api/sf/schedule?from=' + from.getTime() +
+                    '&to=' + to.getTime();
+        const rq = mod.get({ host: '127.0.0.1', port, path: url,
+                             timeout: 30000 }, r => {
+          let body = '';
+          r.on('data', c => body += c);
+          r.on('end', () => {
+            try { resolve(JSON.parse(body)); }
+            catch (e) { reject(new Error('bad schedule response')); }
+          });
+        });
+        rq.on('error', reject);
+        rq.on('timeout', () => { rq.destroy(); reject(new Error('schedule timeout')); });
+      });
+
+      const seen = new Set();
+      let considered = 0, queued = 0, alreadyOk = 0, missing = 0, failed = 0;
+
+      for (const channel of (Array.isArray(schedule) ? schedule : [])) {
+        for (const prog of (channel.programs || [])) {
+          if (!prog || !prog.filePath) continue;
+          if (/^https?:\/\//i.test(prog.filePath)) continue;   // remote source
+          if (seen.has(prog.filePath)) continue;
+          seen.add(prog.filePath);
+          considered++;
+
+          if (!fs.existsSync(prog.filePath)) { missing++; continue; }
+
+          const existing = normalizerState.files[prog.filePath];
+          if (existing && ['compatible', 'converted'].includes(existing.status)) {
+            alreadyOk++;
+            continue;
+          }
+          if (existing && ['queued', 'processing'].includes(existing.status)) {
+            continue;
+          }
+
+          let st;
+          try { st = fs.statSync(prog.filePath); } catch (_) { missing++; continue; }
+
+          try {
+            const probe = _normalizerProbe(prog.filePath);
+            const ok = _normalizerCompatible(probe);
+
+            normalizerState.files[prog.filePath] = {
+              size: st.size,
+              mtimeMs: st.mtimeMs,
+              status: ok ? 'compatible' : 'queued',
+              videoCodec: probe.videoCodec,
+              pixFmt: probe.pixFmt,
+              audioCodecs: probe.audioCodecs,
+              duration: probe.duration,
+              error: null,
+              scheduled: true,
+              updatedAt: Date.now()
+            };
+
+            if (ok) alreadyOk++; else queued++;
+
+          } catch (e) {
+            failed++;
+            normalizerState.files[prog.filePath] = {
+              size: st.size,
+              mtimeMs: st.mtimeMs,
+              status: 'error',
+              error: e.message,
+              scheduled: true,
+              updatedAt: Date.now()
+            };
+          }
+        }
+      }
+
+      _normalizerRecount();
+      _normalizerSave();
+
+      console.log('[Normalizer] scheduled scope: ' + considered + ' scheduled, ' +
+        queued + ' queued, ' + alreadyOk + ' already fine, ' +
+        missing + ' missing, ' + failed + ' probe errors');
+
+      res.json({ ok: true, days, considered, queued, alreadyOk, missing, failed });
+
+    } catch (e) {
+      console.error('[Normalizer] queue-scheduled failed:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/sf/normalizer/retry-errors', (req, res) => {
+    for (const item of Object.values(normalizerState.files || {})) {
+      if (item.status === 'error') {
+        item.status = 'queued';
+        item.error = null;
+      }
+    }
+
+    _normalizerRecount();
+    _normalizerSave();
+
+    res.json({
+      ok: true,
+      stats: normalizerState.stats
+    });
+  });
+
+  _normalizerLoad();
+
+  // Small periodic dispatcher.
+  setInterval(() => {
+    _normalizerDispatch().catch(e =>
+      console.error('[Normalizer] dispatch:', e.message)
+    );
+  }, 5000);
+
+  // Rescan once every six hours while enabled.
+  setInterval(() => {
+    if (normalizerState.enabled &&
+        !normalizerState.scanning) {
+      _normalizerScan().catch(e =>
+        console.error('[Normalizer] rescan:', e.message)
+      );
+    }
+  }, 6 * 60 * 60 * 1000);
 
 
   // ─── Encode Jobs (Video + Audio) ─────────────────────────────────
@@ -4423,7 +5739,11 @@ module.exports = function mountStreamForge(app, orion) {
     if (req.query.type)  items = items.filter(m=>m.type===req.query.type);
     if (req.query.q)     { const q=req.query.q.toLowerCase(); items=items.filter(m=>m.title?.toLowerCase().includes(q)); }
     if (req.query.lib)   items = items.filter(m=>m.libraryId===req.query.lib);
-    const page = parseInt(req.query.page)||1, limit = parseInt(req.query.limit)||10000;
+    // M1: cap page size. Returning 50k rows serialises for seconds and
+    // can exhaust memory on a small box. Clients should paginate.
+    const MAX_LIMIT = 500;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit) || 100));
     res.json({ items: items.slice((page-1)*limit, page*limit), total:items.length, page, pages:Math.ceil(items.length/limit) });
   });
 
@@ -4493,6 +5813,38 @@ module.exports = function mountStreamForge(app, orion) {
   });
 
   // Shows search — instant filter of pre-built cache (no per-request 25k scan)
+
+  app.get('/api/sf/media/skipped', (req, res) => {
+    try {
+      getMediaCombined(); // ensure latest filter pass
+      const q = (req.query.q || '').toString().toLowerCase().trim();
+      let items = _skippedItems;
+      if (q) {
+        items = items.filter(it => {
+          const hay = ((it.title||'') + ' ' + (it.episodeTitle||'') + ' ' + (it.path||'') + ' ' + (it.reason||'')).toLowerCase();
+          return hay.includes(q);
+        });
+      }
+      res.json({ total: _skippedItems.length, matched: items.length, items: items.slice(0, 500) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Quick toggle endpoint for hideUnsegmented + cache invalidation
+  app.post('/api/sf/media/hide-unsegmented', express.json(), (req, res) => {
+    try {
+      const enabled = req.body && req.body.enabled === true;
+      sfConfig.hideUnsegmented = enabled;
+      try {
+        const cfgPath = path.join(SF_DIR, 'config.json');
+        const root = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        root.hideUnsegmented = enabled;
+        fs.writeFileSync(cfgPath, JSON.stringify(root, null, 2));
+      } catch (e) { console.error('[PRESEG-FILTER] config write:', e.message); }
+      _invalidatePresegDoneSet();
+      res.json({ ok: true, hideUnsegmented: enabled });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.get('/api/sf/media/shows', (req, res) => {
     const q = (req.query.q || '').toLowerCase().trim();
     if (!_showsCache) getMediaCombined(); // ensure cache is built

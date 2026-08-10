@@ -13,7 +13,9 @@ const Database = require('better-sqlite3');
 // === Paths ===
 const CONFIG_PATH = '/var/lib/orion/config.json';
 const ORION_DB    = '/var/lib/orion/orion.db';
-const SF_DIR      = '/var/lib/orion/sf';
+// M5: honour ORION_DATA_DIR so this runs somewhere other than /var/lib.
+const SF_DIR      = process.env.ORION_SF_DIR ||
+  path.join(process.env.ORION_DATA_DIR || '/var/lib/orion', 'sf');
 const _DEFAULT_TEMP_DIR = path.join(SF_DIR, 'convert_temp');
 function _getTempDir() {
   try { return (typeof cfg === 'object' && cfg && cfg.tempDir) ? cfg.tempDir : _DEFAULT_TEMP_DIR; }
@@ -42,7 +44,8 @@ function loadConfig() {
       autoUpdateMediaProbe: i.autoUpdateMediaProbe !== false,
       autoQueuePreseg: i.autoQueuePreseg === true,
       presegPort: i.presegPort || 3002,
-      gpuCount: parseInt(i.gpuCount, 10) || 4
+      gpuCount: Math.max(1, parseInt(i.gpuCount, 10) ||
+        require('./capabilities')().gpuCount || 1)
     };
   } catch (e) {
     console.error('[Config] load error:', e.message);
@@ -88,7 +91,8 @@ function safeCloseDb() {
 // === Queue ===
 let queue = [];
 let activeWorkers = 0;
-let gpuLoad = new Array(cfg.gpuCount || 4).fill(0); // workers per GPU
+let gpuLoad = new Array(Math.max(1, cfg.gpuCount ||
+  require('./capabilities')().gpuCount || 1)).fill(0); // workers per GPU
 let recentCompletions = []; // completion timestamps
 function assignGpu() {
   if (!gpuLoad.length) return 0;
@@ -377,6 +381,10 @@ app.get('/status', (req, res) => {
 
 function _enqueueOne(mediaId, filePath, outputMode, encoder) {
   if (!mediaId || !filePath) return { queued: false, reason: 'mediaId+filePath required' };
+  // [BAK-FILTER] Refuse backup files left by prior convert runs
+  if (/\.bak\./.test(filePath) || /\.bak\.mkv$/.test(filePath)) {
+    return { queued: false, reason: 'skipped backup file (.bak)' };
+  }
   const ddb = ensureDb();
   const existing = ddb.prepare("SELECT status FROM convert_status WHERE mediaId=?").get(mediaId);
   if (existing && existing.status === 'done')       return { queued: false, reason: 'already converted' };

@@ -6,6 +6,8 @@
 
 const axios = require('axios');
 
+let _lfmWarned = false; // fix-03: warn once about missing Last.fm key
+
 // ── HTTP connection pool ───────────────────────────────────────────────────────
 const http_agent  = new (require('http').Agent)({ keepAlive: true, maxSockets: 10 });
 const https_agent = new (require('https').Agent)({ keepAlive: true, maxSockets: 10 });
@@ -274,10 +276,10 @@ async function fetchMusicVideoMeta(filename, config = {}) {
     const rec = recordings[0];
     const artistName = rec['artist-credit']?.[0]?.artist?.name || artist;
     const albumName  = rec.releases?.[0]?.title || null;
-    const lfmKey = config.lastfmKey || 'f927d04e8eba8edb5cc57a68aecdb0f8';
+    const lfmKey = config.lastfmKey || null;
 
     let thumbnail = null;
-    if (albumName) {
+    if (albumName && lfmKey) {
       try {
         const lfm = await axios.get(`https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${lfmKey}&artist=${encodeURIComponent(artistName)}&album=${encodeURIComponent(albumName)}&format=json`, { timeout: 5000 });
         const images = lfm.data?.album?.image;
@@ -305,7 +307,12 @@ async function fetchMusicVideoMeta(filename, config = {}) {
 async function fetchMusicMeta(filename, config = {}) {
   const { artist, title } = parseMusicVideoFilename(filename);
   if (!title) return null;
-  const lfmKey = config.lastfmKey || 'f927d04e8eba8edb5cc57a68aecdb0f8';
+  const lfmKey = config.lastfmKey || null;
+  if (!lfmKey && !_lfmWarned) {
+    _lfmWarned = true;
+    console.log('[Metadata] No Last.fm API key set — music artwork lookup ' +
+                'disabled. Add one in Settings to enable it.');
+  }
 
   // iTunes first
   try {
@@ -321,7 +328,7 @@ async function fetchMusicMeta(filename, config = {}) {
 
   // Last.fm fallback
   let poster = null, foundAlbum = null;
-  if (artist) {
+  if (artist && lfmKey) {
     try {
       const trackRes = await axios.get(`https://ws.audioscrobbler.com/2.0/?method=track.getinfo&api_key=${lfmKey}&artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(title)}&format=json`, { timeout: 5000 });
       const album = trackRes.data?.track?.album;

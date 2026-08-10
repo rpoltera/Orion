@@ -7,11 +7,56 @@
 const express = require('express');
 const crypto  = require('crypto');
 const { v4: uuidv4 } = require('uuid');
+const orionAuth = require('../auth');
 
 const RATING_ORDER = ['G','TV-G','TV-Y','TV-Y7','PG','TV-PG','PG-13','TV-14','R','TV-MA','NC-17','NR','UNRATED'];
 
+// ── Password hashing ─────────────────────────────────────────────
+// Format: scrypt$<saltHex>$<hashHex>
+// Legacy format (bare 64-char hex) is sha256 with a fixed salt; still
+// verified for backward compatibility and upgraded on next login.
+const _LEGACY_SALT = 'orion_salt_2024';
+const SCRYPT_KEYLEN = 64;
+
+function _legacyHash(pin) {
+  return crypto.createHash('sha256').update(pin + _LEGACY_SALT).digest('hex');
+}
+
+/** Hash a new password. Always scrypt with a fresh random salt. */
 function hashPin(pin) {
-  return crypto.createHash('sha256').update(pin + 'orion_salt_2024').digest('hex');
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(pin), salt, SCRYPT_KEYLEN).toString('hex');
+  return 'scrypt$' + salt + '$' + hash;
+}
+
+/** Constant-time compare of two hex strings of equal length. */
+function _safeEqual(a, b) {
+  const ba = Buffer.from(String(a), 'utf8');
+  const bb = Buffer.from(String(b), 'utf8');
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+/** Verify a supplied password against a stored hash of either format. */
+function verifyPin(pin, stored) {
+  if (!stored) return false;
+  if (String(stored).startsWith('scrypt$')) {
+    const parts = String(stored).split('$');
+    if (parts.length !== 3) return false;
+    const [, salt, expected] = parts;
+    let actual;
+    try {
+      actual = crypto.scryptSync(String(pin), salt, SCRYPT_KEYLEN).toString('hex');
+    } catch (_) { return false; }
+    return _safeEqual(actual, expected);
+  }
+  // Legacy sha256
+  return _safeEqual(_legacyHash(String(pin)), stored);
+}
+
+/** True when the stored hash uses the old scheme and should be upgraded. */
+function needsUpgrade(stored) {
+  return !!stored && !String(stored).startsWith('scrypt$');
 }
 
 // Brute force protection
@@ -42,7 +87,7 @@ module.exports = function usersRoutes({ db, io, saveDB }) {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
     if (username.length < 2) return res.status(400).json({ error: 'Username must be at least 2 characters' });
-    if (password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
     const admin = {
       id: uuidv4(), name: username, password: hashPin(password),
       role: 'admin', avatar: '👑', groupIds: [],
@@ -52,7 +97,8 @@ module.exports = function usersRoutes({ db, io, saveDB }) {
     db.users.push(admin);
     saveDB();
     console.log(`[Setup] Admin account created for: ${username}`);
-    res.json({ ok: true, user: { ...admin, password: undefined } });
+    const token = orionAuth.issueToken(admin);
+    res.json({ ok: true, token, user: { ...admin, password: undefined } });
   });
 
   // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -66,9 +112,18 @@ module.exports = function usersRoutes({ db, io, saveDB }) {
     const user = db.users.find(u => u.name.toLowerCase() === name.toLowerCase());
     if (!user) { recordLoginFailure(ip); return res.status(401).json({ error: 'Invalid username or password' }); }
     const storedHash = user.password || user.pin;
-    if (storedHash !== hashPin(String(credential))) { recordLoginFailure(ip); return res.status(401).json({ error: 'Invalid username or password' }); }
+    if (!verifyPin(String(credential), storedHash)) { recordLoginFailure(ip); return res.status(401).json({ error: 'Invalid username or password' }); }
+
+    // Transparent upgrade: re-hash legacy sha256 credentials with scrypt.
+    if (needsUpgrade(storedHash)) {
+      user.password = hashPin(String(credential));
+      delete user.pin;
+      try { saveDB(); } catch (_) {}
+      console.log('[Auth] Upgraded password hash for user:', user.name);
+    }
     recordLoginSuccess(ip);
-    res.json({ ok: true, user: { ...user, password: undefined, pin: undefined } });
+    const token = orionAuth.issueToken(user);
+    res.json({ ok: true, token, user: { ...user, password: undefined, pin: undefined } });
   });
 
   // ── Content ratings ───────────────────────────────────────────────────────────
