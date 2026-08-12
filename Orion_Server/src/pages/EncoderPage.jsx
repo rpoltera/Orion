@@ -92,10 +92,13 @@ function VideoEncoderTab() {
   const [normTask, setNormTask] = React.useState(null);
   const [normBusy2, setNormBusy2] = React.useState(false);
   const [normMsg, setNormMsg] = React.useState('');
+  const [normMissing, setNormMissing] = React.useState([]);
 
   const loadNormTask = React.useCallback(async function () {
     try {
-      const r = await fetch('/api/scheduler');
+      // Cache-bust: a 304 here returns the pre-update task list, so the
+      // UI would snap back to the old time after a successful save.
+      const r = await fetch('/api/scheduler?_=' + Date.now(), { cache: 'no-store' });
       if (!r.ok) return;
       const d = await r.json();
       const t = (d.tasks || []).find(function (x) {
@@ -122,10 +125,12 @@ function VideoEncoderTab() {
       } else {
         setNormMsg(
           d.considered + ' scheduled \u2022 ' +
-          d.queued + ' queued for conversion \u2022 ' +
+          d.queued + ' newly queued \u2022 ' +
+          (d.alreadyQueued || 0) + ' already queued \u2022 ' +
           d.alreadyOk + ' already fine' +
-          (d.missing ? ' \u2022 ' + d.missing + ' missing' : '')
+          (d.missing ? ' \u2022 ' + d.missing + ' MISSING FROM DISK' : '')
         );
+        setNormMissing(d.missingPaths || []);
       }
     } catch (e) {
       setNormMsg('Failed: ' + e.message);
@@ -136,12 +141,19 @@ function VideoEncoderTab() {
   async function toggleNightly(on, time) {
     setNormBusy2(true);
     try {
-      if (on) {
+      if (on && normTask && normTask.id) {
+        // Task exists — POST only creates (it skips duplicate names), so
+        // updating the time has to go through PUT.
+        await fetch('/api/scheduler/' + normTask.id, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scheduleTime: time || '02:00', enabled: true })
+        });
+      } else if (on) {
         await fetch('/api/scheduler', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tasks: [{
+          body: JSON.stringify([{
               name: 'Normalize Scheduled Media',
               description: 'Convert upcoming scheduled episodes to H.264 8-bit + AAC',
               icon: '\u2699\ufe0f',
@@ -149,8 +161,7 @@ function VideoEncoderTab() {
               schedule: 'daily',
               scheduleTime: time || '02:00',
               enabled: true
-            }]
-          })
+          }])
         });
       } else if (normTask && normTask.id) {
         await fetch('/api/scheduler/' + normTask.id, { method: 'DELETE' });
@@ -319,15 +330,28 @@ function VideoEncoderTab() {
           </div>
 
           <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              className="btn btn-secondary"
-              disabled={normalizerBusy}
-              onClick={function() {
-                normalizerAction('rescan');
-              }}
-            >
-              Rescan
-            </button>
+            {normalizer && normalizer.scanning ? (
+              <button
+                className="btn btn-secondary"
+                disabled={normalizerBusy || (normalizer && normalizer.scanAbort)}
+                onClick={function() {
+                  normalizerAction('scan-stop');
+                }}
+                title="Stop the running scan — keeps what it has found so far"
+              >
+                {normalizer.scanAbort ? 'Stopping\u2026' : 'Stop Scan'}
+              </button>
+            ) : (
+              <button
+                className="btn btn-secondary"
+                disabled={normalizerBusy}
+                onClick={function() {
+                  normalizerAction('rescan');
+                }}
+              >
+                Rescan
+              </button>
+            )}
 
             {normalizer && normalizer.enabled ? (
               <button
@@ -594,6 +618,61 @@ function VideoEncoderTab() {
                   </div>
                 )}
 
+                {normMissing.length > 0 && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    style={{ marginTop: 6 }}
+                    disabled={normBusy2}
+                    onClick={async function () {
+                      if (!window.confirm(
+                        'Remove ' + normMissing.length + ' broken entr' +
+                        (normMissing.length === 1 ? 'y' : 'ies') +
+                        ' from the channel schedules?\n\n' +
+                        'Only entries whose file is missing are removed. ' +
+                        'Affected channels rebuild their schedule automatically.'
+                      )) return;
+                      setNormBusy2(true);
+                      try {
+                        const r = await fetch('/api/sf/schedule/clean', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: '{}'
+                        });
+                        const d = await r.json().catch(function () { return {}; });
+                        if (!r.ok) {
+                          setNormMsg('Clean failed: ' + (d.error || r.status));
+                        } else {
+                          setNormMsg('Removed ' + d.total + ' broken entries from ' +
+                            (d.channels || []).length + ' channel(s)');
+                          setNormMissing([]);
+                        }
+                      } catch (e) {
+                        setNormMsg('Clean failed: ' + e.message);
+                      }
+                      setNormBusy2(false);
+                    }}
+                  >
+                    Remove {normMissing.length} broken entr{normMissing.length === 1 ? 'y' : 'ies'}
+                  </button>
+                )}
+
+                {normMissing.length > 0 && (
+                  <details style={{ width: '100%', fontSize: 11, marginTop: 4 }}>
+                    <summary style={{ cursor: 'pointer', color: '#fbbf24' }}>
+                      {normMissing.length} scheduled file{normMissing.length === 1 ? '' : 's'} missing from disk
+                      {' \u2014 these will fail when their slot plays'}
+                    </summary>
+                    <div style={{
+                      maxHeight: 160, overflowY: 'auto', marginTop: 6,
+                      fontFamily: 'monospace', color: 'var(--text-muted)'
+                    }}>
+                      {normMissing.map(function (p, i) {
+                        return <div key={i} style={{ padding: '1px 0' }}>{p}</div>;
+                      })}
+                    </div>
+                  </details>
+                )}
+
                 {normTask && normTask.lastRun && (
                   <div style={{ width: '100%', fontSize: 11, color: 'var(--text-muted)' }}>
                     Last nightly run: {new Date(normTask.lastRun).toLocaleString()}
@@ -612,6 +691,84 @@ function VideoEncoderTab() {
                 </div>
               )}
             </div>
+            {/* conversion-progress: current file, scheduled batch, library */}
+            {(() => {
+              const Bar = function (p) {
+                return (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4 }}>
+                      <span style={{ color: 'var(--text-muted)' }}>{p.label}</span>
+                      <span style={{ color: p.accent || 'var(--accent)', fontWeight: 700 }}>{p.value}</span>
+                    </div>
+                    <div style={{ height: p.thin ? 4 : 6, background: 'var(--bg-tertiary)', borderRadius: 3, overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        width: Math.max(0, Math.min(100, p.pct)) + '%',
+                        background: p.accent || 'var(--accent)',
+                        borderRadius: 3,
+                        transition: 'width 0.4s ease'
+                      }} />
+                    </div>
+                  </div>
+                );
+              };
+
+              const out = [];
+              const cur = normalizer.current || {};
+              const running = Object.keys(cur);
+
+              // 1. what is converting right now
+              running.forEach(function (p, i) {
+                const c = cur[p];
+                const pct = c.progress || 0;
+                out.push(
+                  <Bar
+                    key={'cur' + i}
+                    label={'Converting: ' + (c.name || p.split('/').pop())}
+                    value={pct.toFixed(1) + '%'}
+                    pct={pct}
+                    accent="#10b981"
+                  />
+                );
+              });
+
+              // 2. the scheduled batch, if one has been queued
+              const ss = normalizer.scheduledStats;
+              if (ss && ss.total) {
+                const done = (ss.converted || 0) + (ss.compatible || 0);
+                const pct = Math.round(done / ss.total * 100);
+                out.push(
+                  <Bar
+                    key="sched"
+                    label={'Scheduled batch (next ' + (normalizer.scheduledDays || 3) + ' days)'}
+                    value={done.toLocaleString() + ' / ' + ss.total.toLocaleString() + ' (' + pct + '%)'}
+                    pct={pct}
+                    accent="#818cf8"
+                  />
+                );
+              }
+
+              // 3. the whole library, as background context
+              const st = normalizer.stats || {};
+              const libDone = st.converted || 0;
+              const libTotal = libDone + (st.queued || 0);
+              if (libTotal) {
+                const pct = Math.round(libDone / libTotal * 100);
+                out.push(
+                  <Bar
+                    key="lib"
+                    thin
+                    label="Whole library backlog"
+                    value={libDone.toLocaleString() + ' / ' + libTotal.toLocaleString() + ' (' + pct + '%)'}
+                    pct={pct}
+                    accent="var(--text-muted)"
+                  />
+                );
+              }
+
+              if (!out.length) return null;
+              return <div style={{ marginBottom: 14 }}>{out}</div>;
+            })()}
             <div style={{
               display: 'grid',
               gridTemplateColumns:

@@ -23,6 +23,7 @@ let SF_DIR, SF_CFG, SF_CHANNELS, SF_LIBRARIES, SF_MEDIA, SF_EPG, SF_STREAMS, SF_
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let _procCache = null;   // H2: short-lived /proc read cache
+let _presegDownWarned = false;
 let sfDb = {};
 let sfConfig = {};
 let ffmpegExe = '', ffprobeExe = '', hwEncoder = 'libx264';
@@ -1299,7 +1300,15 @@ function _gpuAllocation() {
   }
 
   if (total >= 4) {
-    return { total, live: total - 1, normalizer: [total - 2], preseg: total - 2 };
+    // Normalizer gets everything except the live standby card. Preseg
+    // shares 0-1 when it is running; the two coexist because each job is
+    // pinned to a specific device rather than competing for a pool.
+    // Override with sfConfig.normalizerGpus (a count).
+    const n = Math.max(1, Math.min(total - 1,
+      parseInt(sfConfig && sfConfig.normalizerGpus, 10) || (total - 1)));
+    const ids = [];
+    for (let i = 0; i < n; i++) ids.push(i);
+    return { total, live: total - 1, normalizer: ids, preseg: Math.max(1, total - 2) };
   }
   if (total === 3) {
     return { total, live: 2, normalizer: [1], preseg: 1 };
@@ -2140,13 +2149,28 @@ function startHlsSession(ch, opts={}) {
     const stream = playoutEngine.startChannelStream(ch);
     if (stream && stream.proc) {
       const wrapped = {
-        proc: { pid: stream.proc.pid, kill: function(){}, killed: false, on: function(){}, once: function(){} },
+        proc: {
+          pid: stream.proc.pid,
+          // Was an empty function, so the idle reaper never actually
+          // stopped anything — it only removed the bookkeeping while the
+          // ffmpeg kept writing segments.
+          kill: function (sig) {
+            try { playoutEngine.stopChannelStream(ch.id); } catch (_) {}
+            try { stream.proc.kill(sig || 'SIGKILL'); } catch (_) {}
+            this.killed = true;
+          },
+          killed: false,
+          on: function(){}, once: function(){}
+        },
         _realProc: stream.proc,
         dir: '/var/lib/orion/sf/hls/' + ch.id,
         startedAt: new Date(stream.startedAt || Date.now()).toISOString(),
         _startedAt: stream.startedAt || Date.now(),
         lastRequest: Date.now(),
-        gpuId: 0, mode: 'concat', keepAlive: true,
+        gpuId: 0, mode: 'concat',
+        // Only genuinely always-on for live IPTV sources. Scheduled
+        // channels are started on tune-in and reaped when idle.
+        keepAlive: !!ch.liveStreamId,
       };
       hlsSessions[ch.id] = wrapped;
       stream.proc.on('exit', () => { if (hlsSessions[ch.id] === wrapped) delete hlsSessions[ch.id]; });
@@ -3778,8 +3802,15 @@ module.exports = function mountStreamForge(app, orion) {
         Number(st.cpuWorkers || 0) > 0
       );
     } catch (_) {
-      // If preseg status cannot be determined, play safe.
-      return true;
+      // Preseg unreachable. It was previously treated as "busy", which
+      // blocked the Normalizer indefinitely whenever the preseg service
+      // was stopped or disabled — a service that is not running cannot
+      // be doing work, so there is nothing to yield to.
+      if (!_presegDownWarned) {
+        _presegDownWarned = true;
+        console.log('[Normalizer] preseg not reachable — proceeding without yielding');
+      }
+      return false;
     }
   }
 
@@ -3787,6 +3818,7 @@ module.exports = function mountStreamForge(app, orion) {
     if (normalizerState.scanning) return;
 
     normalizerState.scanning = true;
+    normalizerState.scanAbort = false;
     _normalizerSave();
 
     console.log('[Normalizer] scanning TV library');
@@ -3810,6 +3842,14 @@ module.exports = function mountStreamForge(app, orion) {
         seen.add(filePath);
 
         await new Promise(r => setImmediate(r));
+
+        // Cancellation point. What has been probed so far is kept —
+        // stopping is a pause, not a rollback.
+        if (normalizerState.scanAbort) {
+          console.log('[Normalizer] scan stopped by request at ' +
+            processed + '/' + found.length);
+          break;
+        }
 
         normalizerState.scanDone = ++processed;
         if (processed % 25 === 0) _normalizerRecount();
@@ -3895,6 +3935,18 @@ module.exports = function mountStreamForge(app, orion) {
 
     const vals = Object.values(normalizerState.files || {});
 
+    // Files queued by queue-scheduled carry scheduled:true, so the batch
+    // the user actually asked for can be reported on its own rather than
+    // disappearing into the library total.
+    const sched = vals.filter(x => x && x.scheduled);
+    normalizerState.scheduledStats = {
+      total: sched.length,
+      converted: sched.filter(x => x.status === 'converted').length,
+      queued: sched.filter(x => x.status === 'queued').length,
+      compatible: sched.filter(x => x.status === 'compatible').length,
+      errors: sched.filter(x => x.status === 'error').length
+    };
+
     normalizerState.stats = {
       discovered: vals.length,
       compatible: vals.filter(x =>
@@ -3928,16 +3980,31 @@ module.exports = function mountStreamForge(app, orion) {
   }
 
   function _normalizerNextQueued() {
+    // Two passes. Anything the scheduler queued for an upcoming slot goes
+    // first — object order is effectively alphabetical, so without this a
+    // nightly run converts whatever sorts earliest rather than what is
+    // about to play, and with a 24k backlog it may never reach it.
+    let fallback = null;
+
     for (const [filePath, item] of
       Object.entries(normalizerState.files || {})) {
 
-      if (item.status === 'queued' &&
-          !normalizerState.current[filePath]) {
-        return filePath;
-      }
+      if (item.status !== 'queued') continue;
+      if (normalizerState.current[filePath]) continue;
+
+      if (item.scheduled) return filePath;
+      if (!fallback) fallback = filePath;
     }
 
-    return null;
+    // Nothing scheduled left; fall back to the general backlog. During a
+    // nightly window that means the batch is done.
+    if (normalizerState.nightlyRunUntil &&
+        Date.now() < normalizerState.nightlyRunUntil &&
+        !normalizerState.enabled) {
+      return null;
+    }
+
+    return fallback;
   }
 
   function _normalizerTempPath(inputPath) {
@@ -4198,7 +4265,10 @@ module.exports = function mountStreamForge(app, orion) {
       gpu,
       pid: proc.pid,
       startedAt: Date.now(),
-      progress: 0
+      progress: 0,
+      timeSeconds: 0,
+      durationSeconds: (item && item.duration) || null,
+      name: inputPath.split('/').pop()
     };
 
     item.status = 'processing';
@@ -4209,7 +4279,24 @@ module.exports = function mountStreamForge(app, orion) {
     let stderr = '';
 
     proc.stderr.on('data', d => {
-      stderr = (stderr + d.toString()).slice(-16384);
+      const text = d.toString();
+      stderr = (stderr + text).slice(-16384);
+
+      // Same time= parse the encode-jobs feature uses. The probe already
+      // gave us the duration, so this turns into a real percentage.
+      const cur = normalizerState.current[inputPath];
+      if (cur) {
+        const tms = text.match(/time=(\d+):(\d+):(\d+\.\d+)/g);
+        if (tms && tms.length) {
+          const last = tms[tms.length - 1].match(/time=(\d+):(\d+):(\d+\.\d+)/);
+          if (last) {
+            const secs = (+last[1] * 3600) + (+last[2] * 60) + parseFloat(last[3]);
+            cur.timeSeconds = secs;
+            const dur = (item && item.duration) || 0;
+            if (dur > 0) cur.progress = Math.min(100, (secs / dur) * 100);
+          }
+        }
+      }
     });
 
     proc.on('error', err => {
@@ -4261,6 +4348,9 @@ module.exports = function mountStreamForge(app, orion) {
         const st = fs.statSync(inputPath);
 
         item.status = 'converted';
+        // Keep scheduled:true — the batch counter reads it, and clearing
+        // it here removed the file from both numerator and denominator,
+        // so the bar could never advance.
         item.size = st.size;
         item.mtimeMs = st.mtimeMs;
         item.videoCodec = verified.videoCodec;
@@ -4302,14 +4392,24 @@ module.exports = function mountStreamForge(app, orion) {
 
   async function _normalizerDispatch() {
     if (normalizerDispatchBusy) return;
-    if (!normalizerState.enabled) return;
+
+    // Two independent reasons to be converting: the user pressed Start,
+    // or the nightly task is working through its batch. Pausing the
+    // former must not cancel the latter.
+    const nightlyActive = !!normalizerState.nightlyRunUntil &&
+                          Date.now() < normalizerState.nightlyRunUntil;
+    if (!normalizerState.enabled && !nightlyActive) return;
+
     if (normalizerState.scanning) return;
 
     normalizerDispatchBusy = true;
 
     try {
       // Scheduled HLS preparation always wins.
-      if (await _normalizerPresegBusy()) return;
+      if (await _normalizerPresegBusy()) {
+        normalizerState.blockedBy = 'preseg';
+        return;
+      }
 
       // Back off while someone is actually watching.
       const policy = normalizerState.playbackPolicy || 'pause';
@@ -4320,7 +4420,8 @@ module.exports = function mountStreamForge(app, orion) {
         const watching = Object.values(hlsSessions || {})
           .some(x => x && (_now - (x.lastRequest || 0)) < 90000);
         if (watching) {
-          if (policy === 'pause') return;
+          if (policy === 'pause') { normalizerState.blockedBy = 'playback'; return; }
+          normalizerState.blockedBy = 'playback-reduced';
           if (policy === 'reduce') gpuIds = gpuIds.slice(0, 1);
         }
       }
@@ -4334,7 +4435,24 @@ module.exports = function mountStreamForge(app, orion) {
         if (inUse.has(gpu)) continue;
 
         const next = _normalizerNextQueued();
-        if (!next) break;
+        // Claim it before spawning. _normalizerStartFile registers the
+        // entry a tick later, so without this the next iteration of this
+        // loop picks the same path and two workers take the same file.
+        if (next) normalizerState.current[next] = { claiming: true, gpu, progress: 0 };
+        if (!next && nightlyActive && !normalizerState.enabled) {
+          // Batch finished. Close the window rather than leaving a
+          // background grind running until it times out.
+          normalizerState.nightlyRunUntil = 0;
+          console.log('[Normalizer] nightly batch complete');
+          _normalizerSave();
+        }
+        if (!next) {
+          if (!Object.keys(normalizerState.current || {}).length) {
+            normalizerState.blockedBy = 'queue-empty';
+          }
+          break;
+        }
+        normalizerState.blockedBy = null;
 
         _normalizerStartFile(next, gpu);
         inUse.add(gpu);
@@ -4351,15 +4469,26 @@ module.exports = function mountStreamForge(app, orion) {
     res.json({
       enabled: normalizerState.enabled,
       scanning: normalizerState.scanning,
+      scanAbort: !!normalizerState.scanAbort,
       outputMode: normalizerState.outputMode,
       keepBackup: normalizerState.keepBackup !== false,
       dryRun: !!normalizerState.dryRun,
       scheduledDays: normalizerState.scheduledDays || 3,
+      blockedBy: normalizerState.blockedBy || null,
+      nightlyActive: !!normalizerState.nightlyRunUntil &&
+                     Date.now() < normalizerState.nightlyRunUntil,
+      nightlyRunUntil: normalizerState.nightlyRunUntil || 0,
+      scheduledStats: normalizerState.scheduledStats || null,
       playbackPolicy: normalizerState.playbackPolicy || 'pause',
       outputMode: normalizerState.outputMode,
       keepBackup: normalizerState.keepBackup !== false,
       dryRun: !!normalizerState.dryRun,
       scheduledDays: normalizerState.scheduledDays || 3,
+      blockedBy: normalizerState.blockedBy || null,
+      nightlyActive: !!normalizerState.nightlyRunUntil &&
+                     Date.now() < normalizerState.nightlyRunUntil,
+      nightlyRunUntil: normalizerState.nightlyRunUntil || 0,
+      scheduledStats: normalizerState.scheduledStats || null,
       scanDone: normalizerState.scanDone || 0,
       scanTotal: normalizerState.scanTotal || 0,
       roots: NORMALIZER_ROOTS,
@@ -4370,20 +4499,28 @@ module.exports = function mountStreamForge(app, orion) {
     });
   });
 
-  app.post('/api/sf/normalizer/start', async (req, res) => {
+  app.post('/api/sf/normalizer/start', (req, res) => {
     normalizerState.enabled = true;
     _normalizerSave();
 
-    // Kick off scan in background; UI polls /status for progress.
-    if (!normalizerState.scanning) {
-      _normalizerScan().catch(e => console.error('[Normalizer] start:', e.message));
-    }
+    // No scan here. Walking 33k files takes minutes and start should be
+    // instant — the queue already holds whatever the last scan found.
+    // Use /rescan (or the Rescan button) to discover new files.
 
     res.json({
       ok: true,
       enabled: true,
       stats: normalizerState.stats
     });
+  });
+
+  // Pause stops the continuous background conversion only. A nightly
+  // batch in progress keeps running — use /nightly-stop for that.
+  app.post('/api/sf/normalizer/nightly-stop', (req, res) => {
+    normalizerState.nightlyRunUntil = 0;
+    _normalizerSave();
+    console.log('[Normalizer] nightly window closed by request');
+    res.json({ ok: true, nightlyActive: false });
   });
 
   app.post('/api/sf/normalizer/pause', (req, res) => {
@@ -4535,6 +4672,8 @@ module.exports = function mountStreamForge(app, orion) {
 
       const seen = new Set();
       let considered = 0, queued = 0, alreadyOk = 0, missing = 0, failed = 0;
+      let alreadyQueued = 0;
+      const missingPaths = [];
 
       for (const channel of (Array.isArray(schedule) ? schedule : [])) {
         for (const prog of (channel.programs || [])) {
@@ -4544,7 +4683,11 @@ module.exports = function mountStreamForge(app, orion) {
           seen.add(prog.filePath);
           considered++;
 
-          if (!fs.existsSync(prog.filePath)) { missing++; continue; }
+          if (!fs.existsSync(prog.filePath)) {
+            missing++;
+            if (missingPaths.length < 200) missingPaths.push(prog.filePath);
+            continue;
+          }
 
           const existing = normalizerState.files[prog.filePath];
           if (existing && ['compatible', 'converted'].includes(existing.status)) {
@@ -4552,11 +4695,20 @@ module.exports = function mountStreamForge(app, orion) {
             continue;
           }
           if (existing && ['queued', 'processing'].includes(existing.status)) {
+            alreadyQueued++;
+            // Flag it even though it was already queued, otherwise it
+            // converts without counting toward the batch and the progress
+            // bar stalls while work is plainly happening.
+            existing.scheduled = true;
             continue;
           }
 
           let st;
-          try { st = fs.statSync(prog.filePath); } catch (_) { missing++; continue; }
+          try { st = fs.statSync(prog.filePath); } catch (_) {
+            missing++;
+            if (missingPaths.length < 200) missingPaths.push(prog.filePath);
+            continue;
+          }
 
           try {
             const probe = _normalizerProbe(prog.filePath);
@@ -4591,17 +4743,163 @@ module.exports = function mountStreamForge(app, orion) {
         }
       }
 
+      // Open a conversion window so this batch runs even when the
+      // Normalizer is paused. Capped so a stuck batch cannot grind on
+      // for days; the next nightly run reopens it.
+      if (queued > 0) {
+        const hours = Math.max(1, Math.min(24,
+          parseInt(normalizerState.nightlyMaxHours, 10) || 8));
+        normalizerState.nightlyRunUntil = Date.now() + hours * 3600 * 1000;
+        console.log('[Normalizer] nightly window open for ' + hours + 'h (' +
+          queued + ' file(s) queued)');
+      }
+
       _normalizerRecount();
       _normalizerSave();
 
       console.log('[Normalizer] scheduled scope: ' + considered + ' scheduled, ' +
-        queued + ' queued, ' + alreadyOk + ' already fine, ' +
-        missing + ' missing, ' + failed + ' probe errors');
+        queued + ' newly queued, ' + alreadyQueued + ' already queued, ' +
+        alreadyOk + ' already fine, ' + missing + ' missing, ' +
+        failed + ' probe errors');
 
-      res.json({ ok: true, days, considered, queued, alreadyOk, missing, failed });
+      if (missingPaths.length) {
+        console.warn('[Normalizer] scheduled media missing from disk (' +
+          missing + '). First few:');
+        for (const p of missingPaths.slice(0, 10)) console.warn('    ' + p);
+      }
+
+      res.json({
+        ok: true, days, considered, queued, alreadyQueued,
+        alreadyOk, missing, failed,
+        missingPaths
+      });
 
     } catch (e) {
       console.error('[Normalizer] queue-scheduled failed:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Ask a running scan to stop. It finishes the current file and exits.
+  app.post('/api/sf/normalizer/scan-stop', (req, res) => {
+    if (!normalizerState.scanning) {
+      return res.json({ ok: true, scanning: false, message: 'no scan running' });
+    }
+    normalizerState.scanAbort = true;
+    console.log('[Normalizer] stop requested');
+    res.json({ ok: true, stopping: true });
+  });
+
+  /**
+   * Remove schedule entries whose media is gone.
+   *
+   * Checks every channel's scheduledPrograms, playout list and series
+   * schedule against the media table and the filesystem, and drops what
+   * cannot be played. Safe to run at any time: it only removes entries
+   * that would already fail.
+   */
+  app.post('/api/sf/schedule/clean', (req, res) => {
+    // DISABLED: this removed 783 valid entries twice, wiping restored
+    // series schedules. The validity check compares against the media
+    // table, but schedule entries reference media by ids that no longer
+    // line up after a reorganisation, so almost everything fails it.
+    // Needs rewriting to check the filesystem, and to be dry-run first.
+    return res.status(503).json({
+      error: 'schedule clean is disabled — it over-prunes valid entries'
+    });
+    // eslint-disable-next-line no-unreachable
+    try {
+      const validIds = new Set();
+      const validPaths = new Set();
+      try {
+        for (const m of getMediaCombined()) {
+          if (m.id) validIds.add(m.id);
+          const p = m.path || m.filePath;
+          if (p) validPaths.add(p);
+        }
+      } catch (_) {}
+
+      const _ok = (mediaId, filePath) => {
+        if (mediaId && validIds.has(mediaId)) return true;
+        if (filePath && validPaths.has(filePath)) return true;
+        if (filePath && /^https?:\/\//i.test(filePath)) return true;
+        if (filePath) { try { return fs.existsSync(filePath); } catch (_) { return false; } }
+        return false;
+      };
+
+      let removedProgs = 0, removedPlayout = 0, removedEpisodes = 0;
+      const perChannel = [];
+
+      for (const ch of (sfDb.channels || [])) {
+        let n = 0;
+
+        if (Array.isArray(ch.scheduledPrograms)) {
+          const before = ch.scheduledPrograms.length;
+          ch.scheduledPrograms = ch.scheduledPrograms
+            .filter(p => _ok(p.mediaId, p.filePath));
+          n += before - ch.scheduledPrograms.length;
+          removedProgs += before - ch.scheduledPrograms.length;
+        }
+
+        if (Array.isArray(ch.playout)) {
+          const before = ch.playout.length;
+          ch.playout = ch.playout.filter(p => _ok(p.mediaId, p.filePath));
+          n += before - ch.playout.length;
+          removedPlayout += before - ch.playout.length;
+        }
+
+        if (ch.seriesSchedule && Array.isArray(ch.seriesSchedule.episodes)) {
+          const before = ch.seriesSchedule.episodes.length;
+          ch.seriesSchedule.episodes = ch.seriesSchedule.episodes
+            .filter(e => _ok(e.mediaId, e.filePath));
+          n += before - ch.seriesSchedule.episodes.length;
+          removedEpisodes += before - ch.seriesSchedule.episodes.length;
+        }
+
+        if (n) {
+          perChannel.push({ channel: ch.name, removed: n });
+          // force a fresh schedule next time it is asked for
+          ch.scheduledProgramsGeneratedAt = 0;
+        }
+      }
+
+      const total = removedProgs + removedPlayout + removedEpisodes;
+      if (total) saveAll();
+
+      console.log('[Schedule] clean removed ' + total + ' broken entries across ' +
+        perChannel.length + ' channel(s)');
+
+      res.json({
+        ok: true, total,
+        scheduledPrograms: removedProgs,
+        playout: removedPlayout,
+        seriesEpisodes: removedEpisodes,
+        channels: perChannel
+      });
+    } catch (e) {
+      console.error('[Schedule] clean failed:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  /**
+   * Force every channel to regenerate its schedule from current media.
+   * Heavier than clean — a channel's position in its programme changes.
+   */
+  app.post('/api/sf/schedule/rebuild', (req, res) => {
+    try {
+      let n = 0;
+      for (const ch of (sfDb.channels || [])) {
+        if (ch.liveStreamId) continue;
+        ch.scheduledProgramsGeneratedAt = 0;
+        ch.scheduledPrograms = [];
+        n++;
+      }
+      saveAll();
+      console.log('[Schedule] rebuild queued for ' + n + ' channel(s)');
+      res.json({ ok: true, channels: n,
+        message: 'Schedules will regenerate on next request' });
+    } catch (e) {
       res.status(500).json({ error: e.message });
     }
   });

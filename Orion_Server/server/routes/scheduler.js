@@ -39,12 +39,26 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
   router.put('/scheduler/:id', (req, res) => {
     const task = (db.scheduledTasks||[]).find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
-    const { enabled, frequency, hour, minute } = req.body;
+    const { enabled, frequency, hour, minute, scheduleTime, schedule } = req.body;
+    // Tasks store their time as scheduleTime ("HH:MM"), but this handler
+    // only understood hour/minute — so time edits silently did nothing.
+    if (scheduleTime !== undefined && /^\d{1,2}:\d{2}$/.test(String(scheduleTime))) {
+      task.scheduleTime = scheduleTime;
+      const [h, m] = String(scheduleTime).split(':');
+      task.hour = parseInt(h, 10);
+      task.minute = parseInt(m, 10);
+    }
+    if (schedule  !== undefined) task.schedule  = schedule;
     if (enabled   !== undefined) task.enabled   = enabled;
     if (frequency !== undefined) task.frequency = frequency;
     if (hour      !== undefined) task.hour      = parseInt(hour);
     if (minute    !== undefined) task.minute    = parseInt(minute);
-    saveDB();
+    if ((hour !== undefined || minute !== undefined) && scheduleTime === undefined) {
+      const hh = String(task.hour ?? 0).padStart(2, '0');
+      const mm = String(task.minute ?? 0).padStart(2, '0');
+      task.scheduleTime = hh + ':' + mm;
+    }
+    saveDB(true, 'scheduledTasks');
     res.json({ task });
   });
 

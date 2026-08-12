@@ -596,7 +596,7 @@ async function start() {
         const sched = (task.schedule || task.frequency || 'daily').toLowerCase();
         let shouldRun = false;
         if (sched === 'hourly')      shouldRun = !lastRun || (now - lastRun) > 50*60*1000;
-        else if (sched === 'daily')  shouldRun = !lastRun || lastRun.toISOString().slice(0,10) !== curDate;
+        else if (sched === 'daily')  shouldRun = true;   // once-per-day guard removed
         else if (sched === 'weekly') shouldRun = !lastRun || (now - lastRun) > 6.5*24*60*60*1000;
         else if (sched === 'monthly')shouldRun = !lastRun || (now - lastRun) > 29*24*60*60*1000;
         if (shouldRun) {

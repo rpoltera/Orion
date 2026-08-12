@@ -142,18 +142,30 @@ function start() {
   const channels = deps.getChannels() || [];
   console.log(`[PlayoutEngine] Starting — ${channels.length} channels`);
 
-  // Stagger channel startup to avoid all ffmpegs spawning at exactly the same moment
+  // Build playlists so each channel knows where it is in its schedule,
+  // but do not spawn ffmpeg. A channel is started when someone actually
+  // requests it (streamforge.js lazy-start on /sf/hls/:id/index.m3u8),
+  // and wall-clock anchoring means tuning in mid-programme still lands
+  // at the right offset.
+  //
+  // Set ORION_PLAYOUT_EAGER=1 to restore the old always-running behaviour.
+  const EAGER = process.env.ORION_PLAYOUT_EAGER === '1';
+
   channels.forEach((ch, i) => {
     if (ch.liveStreamId) return; // skip live IPTV — handled elsewhere
     setTimeout(() => {
       try {
         regeneratePlaylist(ch);
-        startChannelStream(ch);
+        if (EAGER) startChannelStream(ch);
       } catch (err) {
-        console.error(`[PlayoutEngine] Failed to start "${ch.name}":`, err.message);
+        console.error(`[PlayoutEngine] Failed to prepare "${ch.name}":`, err.message);
       }
-    }, 500 + i * 300);
+    }, 500 + i * 50);
   });
+
+  console.log('[PlayoutEngine] ' +
+    (EAGER ? 'eager mode — starting all channels'
+           : 'on-demand mode — channels start when tuned in'));
 
   // Periodic playlist refresh
   setInterval(() => {
@@ -478,6 +490,26 @@ function buildPlaylistItems(ch) {
   return items;
 }
 
+// Playlists regenerate frequently and these paths are on NFS, so cache
+// the answer briefly rather than stat-ing the same file repeatedly. Short
+// TTL means a file that comes back is picked up on the next cycle.
+const _existsCache = new Map();
+const _missingWarned = new Set();   // log each missing path once, not every cycle
+const _EXISTS_TTL = 60000;
+
+function _fileUsable(p) {
+  if (!p) return false;
+  if (/^https?:\/\//i.test(p)) return true;   // remote source, nothing to stat
+  const hit = _existsCache.get(p);
+  const now = Date.now();
+  if (hit && now - hit.at < _EXISTS_TTL) return hit.ok;
+  let ok = false;
+  try { ok = fs.existsSync(p); } catch (_) { ok = false; }
+  _existsCache.set(p, { ok, at: now });
+  if (_existsCache.size > 50000) _existsCache.clear();
+  return ok;
+}
+
 function regeneratePlaylist(ch) {
   if (ch.liveStreamId) return;
   let items;
@@ -513,6 +545,20 @@ function regeneratePlaylist(ch) {
       const fp = (m && (m.path || m.filePath)) || p.filePath;
       if (!m && fp) fallbackHits++;
       if (!fp) { missed++; continue; }
+
+      // The fallback above can hand back a path from whenever this
+      // schedule was built. If the file is not there, skip the item —
+      // putting it in the playlist only produces an ffmpeg exit 254 and
+      // a channel that restarts forever.
+      if (!_fileUsable(fp)) {
+        missed++;
+        if (!_missingWarned.has(fp)) {
+          _missingWarned.add(fp);
+          console.warn('[PlayoutEngine] skipping missing file for "' +
+            ch.name + '": ' + fp);
+        }
+        continue;
+      }
       items.push({
         id: p.mediaId,
         filePath: fp,

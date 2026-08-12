@@ -15,6 +15,14 @@ const CONFIG_PATH = '/var/lib/orion/config.json';
 // M5: honour ORION_DATA_DIR so this runs somewhere other than /var/lib.
 const SF_DIR = process.env.ORION_SF_DIR ||
   path.join(process.env.ORION_DATA_DIR || '/var/lib/orion', 'sf');
+
+const PRESEG_OUT = process.env.ORION_PRESEG_OUT ||
+  path.join(SF_DIR, 'presegs');
+try { fs.mkdirSync(PRESEG_OUT, { recursive: true }); } catch (_) {}
+function presegOutDir(mediaId) { return path.join(PRESEG_OUT, String(mediaId)); }
+function presegLegacyDir(filePath, mediaId) {
+  return path.join(path.dirname(filePath), '.hls', String(mediaId));
+}
 const PRESEG_JSON = path.join(SF_DIR, 'preseg.json');
 const PROBE_CACHE = path.join(SF_DIR, 'probe-cache.json');
 const PRESEG_TEMP = path.join(SF_DIR, 'preseg_temp');
