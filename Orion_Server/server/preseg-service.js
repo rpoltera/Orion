@@ -96,6 +96,7 @@ function loadConfig() {
       skip10Bit: inner.skip10Bit !== false,
       hwAccel: (inner.hwAccel || 'cpu').toLowerCase(),
       gpuCount: Math.max(1, parseInt(inner.gpuCount, 10) || 1),
+      daysAhead: Math.max(1, Math.min(30, parseInt(inner.daysAhead, 10) || 1)),
       maxGpuPreseg: parseInt(inner.maxGpuPreseg, 10) || 4,
       maxCpuPreseg: parseInt(inner.maxCpuPreseg, 10) || 2,
       route10BitToCpu: inner.route10BitToCpu === true,
@@ -314,12 +315,29 @@ function moveToNas(mediaId, filePath, tempDir, callback) {
 // === Worker ===
 function runWorker(item, useCpu) {
   const { mediaId, filePath } = item;
+
+  // Excluded trees never get segmented, however they were queued.
+  if (_isExcludedPath(filePath)) {
+    presegDb[mediaId] = { ...(presegDb[mediaId] || {}), status: 'skipped',
+      filePath, error: 'path excluded', skippedAt: Date.now() };
+    saveDb();
+    afterWorker(useCpu, -1);
+    return;
+  }
+
+  // Reserve the slot before the async probe below. drain() decides whether
+  // to spawn by reading these counters, so incrementing them only after the
+  // probe returns let it launch far past the cap.
+  const _gpuId = useCpu ? -1 : assignGpu();
+  if (_gpuId >= 0) gpuWorkerCount[_gpuId]++;
+  if (useCpu) cpuWorkerCount++;
+
   try { fs.accessSync(filePath); }
   catch {
     presegDb[mediaId] = { ...(presegDb[mediaId] || {}), status: 'error', filePath, error: 'source file not accessible', failedAt: Date.now() };
     writeHlsStatus(mediaId, 'error', { filePath, error: 'source file not accessible' });
     saveDb();
-    afterWorker(useCpu, -1);
+    afterWorker(useCpu, _gpuId);   // release the slot reserved above
     return;
   }
   probe10Bit(filePath, (probeResult) => {
@@ -341,18 +359,24 @@ function runWorker(item, useCpu) {
         console.log(`[Worker] convert handoff exception for ${mediaId}: ${err.message}`);
       }
       saveDb();
-      afterWorker(useCpu, -1);
+      afterWorker(useCpu, _gpuId);   // release the slot reserved above
       return;
     }
-    actuallySpawn(item, useCpu, is10, codec);
+    actuallySpawn(item, useCpu, is10, codec, _gpuId);
   });
 }
 
-function actuallySpawn(item, useCpu, is10, srcCodec) {
+function actuallySpawn(item, useCpu, is10, srcCodec, reservedGpu) {
   const { mediaId, filePath } = item;
-  const gpuId = useCpu ? -1 : assignGpu();
-  if (gpuId >= 0) gpuWorkerCount[gpuId]++;
-  if (useCpu) cpuWorkerCount++;
+  // The slot was already reserved in runWorker; assigning and counting a
+  // second one here is what let the worker count run away.
+  const gpuId = (reservedGpu === undefined)
+    ? (useCpu ? -1 : assignGpu())
+    : reservedGpu;
+  if (reservedGpu === undefined) {
+    if (gpuId >= 0) gpuWorkerCount[gpuId]++;
+    if (useCpu) cpuWorkerCount++;
+  }
 
   presegDb[mediaId] = {
     ...(presegDb[mediaId] || {}),
@@ -517,14 +541,19 @@ function getJsonFromOrion(reqPath) {
   });
 }
 
-function localDayWindow(now = new Date()) {
+function localDayWindow(now = new Date(), days) {
+  // Was fixed at one day. Callers can now ask for a longer window; the
+  // default stays 1 so existing behaviour is unchanged.
+  const n = Math.max(1, Math.min(30,
+    parseInt(days !== undefined ? days : cfg.daysAhead, 10) || 1));
+
   const from = new Date(now);
   from.setHours(0, 0, 0, 0);
 
   const to = new Date(from);
-  to.setDate(to.getDate() + 1);
+  to.setDate(to.getDate() + n);
 
-  return { from: from.getTime(), to: to.getTime() };
+  return { from: from.getTime(), to: to.getTime(), days: n };
 }
 
 function clearHlsStatus(mediaId) {
@@ -570,12 +599,30 @@ function removeEntryHls(mediaId, entry) {
   return removed;
 }
 
+// Paths that should never be pre-segmented. Matched as substrings, so
+// '/MusicVids/' covers the whole tree. Configurable via excludePaths.
+function _excludedPaths() {
+  const v = cfg.excludePaths;
+  if (Array.isArray(v)) return v.filter(Boolean);
+  if (typeof v === 'string' && v.trim()) {
+    return v.split(',').map(x => x.trim()).filter(Boolean);
+  }
+  return ['/MusicVids/'];
+}
+
+function _isExcludedPath(p) {
+  if (!p) return false;
+  const list = _excludedPaths();
+  for (const frag of list) if (p.includes(frag)) return true;
+  return false;
+}
+
 async function runDailyScheduledPreseg(opts = {}) {
   const purge = opts.purge !== undefined ? !!opts.purge : cfg.purgeUnscheduled !== false;
 
-  const { from, to } = localDayWindow();
+  const { from, to, days } = localDayWindow(new Date(), opts.days);
   console.log(
-    '[DailyPreseg] Building today: ' +
+    '[DailyPreseg] Building ' + days + ' day(s): ' +
     new Date(from).toString() + ' -> ' + new Date(to).toString()
   );
 
@@ -594,6 +641,9 @@ async function runDailyScheduledPreseg(opts = {}) {
 
       // IPTV/remote streams are never presegged
       if (/^https?:\/\//i.test(prog.filePath)) continue;
+
+      // Excluded trees — music videos by default.
+      if (_isExcludedPath(prog.filePath)) continue;
 
       needed.set(prog.mediaId, {
         mediaId: prog.mediaId,
@@ -897,11 +947,54 @@ function _scanDonePaths() {
   return done;
 }
 
+// Resolve a file path to its real mediaId from the Orion library.
+// Segments are looked up by mediaId at playback time, so a made-up id
+// means the output can never be found and the work is wasted.
+let _pathIdCache = null;
+let _pathIdCacheAt = 0;
+
+function _mediaIdForPath(filePath) {
+  if (!filePath) return null;
+
+  // Cache the whole path->id map; rebuilding per file would be far worse.
+  if (!_pathIdCache || Date.now() - _pathIdCacheAt > 300000) {
+    _pathIdCache = new Map();
+    _pathIdCacheAt = Date.now();
+    try {
+      const db = _ensureOrionDb();
+      if (db) {
+        const rows = db.prepare(
+          "SELECT key, value FROM kv_arrays WHERE key IN ('tvShows','movies','music','musicVideos')"
+        ).all();
+        for (const r of rows) {
+          let arr;
+          try { arr = JSON.parse(r.value); } catch { continue; }
+          if (!Array.isArray(arr)) continue;
+          for (const m of arr) {
+            const p = m && (m.path || m.filePath);
+            if (p && m.id) _pathIdCache.set(p, m.id);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[Scan] could not build path->id map: ' + e.message);
+    }
+    console.log('[Scan] path->id map: ' + _pathIdCache.size + ' entries');
+  }
+
+  return _pathIdCache.get(filePath) || null;
+}
+
 function _scanEnqueueItems(items) {
   let queued = 0, skipped = 0;
   for (const it of items) {
     if (!it || !it.filePath) { skipped++; continue; }
-    const mid = it.mediaId || ('scan-' + Date.now() + '-' + Math.random().toString(36).slice(2, 9));
+    // Prefer the library's own id. A synthetic one produces segments that
+    // playback can never resolve, so only use it as a last resort and mark
+    // it clearly rather than hiding it behind a timestamp.
+    const mid = it.mediaId
+      || _mediaIdForPath(it.filePath)
+      || ('unlinked-' + Buffer.from(String(it.filePath)).toString('base64url').slice(-24));
     const cur = presegDb[mid];
     if (cur && cur.status === 'done') { skipped++; continue; }
     if (cur && cur.status === 'processing') { skipped++; continue; }
@@ -990,7 +1083,7 @@ app.put('/config', (req, res) => {
     }
     root.services.preseg.config = root.services.preseg.config || {};
     for (const k of ['workers', 'skip10Bit', 'hwAccel', 'gpuCount', 'maxGpuPreseg', 'maxCpuPreseg', 'route10BitToCpu',
-                      'dailyScheduleEnabled', 'dailyScheduleTime', 'purgeUnscheduled']) {
+                      'dailyScheduleEnabled', 'dailyScheduleTime', 'purgeUnscheduled', 'daysAhead', 'excludePaths']) {
       if (k in req.body) root.services.preseg.config[k] = req.body[k];
     }
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(root, null, 2));

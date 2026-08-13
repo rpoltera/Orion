@@ -223,7 +223,7 @@ function Channels({ call, onWatch, onPlayout }) {
     setLoading(true);
     // [UI-FIX] allSettled so one slow/hung endpoint doesn't block the whole page.
     Promise.allSettled([
-      call('GET','/api/sf/channels'),
+      call('GET','/api/sf/channels?light=1'),
       call('GET','/api/sf/streams'),
       call('GET','/api/sf/epg?enabledOnly=1'),
       call('GET','/api/iptv/channels'),
@@ -536,7 +536,7 @@ function PlayoutBuilder({ call, initialChannelId }) {
 
   useEffect(()=>{
     Promise.all([
-      call('GET','/api/sf/channels'),
+      call('GET','/api/sf/channels?light=1'),
       call('GET','/api/sf/streams'),
       call('GET','/api/sf/libraries'),
       call('GET','/api/sf/media/genres').catch(()=>[]),

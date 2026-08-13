@@ -1175,6 +1175,7 @@ const PRESEG_CONFIG_KEYS = [
 
   { key: 'dailyScheduleEnabled', label: 'Daily Scheduled Media Only', type: 'bool', hint: 'Pre-segment only media scheduled on today’s channels' },
   { key: 'dailyScheduleTime', label: 'Daily Run Time', type: 'text', hint: '00:00 = midnight' },
+  { key: 'daysAhead', label: 'Days Ahead', type: 'number', min: 1, max: 30, hint: 'How many days of schedule to pre-segment. 1 = today only' },
   { key: 'purgeUnscheduled', label: 'Purge Unscheduled HLS', type: 'bool', hint: 'Delete Orion HLS not required by today’s schedule' },
 ];
 

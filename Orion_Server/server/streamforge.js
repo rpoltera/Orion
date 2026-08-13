@@ -727,8 +727,12 @@ function _ps_buildEpisodeListSchedule(ch, fromMs, toMs) {
   const showTitle = (ch.seriesSchedule || {}).showTitle || '';
   for (const m of allMedia) {
     if (m.id) byId.set(m.id, m);
-    if (m.seriesTitle && m.season != null && m.episode != null) {
-      const k = _norm(m.seriesTitle) + '|' + m.season + '|' + m.episode;
+    // Media records store the show name in title; seriesTitle is not
+    // populated by the scanner. Indexing only on seriesTitle left this
+    // map empty, so the stale-id fallback below never matched anything.
+    const _st = m.seriesTitle || m.title;
+    if (_st && m.season != null && m.episode != null) {
+      const k = _norm(_st) + '|' + m.season + '|' + m.episode;
       if (!bySeriesEp.has(k)) bySeriesEp.set(k, m);
     }
   }
@@ -773,9 +777,10 @@ function _ps_buildPlayoutSchedule(ch, fromMs, toMs) {
   const bySeriesEp = new Map();
   const _rawTV = (orionDb && Array.isArray(orionDb.tvShows)) ? orionDb.tvShows : [];
   for (const m of _rawTV) {
-    if (m.seriesTitle && m.season != null && m.episode != null) {
+    const _st2 = m.seriesTitle || m.title;
+    if (_st2 && m.season != null && m.episode != null) {
       if (!(m.path || m.filePath)) continue;
-      const k = _norm(m.seriesTitle) + '|' + m.season + '|' + m.episode;
+      const k = _norm(m.seriesTitle || m.title) + '|' + m.season + '|' + m.episode;
       if (!bySeriesEp.has(k)) bySeriesEp.set(k, m);
       // Also index raw items by id so byId can resolve them too (in case getMediaCombined lacks them)
       if (m.id && !byId.has(m.id)) byId.set(m.id, m);
@@ -1086,12 +1091,32 @@ function ensureChannelSchedule(ch, force) {
               || !ch.scheduledProgramsGeneratedAt
               || (now - (ch.scheduledProgramsGeneratedAt||0) > 12 * 3600 * 1000)
               || (ch.scheduledPrograms[ch.scheduledPrograms.length-1].end < now + 24 * 3600 * 1000);
+  // Respect the back-off from a previous empty build.
+  if (!force && ch._emptyScheduleAt && (now - ch._emptyScheduleAt) < 600000) {
+    return ch.scheduledPrograms || [];
+  }
+
   if (!force && !stale) return ch.scheduledPrograms;
   const fromMs = now;
   const toMs = now + horizonMs;
   const progs = generateChannelSchedule(ch, fromMs, toMs);
+
+  // A build that produces nothing leaves scheduledPrograms empty, which
+  // the staleness check above treats as stale — so the next request
+  // regenerates, gets nothing again, and calls saveAll() on a 2 MB file
+  // each time. That loop is what stalled segment delivery. Record the
+  // attempt so an empty result backs off instead of retrying immediately.
+  if (!progs.length) {
+    ch.scheduledProgramsGeneratedAt = now;
+    ch._emptyScheduleAt = now;
+    console.warn('[SF] "' + ch.name + '" generated 0 programs — ' +
+      'not retrying for 10 minutes. Check the episode list and media ids.');
+    return ch.scheduledPrograms || [];
+  }
+
   ch.scheduledPrograms = progs;
   ch.scheduledProgramsGeneratedAt = now;
+  ch._emptyScheduleAt = 0;
   saveAll();
   console.log('[SF] regenerated schedule for "' + ch.name + '": ' + progs.length + ' programs over ' + horizonDays + ' days');
   return progs;
@@ -2299,6 +2324,11 @@ setInterval(() => {
       const newest = Math.max(...files.map(f => {
         try { return fs.statSync(path.join(s.dir, f)).mtimeMs; } catch { return 0; }
       }));
+      // PlayoutEngine streams write segments in bursts when copying from
+      // presegs, so a minute without a new file is normal rather than
+      // frozen. This was killing healthy channels with 25 minutes uptime.
+      if (s._realProc) continue;
+
       if (now - newest > 60000) {
         const ch = sfDb.channels.find(c => c.id === id);
         console.log(`[SF/StuckGuard] Killing frozen "${ch?.name || id}" — last seg ${Math.round((now-newest)/1000)}s old`);
@@ -2367,7 +2397,11 @@ setInterval(() => {
 
   // H4: if more always-on sessions than this machine can sustain, retire the
   // least recently requested ones. They restart on demand when tuned.
-  if (keepAlives.length > caps.maxKeepAlive) {
+  // Retirement disabled. With on-demand playout a channel only runs when
+  // someone is watching, so capping keep-alives just killed live channels
+  // every few minutes — and each restart rebuilt its playlist (1384 items
+  // for Bluey) synchronously, blocking the event loop for minutes.
+  if (false && keepAlives.length > caps.maxKeepAlive) {
     keepAlives
       .sort((a,b) => a[1].lastRequest - b[1].lastRequest)
       .slice(0, keepAlives.length - caps.maxKeepAlive)
@@ -2380,8 +2414,22 @@ setInterval(() => {
 
   entries.forEach(([id,sess]) => {
     if (!hlsSessions[id]) return;
+
+    // PlayoutEngine owns the lifecycle of its own streams. They are wrapped
+    // into hlsSessions for bookkeeping, but lastRequest only advances on a
+    // direct /sf/hls fetch — a channel playing out to a TV does not always
+    // hit that path, so this reaper was killing healthy streams every few
+    // minutes. Each restart then rebuilt the playlist synchronously and
+    // blocked the event loop.
+    if (sess._realProc) return;
+
     const limit = sess.keepAlive ? keepAliveIdleMs : idleMs;
-    if(now-sess.lastRequest>limit) { try{sess.proc.kill('SIGKILL');}catch{} delete hlsSessions[id]; }
+    if(now-sess.lastRequest>limit) {
+      console.log('[SF/HLS] Idle reap: ' + id + ' (' +
+        Math.round((now - sess.lastRequest)/1000) + 's since last request)');
+      try{sess.proc.kill('SIGKILL');}catch{}
+      delete hlsSessions[id];
+    }
   });
 }, 5000);
 
@@ -3453,6 +3501,28 @@ module.exports = function mountStreamForge(app, orion) {
     }
   }
   app.get('/api/sf/channels', async (req, res) => {
+    // The channel list only needs display fields. Resolving media
+    // membership scans the whole library per channel and the preseg call
+    // waits on a busy service — together that was taking 11+ seconds,
+    // past the client's timeout, so the page rendered empty.
+    if (req.query.light === '1' || req.query.light === 'true') {
+      return res.json((sfDb.channels || []).map(ch => ({
+        id: ch.id,
+        name: ch.name,
+        num: ch.num,
+        group: ch.group,
+        logo: ch.logo,
+        active: ch.active,
+        liveStreamId: ch.liveStreamId || null,
+        epgChannelId: ch.epgChannelId || null,
+        splashUrl: ch.splashUrl || null,
+        hasSchedule: !!(ch.scheduledPrograms && ch.scheduledPrograms.length),
+        itemCount: (ch.playout || []).length
+          || ((ch.seriesSchedule || {}).episodes || []).length
+          || 0
+      })));
+    }
+
     const _norm = (x) => (x||'').toLowerCase().replace(/[^a-z0-9]/g, '');
     // Resolve the list of mediaIds belonging to a channel (same logic as queue-channel)
     const _channelMediaIds = (ch) => {
@@ -3473,11 +3543,15 @@ module.exports = function mountStreamForge(app, orion) {
             : (ch.seriesSchedule.showTitle ? [ch.seriesSchedule.showTitle] : []);
           if (showTitlesArr.length > 0) {
             const targets = showTitlesArr.map(_norm);
-            return getMediaCombined().filter(m => {
-              if (m.season == null || m.episode == null) return false;
-              const t = _norm(m.seriesTitle || m.showName || m.title || m.filename);
-              return targets.some(target => t === target || t.startsWith(target));
-            }).map(m => m.id).filter(Boolean);
+            // _epIndex is built once per request below; without it this
+            // filtered all 41k media records once per channel.
+            const out = [];
+            for (const [t, ids] of _epIndex) {
+              if (targets.some(target => t === target || t.startsWith(target))) {
+                for (const id of ids) out.push(id);
+              }
+            }
+            return out;
           }
           if (ch.seriesSchedule.episodes?.length) {
             return ch.seriesSchedule.episodes.map(e => e.id || e.mediaId).filter(Boolean);
@@ -3487,6 +3561,22 @@ module.exports = function mountStreamForge(app, orion) {
       } catch {}
       return [];
     };
+
+    // Normalised show title -> media ids, built once. Previously each
+    // series channel re-scanned the entire library.
+    const _epIndex = new Map();
+    try {
+      for (const m of getMediaCombined()) {
+        if (m.season == null || m.episode == null || !m.id) continue;
+        const t = _norm(m.seriesTitle || m.showName || m.title || m.filename);
+        if (!t) continue;
+        let arr = _epIndex.get(t);
+        if (!arr) { arr = []; _epIndex.set(t, arr); }
+        arr.push(m.id);
+      }
+    } catch (e) {
+      console.error('[SF/Channels] index build failed:', e.message);
+    }
 
     // Load ALL done mediaIds from orion.db hls_status (1 query, hashmap lookup per channel)
     let doneMids = new Set();
@@ -3996,13 +4086,11 @@ module.exports = function mountStreamForge(app, orion) {
       if (!fallback) fallback = filePath;
     }
 
-    // Nothing scheduled left; fall back to the general backlog. During a
-    // nightly window that means the batch is done.
-    if (normalizerState.nightlyRunUntil &&
-        Date.now() < normalizerState.nightlyRunUntil &&
-        !normalizerState.enabled) {
-      return null;
-    }
+    // Never touch the general backlog. Only files the scheduler queued
+    // for an upcoming slot get converted; everything else waits until it
+    // is actually scheduled. Set normalizerState.allowBacklog = true to
+    // opt back in.
+    if (!normalizerState.allowBacklog) return null;
 
     return fallback;
   }
@@ -4069,8 +4157,11 @@ module.exports = function mountStreamForge(app, orion) {
         '-vf', 'scale_cuda=format=yuv420p',
         '-c:v', 'h264_nvenc',
         '-gpu', String(gpu),
-        '-preset', 'p4',
-        '-cq', '21'
+        // p1 is the fastest NVENC preset, p7 the highest quality. This
+        // output is an intermediate for segmentation rather than an
+        // archival master, so speed is usually the better trade.
+        '-preset', String(normalizerState.preset || 'p4'),
+        '-cq', String(normalizerState.cq || 21)
       );
     } else {
       args.push('-c:v', 'copy');
@@ -4431,8 +4522,16 @@ module.exports = function mountStreamForge(app, orion) {
           .map(x => Number(x.gpu))
       );
 
+      // Encoders sit around 45% with one job each, so allow a second per
+      // card. If the real limit is NFS read throughput this changes
+      // nothing; if it is per-job latency, throughput roughly doubles.
+      const perGpu = Math.max(1, parseInt(normalizerState.jobsPerGpu, 10) || 2);
+      const gpuLoad = {};
+      for (const x of Object.values(normalizerState.current || {})) {
+        gpuLoad[x.gpu] = (gpuLoad[x.gpu] || 0) + 1;
+      }
       for (const gpu of gpuIds) {
-        if (inUse.has(gpu)) continue;
+        if ((gpuLoad[gpu] || 0) >= perGpu) continue;
 
         const next = _normalizerNextQueued();
         // Claim it before spawning. _normalizerStartFile registers the
@@ -4746,7 +4845,7 @@ module.exports = function mountStreamForge(app, orion) {
       // Open a conversion window so this batch runs even when the
       // Normalizer is paused. Capped so a stuck batch cannot grind on
       // for days; the next nightly run reopens it.
-      if (queued > 0) {
+      if (queued > 0 || alreadyQueued > 0) {
         const hours = Math.max(1, Math.min(24,
           parseInt(normalizerState.nightlyMaxHours, 10) || 8));
         normalizerState.nightlyRunUntil = Date.now() + hours * 3600 * 1000;

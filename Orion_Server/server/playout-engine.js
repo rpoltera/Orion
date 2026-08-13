@@ -850,7 +850,15 @@ function startChannelStream(ch) {
     '-f', 'concat', '-safe', '0',
     '-i', playlist.file,
     '-map', '0:v:0?', '-map', '0:a:0?',
-    '-c', 'copy',
+    // Video is copied — that is the point of this path, no GPU needed.
+    // Audio has to be decoded so it can be resampled: concat joins
+    // segments from different episodes, each with its own timeline and
+    // sometimes its own sample rate, and 'copy' passes those straight
+    // through. aresample=async=1000 corrects the drift that causes,
+    // and pinning to 48 kHz stereo removes rate mismatches at boundaries.
+    '-c:v', 'copy',
+    '-af', 'aresample=async=1000',
+    '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000',
     '-avoid_negative_ts', 'make_zero',
     '-f', 'hls',
     '-hls_time', '1',
