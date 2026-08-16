@@ -2335,6 +2335,27 @@ setInterval(() => {
         const realProc = s._realProc || s.proc;
         try { realProc && realProc.pid && process.kill(realProc.pid, 'SIGKILL'); } catch {}
         delete hlsSessions[id];
+
+        // Killing alone leaves the channel off. The prebuffer watchdog is
+        // the only thing that would bring it back, and it runs every five
+        // minutes and skips everything when memory is above 60% — so a
+        // stalled channel could sit dead until someone changed channel and
+        // back. Start it again here instead.
+        if (ch && !ch.liveStreamId) {
+          setTimeout(() => {
+            try {
+              if (hlsSessions[id]) return;   // something already restarted it
+              console.log('[SF/StuckGuard] Restarting "' + ch.name + '" after stall');
+              if (typeof playoutEngine !== 'undefined' && playoutEngine.startChannelStream) {
+                playoutEngine.startChannelStream(ch);
+              } else {
+                startHlsSession(ch, { keepAlive: true });
+              }
+            } catch (e) {
+              console.error('[SF/StuckGuard] restart failed for "' + ch.name + '": ' + e.message);
+            }
+          }, 2000);
+        }
       }
     } catch {}
   }
