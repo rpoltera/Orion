@@ -387,7 +387,13 @@ function Channels({ call, onWatch, onPlayout }) {
                   <div style={{ fontWeight:700,fontSize:15 }}>{ch.num} — {ch.name}</div>
                   <div style={{ fontSize:12,color:'var(--text-muted)',marginTop:2,display:'flex',gap:10 }}>
                     {ch.group&&<span>{ch.group}</span>}
-                    {ch.liveStreamId?<span style={{ color:'#f59e0b' }}>📡 24/7 Live</span>:<span>{(ch.playout||[]).length} items in queue</span>}
+                    {ch.liveStreamId?<span style={{ color:'#f59e0b' }}>📡 24/7 Live</span>:(
+                      ch.viewers && ch.viewers.length
+                        ? <span style={{ color:'#10b981' }}>
+                            ● {ch.viewers.length} watching — {ch.viewers.map(v=>v.device+' ('+v.ip+')').join(', ')}
+                          </span>
+                        : <span>{ch.running ? 'On air, no viewers' : 'Idle'}{ch.itemCount ? ' · '+ch.itemCount+' scheduled' : ''}</span>
+                    )}
                     {ch.epgChannelId&&<span style={{ color:'var(--accent)' }}>📅 EPG linked</span>}
                   </div>
                 </div>

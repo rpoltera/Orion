@@ -2911,6 +2911,7 @@ module.exports = function mountStreamForge(app, orion) {
 
   // Virtual channel HLS for pre-segmented content — zero FFmpeg serving
   app.get('/sf/preseg-channel/:channelId/index.m3u8', (req, res) => {
+    _noteViewer(req, req.params.channelId);
     const ch = sfDb.channels.find(c=>c.id===req.params.channelId);
     if (!ch) return res.status(404).end();
     const now = getPlayoutNow(ch);
@@ -3563,9 +3564,14 @@ module.exports = function mountStreamForge(app, orion) {
         epgChannelId: ch.epgChannelId || null,
         splashUrl: ch.splashUrl || null,
         hasSchedule: !!(ch.scheduledPrograms && ch.scheduledPrograms.length),
+        // playout is empty for series and loop channels, so reporting only
+        // that made a working channel look like it had nothing in it.
         itemCount: (ch.playout || []).length
           || ((ch.seriesSchedule || {}).episodes || []).length
-          || 0
+          || (ch.scheduledPrograms || []).length
+          || 0,
+        running: !!hlsSessions[ch.id],
+        viewers: _activeViewers(ch.id)
       })));
     }
 
@@ -5862,6 +5868,68 @@ module.exports = function mountStreamForge(app, orion) {
 
   // Watch session — waits until the m3u8 is actually on disk before responding
   // so HLS.js only gets the URL once the stream is ready (avoids 503 race)
+  // channelId -> Map(key -> { ip, agent, device, lastSeen })
+  const _viewers = new Map();
+  const VIEWER_TTL = 90000;   // survives a paused player, clears a closed tab
+
+  function _describeAgent(ua) {
+    ua = String(ua || '');
+    if (/TiviMate/i.test(ua))            return 'TiviMate';
+    if (/VLC/i.test(ua))                 return 'VLC';
+    if (/Kodi|XBMC/i.test(ua))           return 'Kodi';
+    if (/Roku/i.test(ua))                return 'Roku';
+    if (/AppleTV|tvOS/i.test(ua))        return 'Apple TV';
+    if (/AFT|Fire ?TV/i.test(ua))        return 'Fire TV';
+    if (/Android/i.test(ua))             return 'Android';
+    if (/iPhone|iPad|iOS/i.test(ua))     return 'iOS';
+    if (/Edg\//i.test(ua))               return 'Edge';
+    if (/Chrome/i.test(ua))              return 'Chrome';
+    if (/Firefox/i.test(ua))             return 'Firefox';
+    if (/Safari/i.test(ua))              return 'Safari';
+    if (/ffmpeg|Lavf/i.test(ua))         return 'ffmpeg';
+    if (!ua) return 'unknown';
+    return ua.split('/')[0].slice(0, 24);
+  }
+
+  function _noteViewer(req, channelId) {
+    try {
+      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
+        .split(',')[0].trim().replace(/^::ffff:/, '');
+      const agent = _describeAgent(req.headers['user-agent']);
+      const key = ip + '|' + agent;
+      let m = _viewers.get(channelId);
+      if (!m) { m = new Map(); _viewers.set(channelId, m); }
+      const prev = m.get(key);
+      m.set(key, {
+        ip, agent,
+        since: prev ? prev.since : Date.now(),
+        lastSeen: Date.now()
+      });
+    } catch (_) {}
+  }
+
+  function _activeViewers(channelId) {
+    const m = _viewers.get(channelId);
+    if (!m) return [];
+    const now = Date.now();
+    for (const [k, v] of m) if (now - v.lastSeen > VIEWER_TTL) m.delete(k);
+    return [...m.values()].map(v => ({
+      ip: v.ip,
+      device: v.agent,
+      forSeconds: Math.round((now - v.since) / 1000)
+    }));
+  }
+
+  // Everyone currently watching, across all channels.
+  app.get('/api/sf/viewers', (req, res) => {
+    const out = [];
+    for (const ch of (sfDb.channels || [])) {
+      const vs = _activeViewers(ch.id);
+      if (vs.length) out.push({ channelId: ch.id, name: ch.name, num: ch.num, viewers: vs });
+    }
+    res.json({ total: out.reduce((n, c) => n + c.viewers.length, 0), channels: out });
+  });
+
   app.post('/api/sf/channels/:id/watch', (req, res) => {
     const ch = sfDb.channels.find(c=>c.id===req.params.id);
     if (!ch) return res.status(404).json({ error:'not found' });
@@ -5928,6 +5996,7 @@ module.exports = function mountStreamForge(app, orion) {
     const session = hlsSessions[req.params.channelId];
     if (!session) return res.status(404).send('No session');
     session.lastRequest = Date.now();
+    _noteViewer(req, req.params.channelId);
     const segPath = path.join(session.dir, req.params.segment);
     if (!fs.existsSync(segPath)) return res.status(404).send('Segment not found');
     const seg = req.params.segment;
