@@ -42,7 +42,11 @@ function _detectCodecSync(filePath) {
   try {
     const cp = require('child_process');
     const out = cp.execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "${filePath.replace(/"/g, '\\"')}"`, { encoding: 'utf8', timeout: 3000 });
-    return out.trim();
+    // ffprobe prints the codec twice for MPEG-TS (once per program, once
+    // standalone), so this returned "h264\nh264" — which never equals
+    // 'h264', so the copy-mode check failed and every preseg-backed
+    // channel transcoded instead of stream-copying.
+    return (out.trim().split('\n')[0] || '').trim();
   } catch { return 'unknown'; }
 }
 
@@ -142,30 +146,18 @@ function start() {
   const channels = deps.getChannels() || [];
   console.log(`[PlayoutEngine] Starting — ${channels.length} channels`);
 
-  // Build playlists so each channel knows where it is in its schedule,
-  // but do not spawn ffmpeg. A channel is started when someone actually
-  // requests it (streamforge.js lazy-start on /sf/hls/:id/index.m3u8),
-  // and wall-clock anchoring means tuning in mid-programme still lands
-  // at the right offset.
-  //
-  // Set ORION_PLAYOUT_EAGER=1 to restore the old always-running behaviour.
-  const EAGER = process.env.ORION_PLAYOUT_EAGER === '1';
-
+  // Stagger channel startup to avoid all ffmpegs spawning at exactly the same moment
   channels.forEach((ch, i) => {
     if (ch.liveStreamId) return; // skip live IPTV — handled elsewhere
     setTimeout(() => {
       try {
         regeneratePlaylist(ch);
-        if (EAGER) startChannelStream(ch);
+        startChannelStream(ch);
       } catch (err) {
-        console.error(`[PlayoutEngine] Failed to prepare "${ch.name}":`, err.message);
+        console.error(`[PlayoutEngine] Failed to start "${ch.name}":`, err.message);
       }
-    }, 500 + i * 50);
+    }, 500 + i * 300);
   });
-
-  console.log('[PlayoutEngine] ' +
-    (EAGER ? 'eager mode — starting all channels'
-           : 'on-demand mode — channels start when tuned in'));
 
   // Periodic playlist refresh
   setInterval(() => {
@@ -490,26 +482,6 @@ function buildPlaylistItems(ch) {
   return items;
 }
 
-// Playlists regenerate frequently and these paths are on NFS, so cache
-// the answer briefly rather than stat-ing the same file repeatedly. Short
-// TTL means a file that comes back is picked up on the next cycle.
-const _existsCache = new Map();
-const _missingWarned = new Set();   // log each missing path once, not every cycle
-const _EXISTS_TTL = 60000;
-
-function _fileUsable(p) {
-  if (!p) return false;
-  if (/^https?:\/\//i.test(p)) return true;   // remote source, nothing to stat
-  const hit = _existsCache.get(p);
-  const now = Date.now();
-  if (hit && now - hit.at < _EXISTS_TTL) return hit.ok;
-  let ok = false;
-  try { ok = fs.existsSync(p); } catch (_) { ok = false; }
-  _existsCache.set(p, { ok, at: now });
-  if (_existsCache.size > 50000) _existsCache.clear();
-  return ok;
-}
-
 function regeneratePlaylist(ch) {
   if (ch.liveStreamId) return;
   let items;
@@ -545,20 +517,6 @@ function regeneratePlaylist(ch) {
       const fp = (m && (m.path || m.filePath)) || p.filePath;
       if (!m && fp) fallbackHits++;
       if (!fp) { missed++; continue; }
-
-      // The fallback above can hand back a path from whenever this
-      // schedule was built. If the file is not there, skip the item —
-      // putting it in the playlist only produces an ffmpeg exit 254 and
-      // a channel that restarts forever.
-      if (!_fileUsable(fp)) {
-        missed++;
-        if (!_missingWarned.has(fp)) {
-          _missingWarned.add(fp);
-          console.warn('[PlayoutEngine] skipping missing file for "' +
-            ch.name + '": ' + fp);
-        }
-        continue;
-      }
       items.push({
         id: p.mediaId,
         filePath: fp,
@@ -850,15 +808,7 @@ function startChannelStream(ch) {
     '-f', 'concat', '-safe', '0',
     '-i', playlist.file,
     '-map', '0:v:0?', '-map', '0:a:0?',
-    // Video is copied — that is the point of this path, no GPU needed.
-    // Audio has to be decoded so it can be resampled: concat joins
-    // segments from different episodes, each with its own timeline and
-    // sometimes its own sample rate, and 'copy' passes those straight
-    // through. aresample=async=1000 corrects the drift that causes,
-    // and pinning to 48 kHz stereo removes rate mismatches at boundaries.
-    '-c:v', 'copy',
-    '-af', 'aresample=async=1000',
-    '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000',
+    '-c', 'copy',
     '-avoid_negative_ts', 'make_zero',
     '-f', 'hls',
     '-hls_time', '1',

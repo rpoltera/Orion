@@ -2181,7 +2181,7 @@ function Watch({ call, initialChannelId }) {
         if (window.Hls && window.Hls.isSupported()) {
           const hls = new window.Hls({
             lowLatencyMode: false,
-            liveSyncDurationCount: 1,        // start playing after just 1 segment
+            liveSyncDurationCount: 6,        // start playing after just 1 segment
             liveMaxLatencyDurationCount: 50, // only jump if >100s behind (prevents mid-show skips)
             maxBufferLength: 60,             // buffer up to 60s
             maxBufferSize: 120 * 1000 * 1000,// 120MB buffer

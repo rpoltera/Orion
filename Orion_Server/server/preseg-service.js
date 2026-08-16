@@ -271,7 +271,29 @@ function buildFfmpegArgs(filePath, tempDir, useCpu, gpuId, is10, srcCodec) {
       args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23');
     }
   }
-  args.push('-c:a', 'aac', '-b:a', '128k', '-ac', '2');
+  // Audio was ending ~144ms short of video in every segment, so playing
+  // hundreds of them in sequence drifted badly — the deep-voice effect.
+  // aresample=async=1000 keeps audio locked to the video clock, and a
+  // fixed rate stops segments from different sources disagreeing.
+  // Re-encoding AAC to AAC adds encoder priming delay to every segment —
+  // ~144ms each, which accumulates into serious drift across an episode.
+  // Copy the audio when it is already AAC and stereo; only re-encode when
+  // a downmix is actually required.
+  const _srcAudio = (function () {
+    try {
+      const o = require('child_process').execSync(
+        'ffprobe -v error -select_streams a:0 -show_entries stream=codec_name,channels -of csv=p=0 ' +
+        JSON.stringify(filePath), { encoding: 'utf8', timeout: 5000 }).trim().split('\n')[0];
+      const [codec, chans] = o.split(',');
+      return { codec: (codec || '').trim(), channels: parseInt(chans, 10) || 0 };
+    } catch (_) { return { codec: '', channels: 0 }; }
+  })();
+
+  if (_srcAudio.codec === 'aac' && _srcAudio.channels <= 2) {
+    args.push('-c:a', 'copy');
+  } else {
+    args.push('-c:a', 'aac', '-b:a', '128k', '-ac', '2');
+  }
   args.push(
     '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0',
     '-hls_flags', 'independent_segments',

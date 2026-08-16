@@ -2195,7 +2195,7 @@ function startHlsSession(ch, opts={}) {
         gpuId: 0, mode: 'concat',
         // Only genuinely always-on for live IPTV sources. Scheduled
         // channels are started on tune-in and reaped when idle.
-        keepAlive: !!ch.liveStreamId,
+        keepAlive: true,
       };
       hlsSessions[ch.id] = wrapped;
       stream.proc.on('exit', () => { if (hlsSessions[ch.id] === wrapped) delete hlsSessions[ch.id]; });
@@ -2421,7 +2421,19 @@ setInterval(() => {
     // hit that path, so this reaper was killing healthy streams every few
     // minutes. Each restart then rebuilt the playlist synchronously and
     // blocked the event loop.
-    if (sess._realProc) return;
+    // PlayoutEngine sessions do get lastRequest updates from
+    // /sf/hls/:channelId/:segment, so they can be reaped — they just need
+    // a longer window than a browser session, because a player can pause
+    // between segment fetches. Exempting them entirely left 16 channels
+    // running for one viewer.
+    const limitMs = sess._realProc ? 600000 : (sess.keepAlive ? keepAliveIdleMs : idleMs);
+    if (now - sess.lastRequest > limitMs) {
+      console.log('[SF/HLS] Reaping "' + (sfDb.channels.find(c=>c.id===id)||{}).name +
+        '" — no segment request in ' + Math.round((now - sess.lastRequest)/1000) + 's');
+      try { sess.proc.kill('SIGKILL'); } catch {}
+      delete hlsSessions[id];
+    }
+    return;
 
     const limit = sess.keepAlive ? keepAliveIdleMs : idleMs;
     if(now-sess.lastRequest>limit) {
@@ -2970,7 +2982,20 @@ module.exports = function mountStreamForge(app, orion) {
       });
       pr.on('timeout', () => { pr.destroy(new Error('upstream timeout')); });
       pr.on('error', err => _presegFallback(req, res, targetPort, err));
-      req.pipe(pr);
+
+      // express.json() has already consumed the request stream, so piping
+      // req forwards an empty body — the upstream waits for content that
+      // never arrives and the socket hangs up after the timeout. Send the
+      // parsed body instead. GETs were unaffected, which is why only
+      // saving config appeared broken.
+      if (req.body && Object.keys(req.body).length) {
+        const payload = JSON.stringify(req.body);
+        pr.setHeader('content-type', 'application/json');
+        pr.setHeader('content-length', Buffer.byteLength(payload));
+        pr.end(payload);
+      } else {
+        pr.end();
+      }
     };
   }
 
@@ -3831,6 +3856,10 @@ module.exports = function mountStreamForge(app, orion) {
         audioCodecs: audio.map(x =>
           String(x.codec_name || '').toLowerCase()
         ),
+        // Codec alone is not enough: a 5.1 AAC file and a stereo AAC file
+        // both pass a codec check, then break when concatenated together.
+        audioChannels: audio.map(x => parseInt(x.channels, 10) || 0),
+        audioRates: audio.map(x => parseInt(x.sample_rate, 10) || 0),
         duration
       };
 
@@ -3844,9 +3873,14 @@ module.exports = function mountStreamForge(app, orion) {
       probe.videoCodec === 'h264' &&
       probe.pixFmt === 'yuv420p';
 
+    // A file only counts as normalised when every audio stream is AAC
+    // stereo. Anything multichannel gets queued for downmix, so the whole
+    // library ends up with one layout and concat joins cleanly.
+    const chans = probe.audioChannels || [];
     const audioOK =
       probe.audioCodecs.length === 0 ||
-      probe.audioCodecs.every(c => c === 'aac');
+      (probe.audioCodecs.every(c => c === 'aac') &&
+       chans.every(n => !n || n <= 2));
 
     return videoOK && audioOK;
   }
@@ -3859,9 +3893,11 @@ module.exports = function mountStreamForge(app, orion) {
   }
 
   function _normalizerNeedAudio(probe) {
+    const chans = probe.audioChannels || [];
     return !(
       probe.audioCodecs.length === 0 ||
-      probe.audioCodecs.every(c => c === 'aac')
+      (probe.audioCodecs.every(c => c === 'aac') &&
+       chans.every(n => !n || n <= 2))
     );
   }
 
@@ -4168,7 +4204,9 @@ module.exports = function mountStreamForge(app, orion) {
     }
 
     if (needAudio) {
-      args.push('-c:a', 'aac', '-b:a', '192k');
+      // Pin the layout, otherwise a 5.1 source stays 5.1 and the mismatch
+      // this whole change exists to remove comes straight back.
+      args.push('-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000');
     } else {
       args.push('-c:a', 'copy');
     }
