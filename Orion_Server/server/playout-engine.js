@@ -864,7 +864,23 @@ function startChannelStream(ch) {
     buf += line;
     if (buf.length > 10000) buf = buf.slice(-5000);
     for (const part of line.split('\n')) {
+      // A corrupt source can produce hundreds of decode errors a second.
+      // Logging each one blocked the event loop badly enough that static
+      // files took 38s to serve while the CPU sat idle. Cap it: 20 lines
+      // per channel per minute, then a single summary until it settles.
+      if (!stream._logBudget || Date.now() > stream._logBudgetAt + 60000) {
+        if (stream._logSuppressed) {
+          console.warn('[PlayoutEngine/' + ch.name + '] suppressed ' +
+            stream._logSuppressed + ' further error lines');
+        }
+        stream._logBudget = 20;
+        stream._logBudgetAt = Date.now();
+        stream._logSuppressed = 0;
+      }
+
       if (part.match(/error|invalid|no such|failed|cannot/i)) {
+        if (stream._logBudget <= 0) { stream._logSuppressed++; continue; }
+        stream._logBudget--;
         console.error(`[PlayoutEngine/${ch.name}] ${part.trim().slice(0, 250)}`);
       }
     }
