@@ -2301,6 +2301,10 @@ function _startHlsSessionOld(ch, opts={}) {
       }
       setTimeout(() => {
         const stillCh = sfDb.channels.find(c=>c.id===channelId);
+        // Third restart path that ignored active. A disabled channel with
+        // a dead source crashed, backed off, and retried indefinitely —
+        // each attempt blocking 5s on a DNS lookup that cannot resolve.
+        if (stillCh && stillCh.active === false) return;
         if (stillCh && !hlsSessions[channelId]) {
           if (crashes > 0) console.log(`[SF/HLS] Auto-restarting keepAlive channel "${stillCh.name}" (delay=${restartDelay}ms, crash #${crashes})`);
           const s = startHlsSession(stillCh, { keepAlive: true });
@@ -2341,7 +2345,7 @@ setInterval(() => {
         // minutes and skips everything when memory is above 60% — so a
         // stalled channel could sit dead until someone changed channel and
         // back. Start it again here instead.
-        if (ch && !ch.liveStreamId) {
+        if (ch && !ch.liveStreamId && ch.active !== false) {
           setTimeout(() => {
             try {
               if (hlsSessions[id]) return;   // something already restarted it
@@ -2370,6 +2374,13 @@ setInterval(() => {
   if (_usedPct >= 60) { return; }
   (sfDb.channels || []).forEach(ch => {
     if (hlsSessions[ch.id]) return; // already running
+
+    // A disabled channel was still restarted here every five minutes, so
+    // turning one off did nothing. Channels pointing at a dead source then
+    // retried forever — each attempt spending 5s on a DNS lookup that
+    // cannot succeed, which is enough to stall the whole server.
+    if (ch.active === false) return;
+
     const isLive = !!ch.liveStreamId;
     const shouldRun =
       mode === 'all' ? true :
