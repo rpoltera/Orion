@@ -2333,6 +2333,14 @@ setInterval(() => {
       // frozen. This was killing healthy channels with 25 minutes uptime.
       if (s._realProc) continue;
 
+      // A channel that has just started has not written segments yet, so
+      // the newest file in its directory is a leftover from the previous
+      // run — instantly older than the threshold. StuckGuard was killing
+      // brand-new processes within seconds, and the stall-restart brought
+      // them straight back: a 2-second crash loop. Give a session time to
+      // produce its first segments before judging it frozen.
+      if (Date.now() - (s._startedAt || s.startedAt || 0) < 90000) continue;
+
       if (now - newest > 60000) {
         const ch = sfDb.channels.find(c => c.id === id);
         console.log(`[SF/StuckGuard] Killing frozen "${ch?.name || id}" — last seg ${Math.round((now-newest)/1000)}s old`);
