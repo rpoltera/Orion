@@ -1,8 +1,8 @@
 sub init()
-    m.top.functionName = "run"
+    m.top.functionName = "loadTask"
 end sub
 
-sub run()
+sub loadTask()
     base = normalizeServer(m.top.serverUrl)
     if base = "" then
         m.top.error = "Press * and enter your Orion server address."
@@ -192,7 +192,7 @@ function withToken(url as String, token as String) as String
 end function
 
 function normalizeServer(value as String) as String
-    server = Trim(value)
+    server = value.Trim()
     while Len(server) > 0 and Right(server, 1) = "/"
         server = Left(server, Len(server) - 1)
     end while
