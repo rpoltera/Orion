@@ -12,6 +12,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -25,6 +26,7 @@ from pathlib import Path
 
 FORMAT = "orion-streamforge-channels-v1"
 MEDIA_KEYS = ("movies", "tvShows", "music", "musicVideos")
+SEASON_EPISODE_RE = re.compile(r"(?i)(?:^|[^a-z0-9])s(\d{1,3})[ ._-]*e(\d{1,3})(?:[^a-z0-9]|$)")
 
 
 def fail(message):
@@ -111,12 +113,24 @@ def library_items(data_dir):
 
 
 def item_ref(item):
+    file_path = item.get("filePath") or item.get("path") or item.get("localPath") or ""
+    season = item.get("season") if item.get("season") is not None else item.get("seasonNum")
+    episode = item.get("episode") if item.get("episode") is not None else item.get("episodeNum")
+    # Some older scans saved seasonNum but not episodeNum even though the
+    # filename is unambiguous (for example, "Doc Martin_S01E01_*.mp4").
+    # Infer only values that are missing; explicit metadata always wins.
+    match = SEASON_EPISODE_RE.search(str(file_path or item.get("fileName") or ""))
+    if match:
+        if season is None:
+            season = int(match.group(1))
+        if episode is None:
+            episode = int(match.group(2))
     return {
-        "filePath": item.get("filePath") or item.get("path") or item.get("localPath") or "",
+        "filePath": file_path,
         "title": item.get("title") or item.get("episodeTitle") or item.get("fileName") or "",
         "seriesTitle": item.get("seriesTitle") or item.get("showName") or "",
-        "season": item.get("season") if item.get("season") is not None else item.get("seasonNum"),
-        "episode": item.get("episode") if item.get("episode") is not None else item.get("episodeNum"),
+        "season": season,
+        "episode": episode,
         "year": item.get("year"),
     }
 
