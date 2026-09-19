@@ -7,9 +7,10 @@ const AVATARS = ['👑','👤','🧑','👩','👦','👧','🧒','🎮','🎬',
 const GROUP_COLORS = ['#0063e5','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16'];
 
 export default function UsersPage() {
-  const { library, API: appAPI } = useApp();
+  const { library, customLibraries } = useApp();
   const [users, setUsers]       = useState([]);
   const [groups, setGroups]     = useState([]);
+  const [collections, setCollections] = useState([]);
   const [tab, setTab]           = useState('users'); // users | groups
   const [editUser, setEditUser] = useState(null);    // user being edited
   const [editGroup, setEditGroup] = useState(null);
@@ -24,12 +25,14 @@ export default function UsersPage() {
   useEffect(() => { fetchAll(); }, []);
 
   const fetchAll = async () => {
-    const [u, g] = await Promise.all([
+    const [u, g, c] = await Promise.all([
       fetch(`${API}/users`).then(r=>r.json()).catch(()=>({users:[]})),
       fetch(`${API}/groups`).then(r=>r.json()).catch(()=>({groups:[]})),
+      fetch(`${API}/collections?slim=1`).then(r=>r.json()).catch(()=>({collections:[]})),
     ]);
     setUsers(u.users || []);
     setGroups(g.groups || []);
+    setCollections(c.collections || []);
   };
 
   const createUser = async () => {
@@ -92,7 +95,9 @@ export default function UsersPage() {
     { id:'movies',   label:'Movies',   items: library.movies || [] },
     { id:'tvShows',  label:'TV Shows', items: library.tvShows || [] },
     { id:'music',    label:'Music',    items: library.music || [] },
-    { id:'collections', label:'Collections', items: [] },
+    { id:'musicVideos', label:'Music Videos', items: library.musicVideos || [] },
+    { id:'collections', label:'Collections', items: collections },
+    { id:'customLibraries', label:'Custom Libraries', items: (customLibraries || []).map(lib => ({ ...lib, title: lib.name })) },
   ];
 
   const assignTargetObj = assignTarget?.type === 'user'
