@@ -393,8 +393,10 @@ end sub
 
 sub onPinDialog(event as Object)
     if event = invalid then return
+    credential = m.top.dialog.text
+    m.top.dialog = invalid
     if event.getData() = 0 then
-        startLogin(m.pendingUserName, m.top.dialog.text)
+        startLogin(m.pendingUserName, credential)
     else
         m.rows.setFocus(true)
     end if
@@ -413,8 +415,9 @@ end sub
 
 sub onServerDialog(event as Object)
     if event = invalid then return
+    server = normalizeServer(m.top.dialog.text)
+    m.top.dialog = invalid
     if event.getData() = 0 then
-        server = normalizeServer(m.top.dialog.text)
         if server = "" then
             m.status.text = "Enter an address such as http://192.168.0.244:3001"
         else
