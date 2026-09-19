@@ -42,18 +42,22 @@ STAGE_APP="$STAGE/Orion_Server"
 
 if id orion &>/dev/null; then
   chown -R orion:orion "$STAGE"
-  RUN_AS=(runuser -u orion --)
+  NPM_CACHE="$STAGE/.npm-cache"
+  install -d -o orion -g orion "$NPM_CACHE"
+  NPM=(runuser -u orion -- env "npm_config_cache=$NPM_CACHE" npm)
 else
-  RUN_AS=()
+  NPM_CACHE="$STAGE/.npm-cache"
+  mkdir -p "$NPM_CACHE"
+  NPM=(env "npm_config_cache=$NPM_CACHE" npm)
 fi
 
 info "Installing matching dependencies"
 cd "$STAGE_APP"
-"${RUN_AS[@]}" npm ci --ignore-scripts --include=dev
-"${RUN_AS[@]}" npm rebuild better-sqlite3
+"${NPM[@]}" ci --ignore-scripts --include=dev
+"${NPM[@]}" rebuild better-sqlite3
 
 info "Building the Orion web interface"
-"${RUN_AS[@]}" npm run react-build
+"${NPM[@]}" run react-build
 
 # Do the only short outage after download and build have completed successfully.
 info "Switching Orion to the new build"
