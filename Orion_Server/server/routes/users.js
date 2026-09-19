@@ -8,6 +8,12 @@ const express = require('express');
 const crypto  = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const orionAuth = require('../auth');
+const {
+  resolveAccess,
+  collectionVisibleToUser,
+  itemVisibleToUser,
+  customLibraryVisibleToUser,
+} = require('../services/media-access');
 
 const RATING_ORDER = ['G','TV-G','TV-Y','TV-Y7','PG','TV-PG','PG-13','TV-14','R','TV-MA','NC-17','NR','UNRATED'];
 
@@ -91,7 +97,7 @@ module.exports = function usersRoutes({ db, io, saveDB }) {
     const admin = {
       id: uuidv4(), name: username, password: hashPin(password),
       role: 'admin', avatar: '👑', groupIds: [],
-      mediaAccess: { all: true, movies: [], tvShows: [], collections: [] },
+      mediaAccess: { all: true, movies: [], tvShows: [], music: [], musicVideos: [], collections: [], customLibraries: [], liveChannels: [], iptvChannels: [] },
       createdAt: new Date().toISOString(),
     };
     db.users.push(admin);
@@ -147,7 +153,7 @@ module.exports = function usersRoutes({ db, io, saveDB }) {
       id: uuidv4(), name, password: hashPin(String(credential)),
       role: role || 'user', avatar: avatar || '👤',
       groupIds: groupIds || [],
-      mediaAccess: mediaAccess || { all: false, movies: [], tvShows: [], collections: [] },
+      mediaAccess: mediaAccess || { all: false, movies: [], tvShows: [], music: [], musicVideos: [], collections: [], customLibraries: [], liveChannels: [], iptvChannels: [] },
       maxRating: maxRating || null,
       createdAt: new Date().toISOString(),
     };
@@ -185,34 +191,14 @@ module.exports = function usersRoutes({ db, io, saveDB }) {
   router.get('/users/:id/library', (req, res) => {
     const user = db.users.find(u => u.id === req.params.id);
     if (!user) return res.status(404).json({ error: 'Not found' });
-    if (user.role === 'admin' || user.mediaAccess?.all) {
-      return res.json({ movies: db.movies, tvShows: db.tvShows, music: db.music, musicVideos: db.musicVideos, collections: db.collections });
-    }
-    const groupAccess = (db.groups || [])
-      .filter(g => (user.groupIds || []).includes(g.id))
-      .reduce((acc, g) => {
-        acc.movies      = [...acc.movies,      ...(g.mediaAccess?.movies      || [])];
-        acc.tvShows     = [...acc.tvShows,     ...(g.mediaAccess?.tvShows     || [])];
-        acc.collections = [...acc.collections, ...(g.mediaAccess?.collections || [])];
-        acc.music       = [...acc.music,       ...(g.mediaAccess?.music       || [])];
-        if (g.mediaAccess?.all) acc.all = true;
-        return acc;
-      }, { all: false, movies: [], tvShows: [], collections: [], music: [] });
-
-    if (groupAccess.all) return res.json({ movies: db.movies, tvShows: db.tvShows, music: db.music, musicVideos: db.musicVideos, collections: db.collections });
-
-    const allowed = {
-      movies:      [...new Set([...(user.mediaAccess?.movies      || []), ...groupAccess.movies])],
-      tvShows:     [...new Set([...(user.mediaAccess?.tvShows     || []), ...groupAccess.tvShows])],
-      music:       [...new Set([...(user.mediaAccess?.music       || []), ...groupAccess.music])],
-      collections: [...new Set([...(user.mediaAccess?.collections || []), ...groupAccess.collections])],
-    };
+    const access = resolveAccess(db, user);
     res.json({
-      movies:      db.movies.filter(m => allowed.movies.includes(m.id)),
-      tvShows:     db.tvShows.filter(m => allowed.tvShows.includes(m.id)),
-      music:       db.music.filter(m => allowed.music.includes(m.id)),
-      musicVideos: db.musicVideos.filter(m => allowed.music.includes(m.id)),
-      collections: db.collections.filter(c => allowed.collections.includes(c.id)),
+      movies:      (db.movies || []).filter(m => itemVisibleToUser(db, m, 'movies', user, access)),
+      tvShows:     (db.tvShows || []).filter(m => itemVisibleToUser(db, m, 'tvShows', user, access)),
+      music:       (db.music || []).filter(m => itemVisibleToUser(db, m, 'music', user, access)),
+      musicVideos: (db.musicVideos || []).filter(m => itemVisibleToUser(db, m, 'musicVideos', user, access)),
+      collections: (db.collections || []).filter(c => collectionVisibleToUser(c, user, access)),
+      customLibraries: (db.customLibraries || []).filter(l => customLibraryVisibleToUser(l, user, access, db)),
     });
   });
 
@@ -224,7 +210,7 @@ module.exports = function usersRoutes({ db, io, saveDB }) {
     if (!name) return res.status(400).json({ error: 'name required' });
     const group = {
       id: uuidv4(), name, color: color || '#0063e5',
-      mediaAccess: mediaAccess || { all: false, movies: [], tvShows: [], collections: [], music: [] },
+      mediaAccess: mediaAccess || { all: false, movies: [], tvShows: [], music: [], musicVideos: [], collections: [], customLibraries: [], liveChannels: [], iptvChannels: [] },
       createdAt: new Date().toISOString(),
     };
     if (!db.groups) db.groups = [];
