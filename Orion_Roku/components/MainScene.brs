@@ -13,24 +13,29 @@ sub init()
     m.top.observeField("serverUrl", "onServerChanged")
     applySavedTheme()
 
-    registry = CreateObject("roRegistrySection", "Orion")
-    m.token = registry.Read("userToken")
-    if normalizeServer(m.top.serverUrl) = "" then
+    server = normalizeServer(m.top.serverUrl)
+    m.lastLoadedServer = ""
+    if server = "" then
         m.status.text = "Press * to connect Orion."
-    else if m.token <> "" then
-        loadHome()
     else
-        loadProfiles()
+        m.lastLoadedServer = server
+        loadCurrentServer()
     end if
     m.rows.setFocus(true)
 end sub
 
 sub onServerChanged()
-    if normalizeServer(m.top.serverUrl) <> "" then
-        registry = CreateObject("roRegistrySection", "Orion")
-        m.token = registry.Read("userToken")
-        if m.token <> "" then loadHome() else loadProfiles()
-    end if
+    server = normalizeServer(m.top.serverUrl)
+    if server = "" then return
+    if server = m.lastLoadedServer then return
+    m.lastLoadedServer = server
+    loadCurrentServer()
+end sub
+
+sub loadCurrentServer()
+    registry = CreateObject("roRegistrySection", "Orion")
+    m.token = registry.Read("userToken")
+    if m.token <> "" then loadHome() else loadProfiles()
 end sub
 
 sub loadProfiles()
@@ -108,6 +113,7 @@ end sub
 sub onLibraryError()
     if m.loader = invalid or m.loader.error = "" then return
     m.status.text = m.loader.error
+    m.serverLabel.text = "Error: " + m.loader.error
     if Instr(1, m.loader.error, "Session expired") > 0 then
         clearProfile()
         loadProfiles()
@@ -424,7 +430,9 @@ sub onServerDialog(event as Object)
             registry = CreateObject("roRegistrySection", "Orion")
             registry.Write("serverUrl", server)
             registry.Flush()
+            m.lastLoadedServer = server
             m.top.serverUrl = server
+            loadCurrentServer()
         end if
     else
         m.rows.setFocus(true)
