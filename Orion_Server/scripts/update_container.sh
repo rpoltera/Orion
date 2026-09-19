@@ -17,7 +17,9 @@ ok()   { echo -e "${GN}✔ ${CL}$*"; }
 fail() { echo -e "${RD}✘ ${CL}$*" >&2; exit 1; }
 
 [ "${EUID}" -eq 0 ] || fail "Run this inside the Orion LXC as root."
-[ -d "$APP_ROOT/.git" ] || fail "$APP_ROOT is not a Git checkout. This updater will not overwrite it."
+command -v git >/dev/null || fail "git is required but is not installed."
+command -v node >/dev/null || fail "Node.js is required but is not installed."
+[ -d "$APP_ROOT" ] || fail "$APP_ROOT does not exist. Use the LXC creator only for a brand-new install."
 [ -f "$APP_DIR/package.json" ] || fail "Orion_Server/package.json was not found."
 
 CURRENT_VERSION="$(node -p "require('$APP_DIR/package.json').version" 2>/dev/null || echo unknown)"
@@ -25,42 +27,59 @@ CURRENT_VERSION="$(node -p "require('$APP_DIR/package.json').version" 2>/dev/nul
 mkdir -p "$BACKUP_DIR"
 info "Saving rollback information to $BACKUP_DIR"
 [ -f "$APP_DIR/.env" ] && cp -a "$APP_DIR/.env" "$BACKUP_DIR/Orion_Server.env"
-git -C "$APP_ROOT" status --short > "$BACKUP_DIR/git-status-before.txt" || true
-git -C "$APP_ROOT" diff --binary > "$BACKUP_DIR/local-edits.patch" || true
+if [ -d "$APP_ROOT/.git" ]; then
+  git -C "$APP_ROOT" status --short > "$BACKUP_DIR/git-status-before.txt" || true
+  git -C "$APP_ROOT" diff --binary > "$BACKUP_DIR/local-edits.patch" || true
+fi
 
-info "Stopping Orion"
-systemctl stop "$SERVICE"
-
-info "Fetching Orion 2.0 from GitHub"
-git -C "$APP_ROOT" remote set-url origin "$REPO"
-git -C "$APP_ROOT" fetch --depth=1 origin main
-git -C "$APP_ROOT" reset --hard origin/main
-
-# .env is deployment-specific and is deliberately preserved across source updates.
-[ -f "$BACKUP_DIR/Orion_Server.env" ] && cp -a "$BACKUP_DIR/Orion_Server.env" "$APP_DIR/.env"
+# Build a complete replacement alongside the running install. This works for
+# both Git installs and earlier ZIP installs that have no .git directory.
+STAGE="/opt/orion-stage-$STAMP"
+info "Downloading Orion 2.0 from GitHub"
+git clone --depth=1 --branch main "$REPO" "$STAGE"
+STAGE_APP="$STAGE/Orion_Server"
+[ -f "$STAGE_APP/package.json" ] || fail "Downloaded source is missing Orion_Server/package.json."
 
 if id orion &>/dev/null; then
-  chown -R orion:orion "$APP_ROOT"
+  chown -R orion:orion "$STAGE"
   RUN_AS=(runuser -u orion --)
 else
   RUN_AS=()
 fi
 
 info "Installing matching dependencies"
-cd "$APP_DIR"
+cd "$STAGE_APP"
 "${RUN_AS[@]}" npm ci --ignore-scripts --include=dev
 "${RUN_AS[@]}" npm rebuild better-sqlite3
 
 info "Building the Orion web interface"
 "${RUN_AS[@]}" npm run react-build
 
+# Do the only short outage after download and build have completed successfully.
+info "Switching Orion to the new build"
+systemctl stop "$SERVICE"
+mv "$APP_ROOT" "$BACKUP_DIR/orion-previous"
+mv "$STAGE" "$APP_ROOT"
+APP_DIR="$APP_ROOT/Orion_Server"
+
+# .env is deployment-specific and is deliberately preserved across source updates.
+[ -f "$BACKUP_DIR/Orion_Server.env" ] && cp -a "$BACKUP_DIR/Orion_Server.env" "$APP_DIR/.env"
+if id orion &>/dev/null; then
+  chown orion:orion "$APP_DIR/.env" 2>/dev/null || true
+fi
+
 systemctl daemon-reload
 info "Starting Orion"
-systemctl start "$SERVICE"
+systemctl start "$SERVICE" || true
 sleep 8
 systemctl is-active --quiet "$SERVICE" || {
   journalctl -u "$SERVICE" -n 60 --no-pager
-  fail "Orion did not start. Your pre-update files are in $BACKUP_DIR."
+  info "Restoring the pre-update Orion source"
+  systemctl stop "$SERVICE" || true
+  mv "$APP_ROOT" "$BACKUP_DIR/orion-failed-new"
+  mv "$BACKUP_DIR/orion-previous" "$APP_ROOT"
+  systemctl start "$SERVICE" || true
+  fail "The update was rolled back. Diagnostics and the failed new source are in $BACKUP_DIR."
 }
 
 NEW_VERSION="$(node -p "require('$APP_DIR/package.json').version" 2>/dev/null || echo unknown)"
