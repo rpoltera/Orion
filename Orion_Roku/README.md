@@ -1,4 +1,4 @@
-# Orion for Roku TV 2.0.5
+# Orion for Roku TV 2.0.6
 
 Native SceneGraph/BrightScript client for the complete Orion experience.
 
@@ -19,7 +19,7 @@ Native SceneGraph/BrightScript client for the complete Orion experience.
 
 1. Enable **Developer mode** on the Roku, then reboot it.
 2. Open `http://ROKU-IP` from a computer on the same LAN and sign in.
-3. Upload the `Orion-Roku-2.0.5.zip` release package.
+3. Upload the `Orion-Roku-2.0.6.zip` release package.
 4. Launch Orion and press `*` to enter the Orion address, for example `http://192.168.0.244:3001`.
 5. Select an Orion profile and enter that profile's PIN or password.
 
