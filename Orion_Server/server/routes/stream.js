@@ -340,6 +340,94 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
     }
   });
 
+  // ── Roku music ───────────────────────────────────────────────────────────────
+  // Keep filesystem paths private from the Roku and retain HTTP Range support so
+  // the Video node can seek without needing access to NAS paths.
+  router.get('/roku/audio/:mediaId', (req, res) => {
+    const item = (db.music || []).find(entry => entry.id === req.params.mediaId);
+    if (!item?.filePath || !fs.existsSync(item.filePath)) {
+      return res.status(404).json({ error: 'Music file is unavailable' });
+    }
+
+    const ext = path.extname(item.filePath).toLowerCase();
+    const mime = AUDIO_MIME[ext];
+    if (!mime) return res.status(415).json({ error: 'Unsupported music format' });
+
+    try {
+      const stat = fs.statSync(item.filePath);
+      const total = stat.size;
+      const range = req.headers.range;
+      res.set('Accept-Ranges', 'bytes');
+      res.set('Cache-Control', 'private, max-age=0');
+      if (!range) {
+        res.status(200).set('Content-Type', mime).set('Content-Length', String(total));
+        return fs.createReadStream(item.filePath).pipe(res);
+      }
+
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match) return res.status(416).end();
+      const start = match[1] === '' ? 0 : Number.parseInt(match[1], 10);
+      const end = match[2] === '' ? total - 1 : Math.min(Number.parseInt(match[2], 10), total - 1);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= total) {
+        return res.status(416).set('Content-Range', `bytes */${total}`).end();
+      }
+      res.status(206).set({
+        'Content-Type': mime,
+        'Content-Length': String(end - start + 1),
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+      });
+      return fs.createReadStream(item.filePath, { start, end }).pipe(res);
+    } catch (error) {
+      return res.status(500).json({ error: error.message || 'Could not stream music' });
+    }
+  });
+
+  // ── Roku IPTV catalogue ─────────────────────────────────────────────────────
+  // A Roku pages large IPTV lists rather than downloading the entire provider
+  // catalogue before its home screen can render.
+  router.get('/roku/iptv', (req, res) => {
+    const page = Math.max(0, Number.parseInt(req.query.page, 10) || 0);
+    const limit = Math.max(1, Math.min(100, Number.parseInt(req.query.limit, 10) || 60));
+    const query = String(req.query.query || '').trim().toLowerCase();
+    let channels = Array.isArray(db.iptvChannels) ? db.iptvChannels : [];
+    if (query) {
+      channels = channels.filter(channel => `${channel.name || ''} ${channel.group || channel.category || ''}`.toLowerCase().includes(query));
+    }
+    channels = [...channels].sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+    const total = channels.length;
+    const items = channels.slice(page * limit, (page + 1) * limit).map(channel => ({
+      id: String(channel.id || channel.tvgId || channel.url || ''),
+      title: channel.name || 'Untitled channel',
+      group: channel.group || channel.category || '',
+      thumbnail: channel.logo || channel.tvgLogo || '',
+    }));
+    res.set('Cache-Control', 'no-store').json({ items, total, page, limit });
+  });
+
+  // Roku receives an Orion IPTV id, never a provider URL or its credentials.
+  // The HLS engine normalizes the source to H.264/AAC before it reaches the TV.
+  router.get('/roku/iptv/:channelId', async (req, res) => {
+    const channel = (db.iptvChannels || []).find(entry =>
+      String(entry.id || entry.tvgId || entry.url || '') === String(req.params.channelId)
+    );
+    if (!channel?.url) return res.status(404).json({ error: 'IPTV channel not found' });
+
+    const quality = ['1080p', '720p', '480p', '360p', 'source'].includes(req.query.quality)
+      ? req.query.quality
+      : '720p';
+    try {
+      const sessionId = HLS.beginSession(channel.url, quality, 0, 0, null, null);
+      const startup = await HLS.waitForPlaylist(sessionId, 30000);
+      if (!startup.ready) return res.status(503).json({ error: startup.error || 'IPTV stream startup timed out' });
+      res.set('Cache-Control', 'no-store');
+      return res.redirect(302, `/api/hls/${sessionId}/index.m3u8`);
+    } catch (error) {
+      console.error('[Roku] IPTV startup failed:', error.message);
+      return playbackError(res, error);
+    }
+  });
+
+
   // ── Main stream endpoint ──────────────────────────────────────────────────────
   router.get('/stream', async (req, res) => {
     const { path: filePath, transcode, quality, subtitle } = req.query;
