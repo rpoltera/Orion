@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="MediaTile" extends="Group">
+  <interface>
+    <field id="itemContent" type="node" onChange="showContent" />
+  </interface>
+  <children>
+    <Rectangle id="background" width="220" height="150" color="171D33" />
+    <Poster id="poster" width="220" height="106" loadDisplayMode="scaleToFill" />
+    <Rectangle id="shade" translation="0,106" width="220" height="44" color="171D33" />
+    <Label id="title" translation="10,111" width="200" height="20" font="font:SmallBoldSystemFont" color="F9FAFB" maxLines="1" wrap="false" />
+    <Label id="subtitle" translation="10,131" width="200" height="15" font="font:SmallSystemFont" color="B8C0D0" maxLines="1" wrap="false" />
+  </children>
+  <script type="text/brightscript" uri="pkg:/components/MediaTile.brs" />
+</component>
