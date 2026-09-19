@@ -385,15 +385,16 @@ sub openPinDialog(userName as String)
     dialog.title = "Enter PIN or password for " + userName
     dialog.text = ""
     dialog.buttons = ["Sign In", "Cancel"]
+    dialog.optionsDialog = true
     dialog.observeField("buttonSelected", "onPinDialog")
     m.pinDialog = dialog
     m.top.dialog = dialog
 end sub
 
-sub onPinDialog()
-    if m.pinDialog = invalid then return
-    if m.pinDialog.buttonSelected = 0 then
-        startLogin(m.pendingUserName, m.pinDialog.text)
+sub onPinDialog(event as Object)
+    if event = invalid then return
+    if event.getData() = 0 then
+        startLogin(m.pendingUserName, m.top.dialog.text)
     else
         m.rows.setFocus(true)
     end if
@@ -404,15 +405,16 @@ sub openServerDialog()
     dialog.title = "Orion server address"
     dialog.text = normalizeServer(m.top.serverUrl)
     dialog.buttons = ["Save", "Cancel"]
+    dialog.optionsDialog = true
     dialog.observeField("buttonSelected", "onServerDialog")
     m.serverDialog = dialog
     m.top.dialog = dialog
 end sub
 
-sub onServerDialog()
-    if m.serverDialog = invalid then return
-    if m.serverDialog.buttonSelected = 0 then
-        server = normalizeServer(m.serverDialog.text)
+sub onServerDialog(event as Object)
+    if event = invalid then return
+    if event.getData() = 0 then
+        server = normalizeServer(m.top.dialog.text)
         if server = "" then
             m.status.text = "Enter an address such as http://192.168.0.244:3001"
         else
