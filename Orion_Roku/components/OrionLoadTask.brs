@@ -25,7 +25,11 @@ end sub
 
 sub loadProfiles(base as String)
     data = fetchJson(base + "/api/roku/users")
-    if data = invalid or data.users = invalid then
+    if data = invalid then
+        m.top.error = "Could not load Orion profiles from " + base
+        return
+    end if
+    if data.users = invalid then
         m.top.error = "Could not load Orion profiles from " + base
         return
     end if
