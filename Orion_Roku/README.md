@@ -19,7 +19,7 @@ Native SceneGraph/BrightScript client for the complete Orion experience.
 
 1. Enable **Developer mode** on the Roku, then reboot it.
 2. Open `http://ROKU-IP` from a computer on the same LAN and sign in.
-3. Upload the `Orion-Roku-2.0.0.zip` release package.
+3. Upload the `Orion-Roku-2.0.0-final.zip` release package.
 4. Launch Orion and press `*` to enter the Orion address, for example `http://192.168.0.244:3001`.
 5. Select an Orion profile and enter that profile's PIN or password.
 
@@ -33,6 +33,5 @@ the server for an already-filtered catalogue and the playback endpoints verify
 the signed-in profile again, so restricted titles cannot be started merely by
 typing a media URL on the Roku.
 
-Administrators can optionally set live-channel allow-lists with
-`mediaAccess.liveChannels` or `mediaAccess.iptvChannels`. If those lists are
-not set, live television remains available to a restricted media profile.
+StreamForge manages live-channel availability separately; the Roku uses its
+existing protected HLS channel output for live TV playback.
