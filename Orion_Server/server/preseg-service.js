@@ -94,7 +94,7 @@ function loadConfig() {
       port: svc.port || DEFAULT_PORT,
       workers: parseInt(inner.workers, 10) || 0,
       skip10Bit: inner.skip10Bit !== false,
-      hwAccel: (inner.hwAccel || 'cpu').toLowerCase(),
+      hwAccel: typeof inner.hwAccel === 'string' ? inner.hwAccel.toLowerCase() : 'cpu',
       gpuCount: Math.max(1, parseInt(inner.gpuCount, 10) || 1),
       daysAhead: Math.max(1, Math.min(30, parseInt(inner.daysAhead, 10) || 1)),
       maxGpuPreseg: parseInt(inner.maxGpuPreseg, 10) || 4,

@@ -42,18 +42,67 @@ function ActivityTab({ API }) {
   const [activity, setActivity] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
 
+  // StreamForge registers the live /api/system/stats endpoint before the
+  // legacy Orion endpoint.  Its response is intentionally more detailed, but
+  // uses cpu.overall and byte values rather than the older dashboard fields.
+  // Keep this screen compatible with either shape rather than assuming that
+  // optional stream/load information exists.
+  const normaliseStats = React.useCallback((raw) => {
+    if (!raw || typeof raw !== 'object') return null;
+    const rawCpu = raw.cpu && typeof raw.cpu === 'object' ? raw.cpu : {};
+    const rawMemory = raw.memory && typeof raw.memory === 'object' ? raw.memory : {};
+    const totalBytes = Number(rawMemory.total || 0);
+    const availableBytes = Number(rawMemory.available ?? rawMemory.free ?? 0);
+    const usedBytes = Number(rawMemory.used ?? (totalBytes > 0 ? Math.max(0, totalBytes - availableBytes) : 0));
+    const toMB = (value) => Math.round(Number(value || 0) / 1024 / 1024);
+    const totalMB = rawMemory.totalMB ?? toMB(totalBytes);
+    const usedMB = rawMemory.usedMB ?? toMB(usedBytes);
+    const freeMB = rawMemory.freeMB ?? toMB(availableBytes);
+    const usedPercent = rawMemory.usedPercent ?? (totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0);
+    const interfaces = Array.isArray(raw.network) ? raw.network : [];
+    const currentMbps = raw.bandwidth?.currentMbps ?? interfaces.reduce(
+      (total, network) => total + Number(network.rxMbS || 0) + Number(network.txMbS || 0), 0
+    );
+
+    return {
+      uptime: Number(raw.uptime || 0),
+      cpu: {
+        model: rawCpu.model || 'System CPU',
+        cores: Array.isArray(rawCpu.cores) ? rawCpu.cores.length : Number(rawCpu.cores || 0),
+        usagePercent: Number(rawCpu.usagePercent ?? rawCpu.overall ?? 0),
+      },
+      memory: { totalMB, usedMB, freeMB, usedPercent, heapUsedMB: Number(rawMemory.heapUsedMB || 0) },
+      bandwidth: {
+        currentMbps: Number(currentMbps || 0),
+        totalGB: Number(raw.bandwidth?.totalGB || 0),
+        history: Array.isArray(raw.bandwidth?.history) ? raw.bandwidth.history : [],
+      },
+      streams: {
+        active: Number(raw.streams?.active || 0),
+        queued: Number(raw.streams?.queued || 0),
+        max: Number(raw.streams?.max || 0),
+      },
+      loadTier: raw.loadTier || 'normal',
+    };
+  }, []);
+
   const refresh = React.useCallback(() => {
     Promise.all([
       fetch(`${API}/system/stats`).then(r => r.json()).catch(() => null),
       fetch(`${API}/system/clients`).then(r => r.json()).catch(() => ({ clients: [] })),
       fetch(`${API}/activity?limit=500`).then(r => r.json()).catch(() => ({ activity: [] })),
     ]).then(([s, c, a]) => {
-      if (s) setStats(s);
-      setClients(c.clients || []);
-      setActivity(a.activity || []);
+      const cleanStats = normaliseStats(s);
+      if (cleanStats) setStats(cleanStats);
+      setClients(Array.isArray(c?.clients) ? c.clients : []);
+      const records = Array.isArray(a) ? a : (Array.isArray(a?.activity) ? a.activity : []);
+      setActivity(records.map(event => ({
+        ...event,
+        timestamp: event.timestamp || event.ts || null,
+      })));
       setLoading(false);
     });
-  }, [API]);
+  }, [API, normaliseStats]);
 
   React.useEffect(() => {
     refresh();
@@ -3527,7 +3576,11 @@ const TAB_GROUPS = [
           <div>
             {/* Hardware status banner — derived from user selection, not stale auto-detect */}
             {(() => {
-              const sel = (transcodeSettings.hwAccel || 'auto').toLowerCase();
+              // Older installs stored this setting as a boolean/object. Treat
+              // non-string values as auto rather than crashing Settings.
+              const sel = typeof transcodeSettings.hwAccel === 'string'
+                ? transcodeSettings.hwAccel.toLowerCase()
+                : 'auto';
               const codec = (transcodeSettings.videoCodec || 'h264').toLowerCase();
               const labels = {
                 nvenc:    { enc: codec === 'hevc' ? 'hevc_nvenc' : 'h264_nvenc', name: 'NVIDIA NVENC' },
@@ -3769,7 +3822,7 @@ const TAB_GROUPS = [
           <div style={{ maxWidth: 520 }}>
             <div style={{ textAlign: 'center', marginBottom: 32 }}>
               <img src={`${process.env.PUBLIC_URL}/logo.png`} alt="Orion" style={{ width: 160, height: 160, objectFit: 'contain', marginBottom: 16 }} />
-              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Version 1.2.0 — Alpha</div>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Version 2.0.0</div>
             </div>
             {[
               { label: 'Developer', value: 'Raymond Poltera' },

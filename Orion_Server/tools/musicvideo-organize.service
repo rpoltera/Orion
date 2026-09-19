@@ -1,0 +1,8 @@
+[Unit]
+Description=Organize Orion Music Videos into Genre/Artist folders
+After=network-online.target orion.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/orion/Orion_Server/tools/musicvideo_organize.py --apply

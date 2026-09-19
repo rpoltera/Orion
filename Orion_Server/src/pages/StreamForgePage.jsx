@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import Hls from 'hls.js';
 import { useApp } from '../contexts/AppContext';
 import {
   Tv2, Radio, Play, Plus, Trash2, Edit2, Save, X, RefreshCw,
@@ -1021,19 +1022,15 @@ function LiveStreams({ call }) {
 
   const testStream = async (s) => {
     setTestModal(s); setTestStatus('loading'); setTestError('');
-    if (!window.Hls) {
-      await new Promise((res,rej)=>{ const sc=document.createElement('script'); sc.src='https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.10/hls.min.js'; sc.onload=res; sc.onerror=rej; document.head.appendChild(sc); });
-    }
-    await new Promise(r=>setTimeout(r,100));
     const video = testVideoRef.current;
     if (!video) return;
     const url = s.url;
     // Try native first (e.g. HLS on Safari), else use HLS.js
-    if (window.Hls && window.Hls.isSupported()) {
-      const hls = new window.Hls({ liveSyncDurationCount:6, liveMaxLatencyDurationCount:15, maxBufferLength:60, maxMaxBufferLength:120, manifestLoadingTimeOut:8000, manifestLoadingMaxRetry:1 });
+    if (Hls.isSupported()) {
+      const hls = new Hls({ liveSyncDurationCount:6, liveMaxLatencyDurationCount:15, maxBufferLength:60, maxMaxBufferLength:120, manifestLoadingTimeOut:8000, manifestLoadingMaxRetry:1 });
       testHlsRef.current = hls;
-      hls.on(window.Hls.Events.ERROR, (e,d) => { if (d.fatal) { setTestStatus('error'); setTestError(d.details||'Stream failed to load'); hls.destroy(); }});
-      hls.on(window.Hls.Events.MANIFEST_PARSED, () => { video.play().then(()=>setTestStatus('playing')).catch(()=>setTestStatus('playing')); });
+      hls.on(Hls.Events.ERROR, (e,d) => { if (d.fatal) { setTestStatus('error'); setTestError(d.details||'Stream failed to load'); hls.destroy(); }});
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().then(()=>setTestStatus('playing')).catch(()=>setTestStatus('playing')); });
       hls.loadSource(url);
       hls.attachMedia(video);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -2176,16 +2173,8 @@ function Watch({ call, initialChannelId }) {
         const hlsUrl = base + r.hlsUrl;
 
 
-        if (!window.Hls) {
-          await new Promise((res,rej) => {
-            const s=document.createElement('script');
-            s.src='https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.10/hls.min.js';
-            s.onload=res; s.onerror=rej; document.head.appendChild(s);
-          });
-        }
-
-        if (window.Hls && window.Hls.isSupported()) {
-          const hls = new window.Hls({
+        if (Hls.isSupported()) {
+          const hls = new Hls({
             lowLatencyMode: false,
             liveSyncDurationCount: 6,        // start playing after just 1 segment
             liveMaxLatencyDurationCount: 50, // only jump if >100s behind (prevents mid-show skips)
@@ -2208,7 +2197,7 @@ function Watch({ call, initialChannelId }) {
           hlsRef.current = hls;
           hls.loadSource(hlsUrl);
           hls.attachMedia(video);
-          hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
             setStatus('playing');
             video.muted = muted;
             video.volume = 1;
@@ -2216,7 +2205,7 @@ function Watch({ call, initialChannelId }) {
           });
 
           let retries = 0;
-          hls.on(window.Hls.Events.ERROR, async (_,data) => {
+          hls.on(Hls.Events.ERROR, async (_,data) => {
             if (data.fatal) {
               retries++;
               if (retries > 3) { setStatus('error'); setErrMsg('Stream failed after 3 retries'); hls.destroy(); return; }

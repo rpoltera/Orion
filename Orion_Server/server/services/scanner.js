@@ -51,6 +51,42 @@ function cleanTitle(filename) {
   return cleaned;
 }
 
+// Music-video files are commonly named "Artist - Song Title (Official Video)".
+// Keep this parser here so scanning, metadata lookup, and the UI all agree on
+// which part is the artist and which is the title.
+function cleanMusicVideoTitle(value) {
+  return (value || '')
+    .replace(/\.(mkv|mp4|avi|mov|wmv|flv|m4v|ts|m2ts|webm|mpeg|mpg|3gp)$/i, '')
+    .replace(/\s*[\[(](?:official\s+(?:music\s+)?video|official\s+visualizer|official\s+audio|performance\s+video|lyric\s+video|visualizer|studio\s+video)[\])]\s*/gi, ' ')
+    .replace(/[_]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseMusicVideoFilename(filename) {
+  const base = cleanMusicVideoTitle(filename);
+  // Split once. A title can legitimately contain additional dashes.
+  const match = base.match(/^\s*(.+?)\s+[-–—]\s+(.+?)\s*$/);
+  if (!match) return { artist: null, title: base };
+  return {
+    artist: match[1].trim() || null,
+    title: cleanMusicVideoTitle(match[2]),
+  };
+}
+
+function inferMusicVideoGenres(libraryRoot, filePath) {
+  try {
+    const relative = path.relative(libraryRoot, filePath);
+    const parts = relative.split(path.sep).slice(0, -1).filter(Boolean);
+    // The first directory below the selected Music Videos library is the
+    // user's category (Country, Rock, 1980s, etc.).
+    const genre = parts.find(part => !part.startsWith('.'));
+    return genre ? [genre.replace(/[_]/g, ' ').replace(/\s+/g, ' ').trim()] : [];
+  } catch {
+    return [];
+  }
+}
+
 function extractShowName(filePath) {
   const parts = filePath.split(/[/\\]/);
   for (let i = parts.length - 2; i >= 0; i--) {
@@ -113,7 +149,9 @@ function deduplicateMedia(items) {
   const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   for (const item of items) {
     if (isTrailerOrExtra(item.fileName)) continue;
-    const key = `${norm(item.title)}__${item.year || 'unknown'}`;
+    // Different artists can have videos with the same title.  Including the
+    // artist prevents a music-video scan from treating them as duplicates.
+    const key = `${norm(item.artist)}__${norm(item.title)}__${item.year || 'unknown'}`;
     if (!groups.has(key)) {
       groups.set(key, { primary: item, versions: [{ filePath: item.filePath, fileName: item.fileName, size: item.size, id: item.id, quality: getQualityScore(item.fileName) }] });
     } else {
@@ -173,10 +211,14 @@ async function scanDirectory(dirPath, type = 'movies', { onProgress, findLocalIm
           const quickBackdrop = localImgs?.fanart ? `/api/localimage?path=${encodeURIComponent(localImgs.fanart)}` : null;
 
           const dec = decodeHtmlEntities || (s => s);
+          const musicVideo = type === 'musicVideos' ? parseMusicVideoFilename(entry.name) : null;
+          const inferredGenres = type === 'musicVideos' ? inferMusicVideoGenres(dirPath, fullPath) : [];
 
           results.push({
             id:         uuidv4(),
-            title:      dec(localMeta?.title || cleanTitle(entry.name)),
+            title:      dec(localMeta?.title || musicVideo?.title || cleanTitle(entry.name)),
+            artist:     type === 'musicVideos' ? (localMeta?.artist || musicVideo?.artist || null) : undefined,
+            album:      type === 'musicVideos' ? (localMeta?.album || null) : undefined,
             seriesTitle: type === 'tvShows' ? extractShowName(fullPath) : undefined,
             seasonNum: (() => {
               if (type !== 'tvShows') return undefined;
@@ -197,13 +239,15 @@ async function scanDirectory(dirPath, type = 'movies', { onProgress, findLocalIm
             year:       localMeta?.year || extractYear(entry.name),
             rating:     localMeta?.rating || null,
             runtime:    localMeta?.runtime || null,
-            genres:     localMeta?.genres || [],
+            genres:     localMeta?.genres?.length ? localMeta.genres : inferredGenres,
             cast:       localMeta?.cast   || [],
             studios:    localMeta?.studios || [],
             tmdbId:     localMeta?.tmdbId  || null,
             imdbId:     localMeta?.imdbId  || null,
             contentRating: localMeta?.mpaa || null,
-            metadataFetched: !!(localMeta?.title),
+            metadataFetched: type === 'musicVideos'
+              ? !!(localMeta?.title && localMeta?.artist && localMeta?.year)
+              : !!(localMeta?.title),
           });
 
           fileCount++;
@@ -244,6 +288,9 @@ module.exports = {
   QUALITY_RANK,
   getQualityScore,
   cleanTitle,
+  cleanMusicVideoTitle,
+  parseMusicVideoFilename,
+  inferMusicVideoGenres,
   extractShowName,
   extractYear,
   isTrailerOrExtra,

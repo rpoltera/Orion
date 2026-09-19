@@ -28,6 +28,8 @@ NUL
 
 # Logs
 *.log
+__pycache__/
+*.py[cod]
 
 # backups from patch scripts
 *.bak

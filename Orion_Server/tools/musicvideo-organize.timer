@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Orion Music Video organizer
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+Unit=musicvideo-organize.service
+
+[Install]
+WantedBy=timers.target

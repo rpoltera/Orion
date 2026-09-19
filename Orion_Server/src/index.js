@@ -35,10 +35,11 @@
     }
 
     return nativeFetch(input, init).then(res => {
-      // Only force re-login when we actually had a token and the server
-      // rejected it. A 401 on a request sent without one just means that
-      // endpoint needs auth — surface it, do not destroy the session.
-      if (res.status === 401 && isApi && localStorage.getItem(KEY)) {
+      // A saved profile without a usable token is a stale session.  Treat it
+      // exactly like an expired token so protected controls (Scheduler,
+      // Settings saves, etc.) lead back to sign-in instead of just showing an
+      // opaque “Authentication required” error.
+      if (res.status === 401 && isApi && !pathname.startsWith('/api/auth/')) {
         localStorage.removeItem(KEY);
         localStorage.removeItem('orion_current_user');
         if (!window.__orionReloading) {

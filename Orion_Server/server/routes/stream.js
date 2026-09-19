@@ -82,9 +82,57 @@ function acquirePoolSlot(filePath) {
 }
 function releasePoolSlot(pool) { if (pool && _poolReads[pool] > 0) _poolReads[pool]--; }
 
-module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig, getEncoder }) {
+module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig, getEncoder, playbackCoordinator }) {
 
   const router = express.Router();
+
+  const HLS_QUALITIES = new Set(['4k', '1080p', '720p', '480p', '360p', 'source']);
+  const videoItems = () => [
+    ...(db.movies || []),
+    ...(db.tvShows || []),
+    ...(db.musicVideos || []),
+  ];
+  const findVideoItem = mediaId => videoItems().find(item => item.id === mediaId) || null;
+
+  function startLibraryHls(item, {
+    quality = 'source',
+    audioTrack = 0,
+    seekTime = 0,
+  } = {}) {
+    if (!item?.filePath) {
+      const error = new Error('Media file is unavailable');
+      error.status = 404;
+      throw error;
+    }
+    if (!fs.existsSync(item.filePath)) {
+      const error = new Error('Media file is unavailable');
+      error.status = 404;
+      throw error;
+    }
+    const selectedQuality = HLS_QUALITIES.has(quality) ? quality : 'source';
+    const sessionId = HLS.beginSession(
+      item.filePath,
+      selectedQuality,
+      Math.max(0, Number.parseInt(audioTrack, 10) || 0),
+      Math.max(0, Number.parseFloat(seekTime) || 0),
+      item.videoCodec || null,
+      item.audioCodec || null,
+    );
+    return {
+      sessionId,
+      quality: selectedQuality,
+      playlistUrl: `/api/hls/${sessionId}/index.m3u8`,
+    };
+  }
+
+  function playbackError(res, error) {
+    const status = error?.status || (error?.code === 'PLAYBACK_CAPACITY' ? 503 : 500);
+    return res.status(status).json({
+      error: error?.message || 'Could not start playback',
+      code: error?.code || 'PLAYBACK_START_FAILED',
+      retryable: status === 503,
+    });
+  }
 
   // ── Progress tracking ─────────────────────────────────────────────────────────
   router.post('/progress/:mediaId', (req, res) => {
@@ -148,8 +196,68 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   });
 
   // ── HLS ───────────────────────────────────────────────────────────────────────
+  // Stable, ID-based playback API.  Clients no longer need to expose a NAS path
+  // to start a stream, and every supported client receives the same HLS format.
+  router.post('/playback/decision', (req, res) => {
+    const item = findVideoItem(req.body?.mediaId);
+    if (!item) return res.status(404).json({ error: 'Media not found' });
+    const client = ['web', 'desktop', 'roku'].includes(req.body?.client)
+      ? req.body.client
+      : 'web';
+    const quality = HLS_QUALITIES.has(req.body?.quality)
+      ? req.body.quality
+      : (client === 'roku' ? '720p' : 'source');
+    const ext = path.extname(item.filePath || '').toLowerCase();
+    const directCompatible = ['.mp4', '.m4v'].includes(ext)
+      && COPY_VIDEO_CODECS.has(String(item.videoCodec || '').toLowerCase())
+      && ['aac', 'mp4a', 'mp4a-40-2'].includes(String(item.audioCodec || '').toLowerCase());
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      mediaId: item.id,
+      client,
+      mode: 'hls',
+      quality,
+      directCompatible,
+      startUrl: '/api/playback/start',
+    });
+  });
+
+  router.post('/playback/start', async (req, res) => {
+    const item = findVideoItem(req.body?.mediaId);
+    if (!item) return res.status(404).json({ error: 'Media not found' });
+    try {
+      const playback = startLibraryHls(item, req.body || {});
+      // Waiting only for the first playable segment prevents hls.js from
+      // receiving an initial 404 and entering its retry back-off.  The
+      // response stays bounded, so an unusually slow or failing source still
+      // returns control to the client rather than hanging the request.
+      const startup = await HLS.waitForPlaylist(playback.sessionId, 10000);
+      res.set('Cache-Control', 'no-store');
+      res.json({ ok: true, mediaId: item.id, mode: 'hls', ready: startup.ready, ...playback });
+    } catch (error) {
+      console.error('[Playback] HLS start failed:', error.message);
+      return playbackError(res, error);
+    }
+  });
+
+  router.get('/playback/status', (_, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ playback: playbackCoordinator?.status?.() || null, hls: HLS.getStatus() });
+  });
+
   router.post('/hls/start', async (req, res) => {
-    const { filePath, quality='source', audioTrack=0, seekTime=0, videoCodec=null, audioCodec=null } = req.body;
+    const { filePath, mediaId, quality='source', audioTrack=0, seekTime=0, videoCodec=null, audioCodec=null } = req.body;
+    if (mediaId) {
+      const item = findVideoItem(mediaId);
+      if (!item) return res.status(404).json({ error: 'Media not found' });
+      try {
+        return res.json({ ok: true, ...startLibraryHls(item, { quality, audioTrack, seekTime }) });
+      } catch (error) {
+        return playbackError(res, error);
+      }
+    }
     if (!filePath) return res.status(400).json({ error: 'filePath required' });
     try {
       let vCodec = videoCodec, aCodec = audioCodec;
@@ -159,7 +267,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       }
       const sessionId = HLS.beginSession(filePath, quality, audioTrack, seekTime, vCodec, aCodec);
       res.json({ ok: true, sessionId, playlistUrl: `/api/hls/${sessionId}/index.m3u8`, ready: false, qualities: Object.keys(HLS.QUALITY_TIERS||QUALITY_TIERS) });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    } catch(e) { return playbackError(res, e); }
   });
 
   router.get('/hls/status', (_, res) => res.json(HLS.getStatus()));
@@ -199,6 +307,38 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   });
 
   router.delete('/hls/:sessionId', (req, res) => { HLS.stopSession(req.params.sessionId); res.json({ ok: true }); });
+
+  // ── Roku playback ─────────────────────────────────────────────────────────────
+  // Roku's Video node is most reliable with HLS.  This route accepts only an
+  // Orion media id, starts a server-side HLS session, and redirects the Roku to
+  // the playlist.  It never exposes the media file path to the TV.
+  router.get('/roku/stream/:mediaId', async (req, res) => {
+    const item = findVideoItem(req.params.mediaId);
+    if (!item) return res.status(404).json({ error: 'Media not found' });
+
+    const quality = ['4k', '1080p', '720p', '480p', '360p', 'source'].includes(req.query.quality)
+      ? req.query.quality
+      : '720p';
+
+    try {
+      const { sessionId } = startLibraryHls(item, { quality });
+
+      // Do not redirect Roku until the playlist exists; Video nodes do not
+      // reliably retry an initial 404 while ffmpeg is starting.
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        if (HLS.getPlaylist(sessionId)) {
+          res.set('Cache-Control', 'no-store');
+          return res.redirect(302, `/api/hls/${sessionId}/index.m3u8`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      return res.status(503).json({ error: 'Stream startup timed out' });
+    } catch (error) {
+      console.error('[Roku] Stream startup failed:', error.message);
+      return playbackError(res, error);
+    }
+  });
 
   // ── Main stream endpoint ──────────────────────────────────────────────────────
   router.get('/stream', async (req, res) => {
@@ -292,13 +432,17 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       res.setHeader('X-Playback-Session-Id', sessionId);
       if (mediaItem?.runtime > 0) res.setHeader('X-Content-Duration', String(mediaItem.runtime * 60));
 
-      let ffmpegCmd, clientClosed = false, firstChunk = true, retryCount = 0;
+      let ffmpegCmd, playbackClaim = null, clientClosed = false, firstChunk = true, retryCount = 0;
       let softwareFallback = false; // set true when GPU encoder fails → forces libx264 on retry
       const encoder = getEncoder ? getEncoder() : 'libx264';
 
       const cleanup = (toGraveyard = false) => {
         _activeSessions.delete(sessionId);
         if (_pendingStreams.get(clientKey) === sessionId) _pendingStreams.delete(clientKey);
+        if (playbackClaim) {
+          playbackCoordinator?.release(playbackClaim.key);
+          playbackClaim = null;
+        }
         processTranscodeQueue();
         if (ffmpegCmd) {
           if (toGraveyard && !firstChunk) { _sessionGraveyard.set(sessionId, { ffmpegCmd, filePath, seekTime, expiresAt: Date.now() + GRAVEYARD_TTL }); }
@@ -339,6 +483,28 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
             videoCodec = 'libx264';
             videoOptions = ['-preset','ultrafast','-tune','zerolatency','-crf', String(qualityTier?.crf || 23)];
             if (qualityTier) scaleFilter = qualityTier.scale;
+          }
+        }
+
+        // Direct-stream fallback must share the same encoder budget as VOD
+        // HLS.  Otherwise a few retrying browser streams can consume the GPU
+        // StreamForge keeps ready for a live channel.
+        if (videoCodec !== 'copy' && !playbackClaim && playbackCoordinator) {
+          const claim = playbackCoordinator.acquire({
+            key: `direct:${sessionId}`,
+            kind: 'direct-stream',
+            priority: 'interactive',
+            requiresEncoder: true,
+          });
+          if (!claim.ok) {
+            cleanup(false);
+            return playbackError(res, Object.assign(new Error(claim.reason), {
+              code: claim.code || 'PLAYBACK_CAPACITY', status: 503,
+            }));
+          }
+          playbackClaim = claim;
+          if (videoCodec.includes('nvenc') && Number.isInteger(claim.gpuId)) {
+            videoOptions = ['-gpu', String(claim.gpuId), ...videoOptions];
           }
         }
 
@@ -437,12 +603,12 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
                 return tryTranscode(true);
               }
               console.error('[Transcode] Error:', errMsg.slice(0,200));
+              cleanup(false);
               if (!res.writableEnded) res.end();
             })
             .on('end', () => {
               clearInterval(stallTimer);
-              _activeSessions.delete(sessionId);
-              processTranscodeQueue();
+              cleanup(false);
               ffmpegDone = true;
               pumpToRes();
             });
@@ -465,7 +631,11 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
 
           res.on('drain', pumpToRes);
           outStream.on('end',   () => { ffmpegDone = true; pumpToRes(); });
-          outStream.on('error', () => { clearInterval(stallTimer); if (!res.writableEnded) res.end(); });
+          outStream.on('error', () => {
+            clearInterval(stallTimer);
+            cleanup(false);
+            if (!res.writableEnded) res.end();
+          });
         } catch(err) { console.error('[Transcode] Setup error:', err.message); if (!res.writableEnded) res.end(); }
       };
 

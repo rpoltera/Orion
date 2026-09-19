@@ -5,8 +5,10 @@
  */
 
 const axios = require('axios');
+const { parseMusicVideoFilename } = require('./scanner');
 
 let _lfmWarned = false; // fix-03: warn once about missing Last.fm key
+const _artistImageCache = new Map();
 
 // ── HTTP connection pool ───────────────────────────────────────────────────────
 const http_agent  = new (require('http').Agent)({ keepAlive: true, maxSockets: 10 });
@@ -38,28 +40,6 @@ function resolveGenres(ids) {
   if (!ids?.length) return [];
   if (typeof ids[0] === 'string') return ids;
   return ids.map(id => TMDB_GENRES[id] || null).filter(Boolean);
-}
-
-function parseMusicVideoFilename(filename) {
-  const clean = filename
-    .replace(/\.(mkv|mp4|avi|mov|wmv|m4v|webm|flv|mp3|flac|m4a|aac|ogg|opus|wav|wma)$/i, '')
-    .replace(/_/g, ' ').trim();
-  const parts = clean.split(/\s*[-–—]\s*/);
-  if (parts.length >= 4) {
-    const trackNum = parts[parts.length - 2];
-    if (/^\d{1,3}$/.test(trackNum.trim())) return { artist: parts[0].trim(), title: parts[parts.length - 1].trim() };
-    return { artist: parts[0].trim(), title: parts[2].trim() };
-  }
-  if (parts.length === 3) {
-    if (/^\d{1,3}$/.test(parts[1].trim())) return { artist: parts[0].trim(), title: parts[2].trim() };
-    return { artist: parts[0].trim(), title: parts[2].trim() };
-  }
-  if (parts.length === 2) {
-    const first = parts[0].trim(), second = parts[1].trim();
-    if (/^\d{1,3}$/.test(first)) return { artist: null, title: second };
-    return { artist: first, title: second };
-  }
-  return { artist: null, title: clean };
 }
 
 // ── OMDb ──────────────────────────────────────────────────────────────────────
@@ -266,42 +246,80 @@ async function fetchTVMeta(title, config = {}) {
 async function fetchMusicVideoMeta(filename, config = {}) {
   const { artist, title } = parseMusicVideoFilename(filename);
   if (!artist || !title) return null;
+
+  // MusicBrainz improves the match, but it is not required.  When it is
+  // unavailable, continue with the filename and use iTunes for artwork.
+  let rec = null;
   try {
     const query = encodeURIComponent(`recording:"${title}" AND artist:"${artist}"`);
-    const mbRes = await axios.get(`https://musicbrainz.org/ws/2/recording?query=${query}&limit=1&fmt=json`, {
+    const mbRes = await axiosPool.get(`https://musicbrainz.org/ws/2/recording?query=${query}&limit=1&inc=artist-credits%2Breleases&fmt=json`, {
       timeout: 8000, headers: { 'User-Agent': 'Orion/1.0 (https://github.com/rpoltera/Orion)' }
     });
-    const recordings = mbRes.data.recordings;
-    if (!recordings?.length) return null;
-    const rec = recordings[0];
-    const artistName = rec['artist-credit']?.[0]?.artist?.name || artist;
-    const albumName  = rec.releases?.[0]?.title || null;
-    const lfmKey = config.lastfmKey || null;
-
-    let thumbnail = null;
-    if (albumName && lfmKey) {
-      try {
-        const lfm = await axios.get(`https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${lfmKey}&artist=${encodeURIComponent(artistName)}&album=${encodeURIComponent(albumName)}&format=json`, { timeout: 5000 });
-        const images = lfm.data?.album?.image;
-        if (images) {
-          const large = images.find(i => i.size === 'extralarge') || images[images.length-1];
-          if (large?.['#text'] && !large['#text'].includes('2a96cbd8b46e442fc41c2b86b821562f')) thumbnail = large['#text'];
-        }
-      } catch {}
-    }
-    if (!thumbnail) {
-      try {
-        const itunes = await axios.get(`https://itunes.apple.com/search?term=${encodeURIComponent(`${artistName} ${title}`)}&media=music&limit=1`, { timeout: 5000 });
-        const art = itunes.data?.results?.[0]?.artworkUrl100;
-        if (art) thumbnail = art.replace('100x100bb', '600x600bb');
-      } catch {}
-    }
-
-    return { title: rec.title || title, artist: artistName, album: albumName, year: rec['first-release-date'] ? parseInt(rec['first-release-date'].split('-')[0]) : null, mbId: rec.id, thumbnail, overview: `Music video by ${artistName}`, rating: null };
+    rec = mbRes.data?.recordings?.[0] || null;
   } catch (err) {
-    console.error('[MusicVideo] Metadata error:', err.message);
-    return null;
+    console.warn('[MusicVideo] MusicBrainz unavailable; using iTunes fallback:', err.message);
   }
+
+  const artistName = rec?.['artist-credit']?.[0]?.artist?.name || artist;
+  const albumName = rec?.releases?.[0]?.title || null;
+  const lfmKey = config.lastfmKey || null;
+
+  // A video thumbnail is album/track artwork. Artist browse cards need a
+  // separate image; never reuse the first video's album art for an artist.
+  let artistImage = null;
+  const cacheKey = artistName.toLocaleLowerCase();
+  if (_artistImageCache.has(cacheKey)) {
+    artistImage = _artistImageCache.get(cacheKey);
+  } else {
+    try {
+      const audioDb = await axios.get(
+        `https://www.theaudiodb.com/api/v1/json/2/search.php?s=${encodeURIComponent(artistName)}`,
+        { timeout: 8000 }
+      );
+      const normal = value => (value || '').toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+      const artists = audioDb.data?.artists || [];
+      const match = artists.find(candidate => normal(candidate.strArtist) === normal(artistName)) || artists[0];
+      artistImage = match?.strArtistThumb || match?.strArtistFanart || null;
+    } catch (err) {
+      console.warn('[MusicVideo] TheAudioDB artist lookup failed:', err.message);
+    }
+
+    // Last.fm is retained only as a secondary source.  Its image fields are
+    // commonly placeholders, which are explicitly rejected below.
+    if (!artistImage && lfmKey) {
+      try {
+        const lfmArtist = await axios.get(`https://ws.audioscrobbler.com/2.0/?method=artist.getinfo&api_key=${lfmKey}&artist=${encodeURIComponent(artistName)}&format=json`, { timeout: 5000 });
+        const images = lfmArtist.data?.artist?.image;
+        const large = images?.find(i => i.size === 'extralarge') || images?.[images?.length - 1];
+        const image = large?.['#text'];
+        artistImage = image && !image.includes('2a96cbd8b46e442fc41c2b86b821562f') ? image : null;
+      } catch {}
+    }
+    _artistImageCache.set(cacheKey, artistImage);
+  }
+
+  let thumbnail = null;
+  if (albumName && lfmKey) {
+    try {
+      const lfm = await axios.get(`https://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${lfmKey}&artist=${encodeURIComponent(artistName)}&album=${encodeURIComponent(albumName)}&format=json`, { timeout: 5000 });
+      const images = lfm.data?.album?.image;
+      if (images) {
+        const large = images.find(i => i.size === 'extralarge') || images[images.length-1];
+        if (large?.['#text'] && !large['#text'].includes('2a96cbd8b46e442fc41c2b86b821562f')) thumbnail = large['#text'];
+      }
+    } catch {}
+  }
+  if (!thumbnail) {
+    try {
+      const itunes = await axios.get(`https://itunes.apple.com/search?term=${encodeURIComponent(`${artistName} ${title}`)}&media=music&limit=1`, { timeout: 5000 });
+      const art = itunes.data?.results?.[0]?.artworkUrl100;
+      if (art) thumbnail = art.replace('100x100bb', '600x600bb');
+    } catch (err) {
+      console.warn('[MusicVideo] iTunes artwork lookup failed:', err.message);
+    }
+  }
+
+  return { title: rec?.title || title, artist: artistName, artistImage, album: albumName, year: rec?.['first-release-date'] ? parseInt(rec['first-release-date'].split('-')[0]) : null, mbId: rec?.id || null, thumbnail, overview: `Music video by ${artistName}`, rating: null };
 }
 
 async function fetchMusicMeta(filename, config = {}) {

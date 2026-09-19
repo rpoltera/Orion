@@ -1,6 +1,6 @@
 {
   "name": "orion",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Orion Media Server - Self-hosted media server with IPTV, hardware transcoding, and streaming integration",
   "author": "Raynond Poltera",
   "main": "server/index.js",

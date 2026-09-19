@@ -11,6 +11,19 @@ const resolveImg = (url) => {
   return null;
 };
 
+// Filenames frequently spell the same artist with different punctuation or
+// Unicode characters (*NSYNC/#NSYNC, 98° with invisible variants, AC/DC).
+// Use the normalized value only as the grouping key; keep a real name to show.
+const musicVideoArtistKey = (artist) => {
+  const value = String(artist || 'Unknown Artist').trim()
+    .replace(/[°ºª]/g, '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+  return value || 'unknownartist';
+};
+
 // Shared streaming service definitions (networks + streaming combined)
 const NETWORK_SVCS = [
   { names:['netflix'],                               label:'Netflix',         bg:'#141414', color:'#e50914', logo:'https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg' },
@@ -497,7 +510,9 @@ export function MusicPage({ onSelect }) {
 export function MusicVideosPage({ onSelect }) {
   const { library, scanFolders, loading, playMedia } = useApp();
   const videos = library.musicVideos || [];
-  const [selectedGenre, setSelectedGenre] = useState('All');
+  const [view, setView] = useState('genres');
+  const [selectedGenre, setSelectedGenre] = useState(null);
+  const [selectedArtist, setSelectedArtist] = useState(null);
   const [sortMV, setSortMV] = useState('title');
 
   const handleAddFolder = async () => {
@@ -507,23 +522,102 @@ export function MusicVideosPage({ onSelect }) {
     }
   };
 
-  // Build genre list
-  const genres = React.useMemo(() => {
-    const set = new Set();
-    videos.forEach(v => (v.genres || []).forEach(g => set.add(g)));
-    return ['All', ...Array.from(set).sort()];
+  const genreGroups = React.useMemo(() => {
+    const groups = new Map();
+    videos.forEach(video => {
+      const genres = video.genres?.length ? video.genres : ['Uncategorized'];
+      genres.forEach(genre => {
+        if (!groups.has(genre)) groups.set(genre, []);
+        groups.get(genre).push(video);
+      });
+    });
+    return Array.from(groups.entries())
+      .map(([name, items]) => ({ name, items }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }, [videos]);
 
+  const genreVideos = React.useMemo(() => {
+    if (!selectedGenre) return videos;
+    return genreGroups.find(group => group.name === selectedGenre)?.items || [];
+  }, [videos, genreGroups, selectedGenre]);
+
+  const artistGroups = React.useMemo(() => {
+    const groups = new Map();
+    genreVideos.forEach(video => {
+      const artist = video.artist?.trim() || 'Unknown Artist';
+      const key = musicVideoArtistKey(artist);
+      if (!groups.has(key)) groups.set(key, { key, items: [], names: new Map() });
+      const group = groups.get(key);
+      group.items.push(video);
+      group.names.set(artist, (group.names.get(artist) || 0) + 1);
+    });
+    return Array.from(groups.values())
+      .map(group => {
+        const name = Array.from(group.names.entries())
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+        return {
+          key: group.key,
+          name,
+          items: group.items,
+          artistImage: group.items.find(item => item.artistImage)?.artistImage || null,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [genreVideos]);
+
   const filtered = React.useMemo(() => {
-    let items = selectedGenre === 'All' ? videos : videos.filter(v => (v.genres || []).includes(selectedGenre));
+    let items = selectedArtist
+      ? genreVideos.filter(video => musicVideoArtistKey(video.artist) === selectedArtist)
+      : genreVideos;
     return [...items].sort((a, b) => {
       if (sortMV === 'artist') return (a.artist || '').localeCompare(b.artist || '') || (a.title || '').localeCompare(b.title || '');
       if (sortMV === 'album')  return (a.album  || '').localeCompare(b.album  || '') || (a.title || '').localeCompare(b.title || '');
-      if (sortMV === 'genre')  return ((a.genres||[])[0]||'').localeCompare((b.genres||[])[0]||'');
       if (sortMV === 'year')   return (b.year||0) - (a.year||0);
       return (a.title || '').replace(/^(the |a |an )/i,'').localeCompare((b.title || '').replace(/^(the |a |an )/i,''));
     });
-  }, [videos, selectedGenre, sortMV]);
+  }, [genreVideos, selectedArtist, sortMV]);
+
+  const openGenres = () => {
+    setView('genres');
+    setSelectedGenre(null);
+    setSelectedArtist(null);
+  };
+  const openAllVideos = () => {
+    setView('videos');
+    setSelectedGenre(null);
+    setSelectedArtist(null);
+  };
+  const selectGenre = genre => {
+    setSelectedGenre(genre);
+    setSelectedArtist(null);
+    setView('artists');
+  };
+  const selectArtist = artist => {
+    setSelectedArtist(artist);
+    setView('videos');
+  };
+
+  const BrowseTile = ({ title, subtitle, item, image, onClick, icon }) => (
+    <button onClick={onClick} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)',
+      background: 'var(--bg-card)', color: 'var(--text-primary)', overflow: 'hidden', cursor: 'pointer', padding: 0,
+      textAlign: 'left', minWidth: 0 }}>
+      <div style={{ height: 116, position: 'relative', background: 'var(--bg-tertiary)' }}>
+        {resolveImg(image || item?.thumbnail)
+          ? <img src={resolveImg(image || item?.thumbnail)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.72 }} />
+          : <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 34, opacity: 0.55 }}>{icon}</div>}
+        <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(transparent, rgba(0,0,0,0.7))' }} />
+      </div>
+      <div style={{ padding: '10px 12px' }}>
+        <div style={{ fontSize: 14, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</div>
+        <div style={{ marginTop: 3, fontSize: 12, color: 'var(--text-muted)' }}>{subtitle}</div>
+      </div>
+    </button>
+  );
+
+  const selectedArtistName = artistGroups.find(group => group.key === selectedArtist)?.name || selectedArtist;
+  const contextLabel = selectedArtist
+    ? `${selectedGenre ? `${selectedGenre} · ` : ''}${selectedArtistName}`
+    : selectedGenre || 'All Videos';
 
   return (
     <div className="page">
@@ -531,35 +625,36 @@ export function MusicVideosPage({ onSelect }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
             <div className="page-title">🎞 Music Videos</div>
-            <div className="page-subtitle">{filtered.length} videos{selectedGenre !== 'All' ? ` · ${selectedGenre}` : ''}</div>
+            <div className="page-subtitle">
+              {view === 'genres' ? `${videos.length} videos · Browse by genre` : `${filtered.length} videos · ${contextLabel}`}
+            </div>
           </div>
           <button className="btn btn-secondary btn-sm" onClick={handleAddFolder} disabled={loading.musicVideos}>
             <FolderOpen size={14} /> Add Folder
           </button>
         </div>
 
-        {/* Sort + Genre row */}
-        <div style={{ display:'flex', alignItems:'center', gap:16, marginTop:16, flexWrap:'wrap' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:16, flexWrap:'wrap' }}>
           <div style={{ display:'flex', gap:6 }}>
-            {[['title','Title'],['artist','Artist'],['album','Album'],['genre','Genre'],['year','Year']].map(([val,label]) => (
-              <button key={val} onClick={() => setSortMV(val)}
+            {[["genres", 'Genres', openGenres], ['artists', 'Artists', () => { setView('artists'); setSelectedArtist(null); }], ['videos', 'All Videos', openAllVideos]].map(([id, label, action]) => (
+              <button key={id} onClick={action}
                 style={{ padding:'4px 12px', borderRadius:16, border:'none', cursor:'pointer', fontSize:12, fontWeight:600,
-                  background: sortMV === val ? 'var(--accent)' : 'var(--bg-tertiary)',
-                  color: sortMV === val ? 'white' : 'var(--text-muted)' }}>
+                  background: view === id ? 'var(--accent)' : 'var(--bg-tertiary)',
+                  color: view === id ? 'white' : 'var(--text-muted)' }}>
                 {label}
               </button>
             ))}
           </div>
-          {genres.length > 1 && <>
+          {view === 'videos' && <>
             <div style={{ width:1, height:20, background:'var(--border)' }} />
             <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
-              {genres.map(g => (
-                <button key={g} onClick={() => setSelectedGenre(g)}
+              {[['title','Title'],['artist','Artist'],['album','Album'],['year','Year']].map(([val,label]) => (
+                <button key={val} onClick={() => setSortMV(val)}
                   style={{ padding:'4px 12px', borderRadius:16, border:'none', cursor:'pointer', fontSize:12, fontWeight:600,
-                    background: selectedGenre === g ? 'rgba(99,102,241,0.3)' : 'var(--bg-card)',
-                    color: selectedGenre === g ? 'white' : 'var(--text-muted)',
-                    border: `1px solid ${selectedGenre === g ? 'var(--accent)' : 'var(--border)'}` }}>
-                  {g}
+                    background: sortMV === val ? 'rgba(99,102,241,0.3)' : 'var(--bg-card)',
+                    color: sortMV === val ? 'white' : 'var(--text-muted)',
+                    border: `1px solid ${sortMV === val ? 'var(--accent)' : 'var(--border)'}` }}>
+                  {label}
                 </button>
               ))}
             </div>
@@ -575,14 +670,41 @@ export function MusicVideosPage({ onSelect }) {
           <button className="btn btn-primary" onClick={handleAddFolder}><FolderOpen size={16} /> Add Folder</button>
         </div>
       ) : (
-        <div className="media-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
-          {filtered.map(item => (
-            <MediaCard key={item.id} item={item} wide
-              onClick={() => playMedia({ ...item, type: 'musicVideos' }, filtered.map(v => ({ ...v, type: 'musicVideos' })))} />
-          ))}
-        </div>
+        <>
+          {view === 'genres' && (
+            <div className="media-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
+              {genreGroups.map(group => <BrowseTile key={group.name} title={group.name} subtitle={`${group.items.length} videos`}
+                item={group.items.find(item => item.thumbnail) || group.items[0]} icon="🎼" onClick={() => selectGenre(group.name)} />)}
+            </div>
+          )}
+          {view === 'artists' && (
+            <>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
+                {selectedGenre ? <button className="btn btn-secondary btn-sm" onClick={openGenres}>← All Genres</button> : 'Artists across all genres'}
+              </div>
+              <div className="media-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))' }}>
+                {artistGroups.map(group => <BrowseTile key={group.key} title={group.name} subtitle={`${group.items.length} videos`}
+                  image={group.artistImage} icon="🎤" onClick={() => selectArtist(group.key)} />)}
+              </div>
+            </>
+          )}
+          {view === 'videos' && (
+            <>
+              {(selectedGenre || selectedArtist) && <div style={{ marginBottom: 12 }}>
+                <button className="btn btn-secondary btn-sm" onClick={() => selectedArtist ? (setSelectedArtist(null), setView('artists')) : openGenres()}>
+                  ← {selectedArtist ? 'Artists' : 'Genres'}
+                </button>
+              </div>}
+              <div className="media-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
+                {filtered.map(item => (
+                  <MediaCard key={item.id} item={item} wide
+                    onClick={() => playMedia({ ...item, type: 'musicVideos' }, filtered.map(video => ({ ...video, type: 'musicVideos' })))} />
+                ))}
+              </div>
+            </>
+          )}
+        </>
       )}
     </div>
   );
 }
-

@@ -37,13 +37,17 @@ export default function SchedulerPage() {
   const [taskProgress, setTaskProgress] = useState({});
 
   const fetchTasks = useCallback(() => {
-    fetch(`${API}/scheduler`)
+    fetch(`${API}/scheduler`, { cache: 'no-store' })
       .then(r => r.json())
       .then(d => { setTasks(d.tasks || []); setLoading(false); })
       .catch(() => setLoading(false));
   }, [API]);
 
-  useEffect(() => { fetchTasks(); }, [fetchTasks]);
+  useEffect(() => {
+    fetchTasks();
+    const refreshTimer = setInterval(fetchTasks, 15000);
+    return () => clearInterval(refreshTimer);
+  }, [fetchTasks]);
 
   // Socket for live progress
   useEffect(() => {
@@ -80,11 +84,23 @@ export default function SchedulerPage() {
 
   const runNow = async (task) => {
     setRunning(r => ({ ...r, [task.id]: true }));
-    await fetch(`${API}/scheduler/${task.id}/run`, { method: 'POST' });
-    setTimeout(() => {
+    try {
+      const response = await fetch(`${API}/scheduler/${task.id}/run`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `Server returned HTTP ${response.status}`);
+      if (data.task) {
+        setTasks(prev => prev.map(t => t.id === task.id ? data.task : t));
+      } else {
+        fetchTasks();
+      }
+      // Keep the task in Running state until the server emits taskDone.  A
+      // library scan can take far longer than the old two-second timeout.
+    } catch (error) {
       setRunning(r => ({ ...r, [task.id]: false }));
-      fetchTasks();
-    }, 2000);
+      setTasks(prev => prev.map(t => t.id === task.id ? {
+        ...t, lastStatus: 'error', lastError: error.message,
+      } : t));
+    }
   };
 
   const enabledCount = tasks.filter(t => t.enabled).length;

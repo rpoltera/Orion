@@ -14,7 +14,14 @@ export function AppProvider({ children }) {
   const [theme, setTheme]               = useState('disney');
   const [activeSection, setActiveSection] = useState('home');
   const [currentUser, setCurrentUser]   = useState(() => {
-    try { const s = localStorage.getItem('orion_current_user'); return s ? JSON.parse(s) : null; } catch { return null; }
+    try {
+      const saved = localStorage.getItem('orion_current_user');
+      // Older UI builds saved the profile but never stored a bearer token.
+      // Do not present that stale profile as signed in: mutations will be
+      // rejected by the API and the Scheduler appears broken.
+      if (!saved || !localStorage.getItem('orion_auth_token')) return null;
+      return JSON.parse(saved);
+    } catch { return null; }
   });
   const setCurrentUserPersist = (user) => {
     user ? localStorage.setItem('orion_current_user', JSON.stringify(user)) : localStorage.removeItem('orion_current_user');

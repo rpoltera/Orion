@@ -112,8 +112,36 @@ module.exports = function scannerRoutes({ db, io, saveDB, rebuildIndex, scanDire
                 findLocalImages,
                 findLocalMetadata,
               });
-              const existing = new Set((db[type] || []).map(i => i.filePath));
-              const fresh = scanned.filter(i => !existing.has(i.filePath));
+              const existingByPath = new Map((db[type] || []).map(i => [i.filePath, i]));
+              const fresh = scanned.filter(i => !existingByPath.has(i.filePath));
+              // A rescan should improve an existing music-video library too,
+              // not only add newly copied files. This safely fills fields
+              // derived from the filename/folder without overwriting richer
+              // metadata that was already fetched or entered by the user.
+              const enriched = [];
+              if (type === 'musicVideos') {
+                for (const scannedItem of scanned) {
+                  const existingItem = existingByPath.get(scannedItem.filePath);
+                  if (!existingItem) continue;
+                  let changed = false;
+                  if (!existingItem.artist && scannedItem.artist) {
+                    existingItem.artist = scannedItem.artist;
+                    changed = true;
+                  }
+                  if (!existingItem.genres?.length && scannedItem.genres?.length) {
+                    existingItem.genres = scannedItem.genres;
+                    changed = true;
+                  }
+                  if ((!existingItem.title || existingItem.title === existingItem.fileName?.replace(/\.[^.]+$/, '')) && scannedItem.title) {
+                    existingItem.title = scannedItem.title;
+                    changed = true;
+                  }
+                  if (changed) {
+                    existingItem.metadataFetched = false;
+                    enriched.push(existingItem);
+                  }
+                }
+              }
               const now = new Date().toISOString();
               fresh.forEach(i => { if (!i.addedAt) i.addedAt = now; });
               newItems.push(...fresh);
@@ -135,7 +163,7 @@ module.exports = function scannerRoutes({ db, io, saveDB, rebuildIndex, scanDire
           rebuildIndex(type);
           io.emit('library:updated', { type, count: newItems.length });
           io.emit('scan:complete', { type, added: newItems.length, total: db[type].length });
-          if (queueMetadata) queueMetadata(newItems, type);
+          if (queueMetadata) queueMetadata([...newItems, ...enriched], type);
         } catch (err) {
           console.error('[Scan] Fatal error:', err.message);
           io.emit('scan:error', { error: err.message });
@@ -145,6 +173,60 @@ module.exports = function scannerRoutes({ db, io, saveDB, rebuildIndex, scanDire
       console.error('[Scan] Fatal error:', err.message);
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // The scheduled music-video organizer moves files into Artist folders.
+  // Keep their existing IDs, artwork, watch state, and metadata by updating
+  // the stored paths rather than treating every moved video as a new item.
+  router.post('/musicVideos/reconcile-paths', (req, res) => {
+    const moves = req.body?.moves;
+    if (!Array.isArray(moves)) return res.status(400).json({ error: 'moves array required' });
+    if (moves.length > 5000) return res.status(400).json({ error: 'max 5000 moves' });
+
+    const roots = (db.libraryPaths?.musicVideos || []).map(root => path.resolve(root));
+    if (!roots.length) return res.status(400).json({ error: 'Music Videos library path is not configured' });
+    const underMusicVideos = filePath => {
+      try {
+        const resolved = path.resolve(filePath);
+        return roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
+      } catch { return false; }
+    };
+
+    const byOldPath = new Map();
+    let rejected = 0;
+    for (const move of moves) {
+      if (!move || typeof move.from !== 'string' || typeof move.to !== 'string' ||
+          !underMusicVideos(move.from) || !underMusicVideos(move.to)) {
+        rejected++;
+        continue;
+      }
+      byOldPath.set(move.from, move.to);
+    }
+
+    let updated = 0, missing = 0;
+    for (const item of db.musicVideos || []) {
+      const target = byOldPath.get(item.filePath);
+      if (!target) continue;
+      if (!fs.existsSync(target)) { missing++; continue; }
+      const oldPath = item.filePath;
+      item.filePath = target;
+      item.fileName = path.basename(target);
+      if (Array.isArray(item.versions)) {
+        item.versions = item.versions.map(version =>
+          version.filePath === oldPath
+            ? { ...version, filePath: target, fileName: path.basename(target) }
+            : version
+        );
+      }
+      updated++;
+    }
+
+    rebuildIndex('musicVideos');
+    saveDB(true, 'musicVideos');
+    if (invalidateCache) invalidateCache('library:musicVideos');
+    if (invalidateGroupedCache) invalidateGroupedCache();
+    io.emit('library:updated', { type: 'musicVideos', count: db.musicVideos.length });
+    res.json({ ok: true, updated, missing, rejected });
   });
 
   // ── Batch fetch ───────────────────────────────────────────────────────────────

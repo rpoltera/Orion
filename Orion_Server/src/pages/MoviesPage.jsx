@@ -225,6 +225,8 @@ export default function MoviesPage({ onSelect }) {
   const [selectedGenre, setSelectedGenre] = useState(null);
   const [selectedRating, setSelectedRating] = useState(null);
   const [selectedCollection, setSelectedCollection] = useState(null);
+  const [selectedCollectionItems, setSelectedCollectionItems] = useState([]);
+  const [collectionLoading, setCollectionLoading] = useState(false);
   const [collections, setCollections] = useState([]);
   const [genres, setGenres]           = useState([]);
 
@@ -239,20 +241,34 @@ export default function MoviesPage({ onSelect }) {
   }, [API]);
 
   useEffect(() => {
-    if (!allCols.length || !library.movies?.length) return;
-    const movieIdSet = new Set(library.movies.map(m => m.id));
-    const hasMovies = c => (c.mediaIds || []).some(id => movieIdSet.has(id));
-    const COLLECTION_TYPES = ['franchise','manual','network','holiday','birthday'];
-    const franchiseCols = allCols.filter(c => COLLECTION_TYPES.includes(c.type) && (c.mediaType === 'movies' || c.mediaType === 'mixed' || !c.mediaType) && hasMovies(c));
-    const genreCols = allCols.filter(c => c.type === 'auto-genre' && c.mediaType === 'movies' && hasMovies(c));
-    setCollections(franchiseCols.length > 0 ? franchiseCols : genreCols);
+    if (!allCols.length) return;
+    // Collections come from the server's database. Do not hide them while
+    // the paged movie library is still loading in the browser.
+    const movieCols = allCols.filter(c => c.mediaType === 'movies' || c.mediaType === 'mixed' || !c.mediaType);
+    const generatedCollections = movieCols.filter(c => c.type !== 'auto-genre');
+    const genreCols = movieCols.filter(c => c.type === 'auto-genre');
+    setCollections(generatedCollections.length > 0 ? generatedCollections : genreCols);
     const genreFiltered = genreCols.filter(c => !c.name.includes('/') && !c.name.includes('|') && (c.mediaIds||[]).length >= 5);
     const genreDeduped = Object.values(genreFiltered.reduce((acc, c) => {
       if (!acc[c.name] || c.mediaIds.length > acc[c.name].mediaIds.length) acc[c.name] = c;
       return acc;
     }, {}));
     setGenres(genreDeduped.sort((a,b) => b.mediaIds.length - a.mediaIds.length));
-  }, [allCols, library.movies]);
+  }, [allCols]);
+
+  const openCollection = async (collection) => {
+    setSelectedCollection(collection);
+    setCollectionLoading(true);
+    setSelectedCollectionItems([]);
+    try {
+      const data = await fetch(`${API}/collections/${collection.id}`).then(r => r.json());
+      setSelectedCollectionItems(data.items || []);
+    } catch {
+      setSelectedCollectionItems([]);
+    } finally {
+      setCollectionLoading(false);
+    }
+  };
 
   // Provider normalization map
   const CANONICAL = { 'Plex Channel':'Plex','Amazon Prime Video':'Prime Video','Amazon Prime Video with Ads':'Prime Video','Amazon Prime Video Free with Ads':'Prime Video','Disney Plus':'Disney+','DisneyNOW':'Disney+','Disney Channel':'Disney+','HBO Max':'Max','HBO':'Max','Peacock Premium':'Peacock','Peacock Premium Plus':'Peacock','Tubi TV':'Tubi','Paramount Plus':'Paramount+','Discovery Plus':'Discovery+','Discovery +':'Discovery+','Netflix basic with Ads':'Netflix','Britbox Apple TV Channel':'BritBox','AMC+':'AMC','Midnight Pulp Amazon Channel':'Prime Video','Dove Amazon Channel':'Prime Video','HBO Max Amazon Channel':'Max','Best tv ever Amazon Channel':'Prime Video' };
@@ -325,13 +341,6 @@ export default function MoviesPage({ onSelect }) {
       default:               return list;
     }
   }, [library.movies, selectedGenre, selectedRating, sortFilter]);
-
-  // Movies in a selected collection
-  const collectionMovies = useMemo(() => {
-    if (!selectedCollection) return [];
-    const ids = new Set(selectedCollection.mediaIds || []);
-    return (library.movies || []).filter(m => ids.has(m.id)).sort((a,b) => (a.year||0)-(b.year||0));
-  }, [selectedCollection, library.movies]);
 
   const [visibleCount, setVisibleCount] = React.useState(200);
 
@@ -478,17 +487,21 @@ export default function MoviesPage({ onSelect }) {
           {selectedCollection ? (
             <>
               <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:24 }}>
-                <button onClick={() => setSelectedCollection(null)} className="btn btn-secondary btn-sm">← Back</button>
+                <button onClick={() => { setSelectedCollection(null); setSelectedCollectionItems([]); }} className="btn btn-secondary btn-sm">← Back</button>
                 <div>
                   <div style={{ fontSize:20, fontWeight:700 }}>{selectedCollection.name}</div>
-                  <div style={{ fontSize:13, color:'var(--text-muted)' }}>{collectionMovies.length} movies</div>
+                  <div style={{ fontSize:13, color:'var(--text-muted)' }}>{collectionLoading ? 'Loading…' : `${selectedCollectionItems.length} movies`}</div>
                 </div>
               </div>
-              <div className="media-grid">
-                {collectionMovies.map(movie => (
-                  <MediaCard key={movie.id} item={movie} onClick={() => onSelect?.(movie, filteredMovies)} />
-                ))}
-              </div>
+              {collectionLoading ? (
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:200 }}><div style={{ width:32, height:32, border:'3px solid var(--bg-tertiary)', borderTop:'3px solid var(--accent)', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} /></div>
+              ) : (
+                <div className="media-grid">
+                  {selectedCollectionItems.map(movie => (
+                    <MediaCard key={movie.id} item={movie} onClick={() => onSelect?.(movie, selectedCollectionItems)} />
+                  ))}
+                </div>
+              )}
             </>
           ) : (
             <>
@@ -504,10 +517,10 @@ export default function MoviesPage({ onSelect }) {
                 </div>
               ) : (
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))', gap:16 }}>
-                  {collections.sort((a,b) => (b.mediaIds?.length||0)-(a.mediaIds?.length||0)).map(col => {
+                  {collections.slice().sort((a,b) => (b.mediaIds?.length||0)-(a.mediaIds?.length||0)).map(col => {
                     const img = resolveImg(col.thumbnail || col.poster);
                     return (
-                      <div key={col.id} onClick={() => setSelectedCollection(col)} style={{
+                      <div key={col.id} onClick={() => openCollection(col)} style={{
                         borderRadius:'var(--radius-lg)', overflow:'hidden', cursor:'pointer',
                         background:'var(--bg-card)', border:'1px solid var(--border)',
                         transition:'transform 0.2s, box-shadow 0.2s',

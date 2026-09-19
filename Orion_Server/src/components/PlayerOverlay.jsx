@@ -1,8 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import Hls from 'hls.js';
 import { useApp } from '../contexts/AppContext';
 import { X, Play, Pause, Volume2, VolumeX, Maximize2, Settings2, ChevronDown, SkipForward, BookOpen, Plus } from 'lucide-react';
 const NATIVE_FORMATS = ['.mp4', '.webm', '.m4v', '.mp3', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.flac'];
 const AUDIO_EXTS = new Set(['.mp3', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.flac']);
+const DIRECT_MP4_VIDEO_CODECS = new Set(['h264', 'avc', 'avc1', 'x264']);
+const DIRECT_MP4_AUDIO_CODECS = new Set(['aac', 'mp4a', 'mp4a-40-2']);
+const DIRECT_WEBM_VIDEO_CODECS = new Set(['vp8', 'vp9', 'av1']);
+const DIRECT_WEBM_AUDIO_CODECS = new Set(['opus', 'vorbis']);
 export default function PlayerOverlay() {
   const { nowPlaying, closePlayer, API, playNext, playPrev, queueIndex, mediaQueue } = useApp();
   console.log('[PlayerOverlay] MOUNTED, nowPlaying:', nowPlaying?.title);
@@ -49,8 +54,17 @@ export default function PlayerOverlay() {
   }, [_streamUrl]);
   const hideTimeout = useRef(null);
   const saveTimer   = useRef(null);
+  const clientLogTimes = useRef(new Map());
   const clog = useCallback((msg, data) => {
     console.log('[Player]', msg, data);
+    // Browser media events fire extremely often.  Sending every progress and
+    // canplay event back to Orion was enough to make playback debug traffic
+    // compete with the stream itself.  Keep server logging for real failures.
+    if (!/(ERROR|STALLED|ABORT|EMPTIED)/.test(msg)) return;
+    const now = Date.now();
+    const previous = clientLogTimes.current.get(msg) || 0;
+    if (now - previous < 15000) return;
+    clientLogTimes.current.set(msg, now);
     fetch(`${API}/debug/client`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -59,6 +73,20 @@ export default function PlayerOverlay() {
   }, [API]);
   const ext = nowPlaying?.ext?.toLowerCase() || '.mkv';
   const isNative = NATIVE_FORMATS.includes(ext);
+  const videoCodec = String(nowPlaying?.videoCodec || '').trim().toLowerCase();
+  const audioCodec = String(nowPlaying?.audioCodec || '').trim().toLowerCase();
+  // A .mp4 extension does not mean a browser can play it: HEVC, E-AC-3, DTS,
+  // and TrueHD are common in MP4/M4V files but Chromium rejects them.  Only
+  // direct-play formats that Chromium can actually decode; everything else
+  // goes through Orion's fast fragmented-MP4 transcode stream.
+  const isDirectPlayable = (
+    (['.mp4', '.m4v'].includes(ext)
+      && DIRECT_MP4_VIDEO_CODECS.has(videoCodec)
+      && DIRECT_MP4_AUDIO_CODECS.has(audioCodec))
+    || (ext === '.webm'
+      && DIRECT_WEBM_VIDEO_CODECS.has(videoCodec)
+      && DIRECT_WEBM_AUDIO_CODECS.has(audioCodec))
+  );
   const [hlsSessionId, setHlsSessionId] = React.useState(null);
   const [liveSessionId, setLiveSessionId] = React.useState(null);
   const hlsRef = React.useRef(null);
@@ -69,15 +97,18 @@ export default function PlayerOverlay() {
       return `${API}/stream/live/proxy?url=${encodeURIComponent(nowPlaying.url)}`;
     }
     const base = `${API}/stream?path=${encodeURIComponent(nowPlaying.filePath)}`;
-    return isNative ? base : `${base}&transcode=1&audio=${track}`;
-  }, [nowPlaying, API, isNative]);
+    // Direct-play only a browser-supported codec/container combination.
+    // Selecting another track needs the server stream so FFmpeg can map it.
+    return isDirectPlayable && track === 0 ? base : `${base}&transcode=1&audio=${track}`;
+  }, [nowPlaying, API, isDirectPlayable]);
   const startHLS = useCallback(async (filePath, track = 0, seekTime = 0) => {
     try {
-      const resp = await fetch(`${API}/hls/start`, {
+      const usePlaybackApi = Boolean(nowPlaying?.id);
+      const resp = await fetch(`${API}${usePlaybackApi ? '/playback/start' : '/hls/start'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          filePath,
+          ...(usePlaybackApi ? { mediaId: nowPlaying.id } : { filePath }),
           quality: 'source',
           audioTrack: track,
           seekTime,
@@ -116,49 +147,78 @@ export default function PlayerOverlay() {
       setStreamUrl(url);
       return;
     }
-    if (window.Hls && window.Hls.isSupported()) {
+    if (Hls.isSupported()) {
       if (hlsRef.current) { hlsRef.current.destroy(); }
-      const hls = new window.Hls({
-        maxBufferLength: 300,
-        maxMaxBufferLength: 1800,
-        maxBufferSize: 240 * 1000 * 1000,
+      const hls = new Hls({
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
+        maxBufferSize: 96 * 1000 * 1000,
         startLevel: -1,
         enableWorker: true,
         lowLatencyMode: false,
-        backBufferLength: 10,
-        liveSyncDuration: 12,
-        liveMaxLatencyDuration: 90,
-        manifestLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 10,
+        backBufferLength: 30,
+        manifestLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 4,
         manifestLoadingRetryDelay: 1000,
-        levelLoadingTimeOut: 20000,
-        fragLoadingTimeOut: 60000,
-        fragLoadingMaxRetry: 6,
+        levelLoadingTimeOut: 15000,
+        fragLoadingTimeOut: 20000,
+        fragLoadingMaxRetry: 4,
       });
-      hls.loadSource(playlistUrl);
-      hls.attachMedia(v);
-      hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      // Attach first, then explicitly load and start.  Relying on hls.js's
+      // auto-start left Chromium fetching only the manifest for some MKV
+      // sessions, which looked like an endless player spinner.
+      let hlsReadyTimer = null;
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+        hls.loadSource(playlistUrl);
+        hls.startLoad(-1);
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (hlsReadyTimer) clearTimeout(hlsReadyTimer);
+        hls.startLoad(-1);
         v.play().catch(() => {});
         setLoading(false);
         setPlaying(true);
       });
-      hls.on(window.Hls.Events.ERROR, (event, data) => {
+      hls.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
+          if (hlsReadyTimer) clearTimeout(hlsReadyTimer);
+          clog('ERROR HLS fatal', { type: data.type, detail: data.details });
           console.error('[HLS] Fatal error:', data.type, data.details);
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hls.startLoad();
+            return;
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+            return;
+          }
           hls.destroy();
           hlsRef.current = null;
-          const url = buildStreamUrl(track) + (seekTime > 0 ? `&seek=${Math.floor(seekTime)}` : '');
-          setStreamUrl(url);
+          setError(`HLS playback failed: ${data.details || data.type}`);
+          setLoading(false);
         }
       });
       hlsRef.current = hls;
+      hls.attachMedia(v);
+      hlsReadyTimer = setTimeout(() => {
+        if (hlsRef.current !== hls) return;
+        clog('ERROR HLS manifest timeout', { playlistUrl });
+        hls.destroy();
+        hlsRef.current = null;
+        setError('HLS stream did not become ready.');
+        setLoading(false);
+      }, 15000);
+      // Keep the URL in React state so the regular player event handlers
+      // (progress, resume, controls) stay active.  The effect below knows not
+      // to overwrite hls.js's blob URL.
+      setStreamUrl(playlistUrl);
     } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
       setStreamUrl(playlistUrl);
     } else {
       const url = buildStreamUrl(track) + (seekTime > 0 ? `&seek=${Math.floor(seekTime)}` : '');
       setStreamUrl(url);
     }
-  }, [startHLS, buildStreamUrl, videoRef]);
+  }, [startHLS, buildStreamUrl]);
   React.useEffect(() => {
     return () => {
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
@@ -172,6 +232,11 @@ export default function PlayerOverlay() {
   }, [hlsSessionId, liveSessionId, API]);
   useEffect(() => {
     if (!nowPlaying) return;
+    if (hlsRef.current) { try { hlsRef.current.destroy(); } catch {} hlsRef.current = null; }
+    if (hlsSessionId) {
+      fetch(`${API}/hls/${hlsSessionId}`, { method: 'DELETE' }).catch(() => {});
+      setHlsSessionId(null);
+    }
     setError(null); setLoading(true); setPlaying(false);
     setProgress(0); setCurrentTime(0); setDuration(0); setBuffered(0);
     seekOffset.current = 0;
@@ -189,7 +254,11 @@ export default function PlayerOverlay() {
     const url0 = buildStreamUrl(0);
 
     clog('setStreamUrl called', { url: url0?.slice(-80) });
-    setStreamUrl(nowPlaying.filePath && !nowPlaying.url ? buildStreamUrl(0) : url0);
+    // Direct-play only browser-compatible files.  Transcodes use HLS, which
+    // gives Chromium real segments instead of an indefinite fMP4 response.
+    // This is the reliable path for HEVC, MKV, unsupported audio, and Roku.
+    if (isDirectPlayable || !nowPlaying.filePath) setStreamUrl(url0);
+    else loadHLS(nowPlaying.filePath, 0);
     if (nowPlaying.filePath) {
       if (nowPlaying.runtime > 0) setServerDuration(nowPlaying.runtime * 60);
       setTimeout(() => {
@@ -216,7 +285,7 @@ export default function PlayerOverlay() {
           }).catch(() => {});
       }
     }
-  }, [nowPlaying]);
+  }, [nowPlaying, API, ext, isDirectPlayable, loadHLS]);
   useEffect(() => {
     const match = streamUrl?.match(/[&?]seek=(\d+)/);
     seekOffset.current = match ? parseInt(match[1]) : 0;
@@ -239,7 +308,11 @@ export default function PlayerOverlay() {
       return;
     }
 
-    if (v.src !== streamUrl) {
+    const isManagedHls = /\/hls\/[^/]+\/index\.m3u8(?:\?|$)/.test(streamUrl);
+
+    // hls.js owns media.src (a blob: URL).  Replacing it with the playlist URL
+    // here would tear down the source buffer immediately after it starts.
+    if (!isManagedHls && v.src !== streamUrl) {
       v.src = streamUrl;
       v.load();
     }
@@ -331,7 +404,7 @@ export default function PlayerOverlay() {
       waiting:   () => {
         setLoading(true);
         clearTimeout(stallTimerRef.current);
-        if (!isNative) {
+        if (!isNative && !isManagedHls) {
           stallTimerRef.current = setTimeout(() => {
             const t = (seekOffset.current + (videoRef.current?.currentTime || 0));
             if (t > 2 && autoRetryCount.current < 3) {
@@ -346,6 +419,7 @@ export default function PlayerOverlay() {
       },
       playing:   () => setLoading(false),
       error:     () => {
+        if (isManagedHls) return; // fatal HLS errors are handled by hls.js above
         const code = v.error?.code;
         const msg  = v.error?.message || '';
         const msgs = { 1:'Aborted', 2:'Network error — is the server running?', 3:'Decode error', 4:'Format not supported' };
@@ -492,8 +566,14 @@ export default function PlayerOverlay() {
   const switchAudio = (idx) => {
     setAudioTrack(idx); setLoading(true); setError(null);
     const pos = currentTime || 0;
+    if (!isDirectPlayable && nowPlaying?.filePath) {
+      loadHLS(nowPlaying.filePath, idx, pos);
+      setShowSettings(false);
+      return;
+    }
     const url = buildStreamUrl(idx) + (pos > 0 ? `&seek=${Math.floor(pos)}` : '');
-    setStreamUrl(url); setShowSettings(false);
+    setStreamUrl(url);
+    setShowSettings(false);
   };
   const addChapter = () => {
     const t = videoRef.current?.currentTime || 0;
@@ -651,7 +731,7 @@ export default function PlayerOverlay() {
         <div>
           <div className="player-title">{nowPlaying?.title || 'Now Playing'}</div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2, display: 'flex', gap: 10 }}>
-            <span>{ext.replace('.','').toUpperCase()} • {isNative ? '▶ Direct' : '⚡ Transcode'}</span>
+            <span>{ext.replace('.','').toUpperCase()} • {isDirectPlayable ? '▶ Direct' : '⚡ Transcode'}</span>
             {audioTracks.length > 1 && <span style={{ color:'var(--accent)' }}>🎵 {audioTracks.length} audio</span>}
             {allChapters.length > 0 && <span style={{ color:'var(--accent)' }}>📖 {allChapters.length} chapters</span>}
           </div>
@@ -743,15 +823,13 @@ export default function PlayerOverlay() {
       )}
       <div className="player-video-wrap" style={{ position:'relative', cursor:'pointer' }} onClick={togglePlay}>
         {/* Video element — src set imperatively via useEffect above, NO <source> child */}
-        {streamUrl && (
-          <video
-            ref={videoRef}
-            muted={muted}
-            preload="auto"
-            x-webkit-airplay="allow"
-            style={{ width:'100%', height:'100%', background:'#000' }}
-          />
-        )}
+        <video
+          ref={videoRef}
+          muted={muted}
+          preload="auto"
+          x-webkit-airplay="allow"
+          style={{ width:'100%', height:'100%', background:'#000' }}
+        />
         {showSkipIntro && (
           <button onClick={e => { e.stopPropagation(); seekTo(introEnd); setShowSkipIntro(false); }}
             style={{ position:'absolute', bottom:24, right:24, background:'rgba(0,0,0,0.75)', border:'2px solid white', color:'white', padding:'10px 20px', borderRadius:'var(--radius)', cursor:'pointer', fontSize:14, fontWeight:700, display:'flex', alignItems:'center', gap:8, zIndex:10 }}>
@@ -781,9 +859,15 @@ export default function PlayerOverlay() {
             <div style={{ fontSize:16, fontWeight:600, color:'#ef4444' }}>Playback Failed</div>
             <div style={{ fontSize:13, color:'var(--text-muted)', textAlign:'center' }}>{error}</div>
             <div style={{ fontSize:12, color:'var(--text-secondary)', textAlign:'center', background:'var(--bg-card)', padding:'10px 16px', borderRadius:'var(--radius)', border:'1px solid var(--border)' }}>
-              Make sure <strong>npm run server</strong> is running.
+              Orion is running. Retry once; if it fails again, check the Orion service log.
             </div>
-            <button className="btn btn-secondary btn-sm" onClick={() => { setError(null); setLoading(true); setStreamUrl(''); setTimeout(() => setStreamUrl(buildStreamUrl(audioTrack)), 100); }}>Retry</button>
+            <button className="btn btn-secondary btn-sm" onClick={() => {
+              setError(null); setLoading(true); setStreamUrl('');
+              setTimeout(() => {
+                if (!isDirectPlayable && nowPlaying?.filePath) loadHLS(nowPlaying.filePath, audioTrack);
+                else setStreamUrl(buildStreamUrl(audioTrack));
+              }, 100);
+            }}>Retry</button>
           </div>
         )}
         {!playing && !loading && !error && (

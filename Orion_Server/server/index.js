@@ -26,9 +26,11 @@ const { loadConfig, getConfig, getSettings, updateConfig, updateSettings, saveCo
 const logger   = require('./logger');
 const OrionDB  = require('./database');
 const HLS      = require('./hls');
+const { PlaybackCoordinator } = require('./services/playback-coordinator');
+const { buildAutoCollections } = require('./services/autocollections');
 const { db, loadDB, saveDB, rebuildIndex, findById, _idx } = require('./db');
 const { scanDirectory, deduplicateMedia, getQualityScore, isTrailerOrExtra } = require('./services/scanner');
-const { fetchMovieMeta, fetchTVMeta, decodeHtmlEntities, axiosPool } = require('./services/metadata');
+const { fetchMovieMeta, fetchTVMeta, fetchMusicVideoMeta, decodeHtmlEntities, axiosPool } = require('./services/metadata');
 
 const app    = express();
 const server = http.createServer(app);
@@ -73,6 +75,16 @@ const _detailCache  = new Map();
 const _versionsMap  = new Map();
 const _trailerOverrides = {};
 const _blockedVideoIds  = new Set();
+
+// One encoder admission controller is shared by library HLS and StreamForge.
+// It protects the live-TV standby GPU from VOD work without hard-coding a
+// particular card model or count.
+const playbackCoordinator = new PlaybackCoordinator({
+  getGpuCount: () => {
+    try { return require('./capabilities')().gpuCount || 1; } catch (_) { return 1; }
+  },
+  getConfig,
+});
 
 try { if (fs.existsSync(PATHS.TRAILER_OVERRIDES_FILE)) Object.assign(_trailerOverrides, JSON.parse(fs.readFileSync(PATHS.TRAILER_OVERRIDES_FILE, 'utf8'))); } catch {}
 try { if (fs.existsSync(PATHS.BLOCKED_VIDEO_IDS_FILE)) JSON.parse(fs.readFileSync(PATHS.BLOCKED_VIDEO_IDS_FILE, 'utf8')).forEach(id => _blockedVideoIds.add(id)); } catch {}
@@ -152,19 +164,45 @@ const ALLOWED_IMAGE_EXT = new Set(['.jpg','.jpeg','.png','.gif','.webp','.bmp'])
 // Hardware detection
 async function detectHardwareAccel() {
   if (cachedEncoder) return cachedEncoder;
-  // NVIDIA short-circuit (Pascal P40 prefers NVENC, AMF would be wrong)
+
+  const config = getConfig();
+  const configuredHardware = String(config.transcoding?.hardware || 'auto').toLowerCase();
+
+  // Respect an explicit CPU choice.  This is also the safe escape hatch for
+  // containers where nvidia-smi works but CUDA/NVENC itself is unavailable.
+  if (configuredHardware === 'cpu') {
+    cachedEncoder = 'libx264';
+    console.log('[Server] Hardware encoder: libx264 (CPU selected in settings)');
+    return cachedEncoder;
+  }
+
+  // Seeing /dev/nvidia0 only proves that the device node was mounted.  It
+  // does not prove CUDA or NVENC can initialize inside an LXC.  Verify the
+  // encoder with a one-frame local test before sending real playback to it.
   try {
     if (require('fs').existsSync('/dev/nvidia0')) {
+      const { execFileSync } = require('child_process');
+      const ffmpegPath = process.platform !== 'win32' ? '/usr/bin/ffmpeg' : (ffmpegStatic || 'ffmpeg');
+      execFileSync(ffmpegPath, [
+        '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'color=c=black:s=64x64:r=1',
+        '-frames:v', '1', '-c:v', 'h264_nvenc', '-f', 'null', '-'
+      ], { timeout: 8000, stdio: 'pipe' });
       cachedEncoder = 'h264_nvenc';
-      console.log('[Server] Hardware encoder: h264_nvenc (NVIDIA detected via /dev/nvidia0)');
-      return 'h264_nvenc';
+      console.log('[Server] Hardware encoder: h264_nvenc (CUDA/NVENC test passed)');
+      return cachedEncoder;
     }
-  } catch (e) {}
+  } catch (error) {
+    const detail = String(error.stderr || error.message || 'unknown error')
+      .replace(/\s+/g, ' ').slice(0, 180);
+    cachedEncoder = 'libx264';
+    console.warn(`[Server] CUDA/NVENC test failed; using libx264: ${detail}`);
+    return cachedEncoder;
+  }
   return new Promise((resolve) => {
     ffmpeg.getAvailableEncoders((err, encoders) => {
       if (err) { cachedEncoder = 'libx264'; return resolve('libx264'); }
-      const config = getConfig();
-      const hw = (config.transcoding?.hardware || 'auto').toLowerCase();
+      const hw = configuredHardware;
       const GPU_ENCODERS = {
         amf:          ['h264_amf',           'hevc_amf'],
         nvenc:        ['h264_nvenc',         'hevc_nvenc'],
@@ -207,9 +245,9 @@ async function ensureYtDlp() {
 }
 
 // Metadata queue
-function queueMetadata(items, type) {
-  const toQueue = (items||[]).filter(i => !i.metadataFetched && (i.title || i.seriesTitle));
-  metadataQueue.push(...toQueue.map(item => ({ item, type })));
+function queueMetadata(items, type, { force = false } = {}) {
+  const toQueue = (items||[]).filter(i => (force || !i.metadataFetched) && (i.title || i.seriesTitle));
+  metadataQueue.push(...toQueue.map(item => ({ item, type, force })));
   if (!_isProcessingQueue) processMetadataQueue();
 }
 
@@ -218,19 +256,25 @@ async function processMetadataQueue() {
   _isProcessingQueue = true;
   let consecutive404 = 0;
   while (metadataQueue.length) {
-    const { item, type } = metadataQueue.shift();
-    if (!item || item.metadataFetched) continue;
+    const { item, type, force } = metadataQueue.shift();
+    if (!item || (item.metadataFetched && !force)) continue;
     try {
       const config = getConfig();
       const meta = (type === 'movies') ? await fetchMovieMeta(item.title, item.year, config)
                  : (type === 'tvShows') ? await fetchTVMeta(item.seriesTitle || item.title, config)
+                 : (type === 'musicVideos') ? await fetchMusicVideoMeta(item.fileName || item.title, config)
                  : null;
       if (meta) {
         // Normalize: metadata services return 'poster', DB/frontend expect 'thumbnail'
         if (meta.poster && !meta.thumbnail) meta.thumbnail = meta.poster;
+        const existingArtistImage = item.artistImage;
         Object.assign(item, { ...meta, metadataFetched: true });
+        // A failed remote lookup must not erase a portrait that was already found.
+        if (type === 'musicVideos' && !item.artistImage && existingArtistImage) {
+          item.artistImage = existingArtistImage;
+        }
         saveDB(false, type);
-        io.emit('metadata:updated', { id: item.id, type });
+        io.emit('metadata:updated', { id: item.id, type, item: { ...item } });
         if (type === 'tvShows') invalidateGroupedCache();
         consecutive404 = 0;
       } else {
@@ -244,7 +288,10 @@ async function processMetadataQueue() {
       if (!e.message?.includes('404')) console.error('[Metadata] Queue error:', e.message);
       item.metadataFetched = true;
     }
-    await new Promise(r => setTimeout(r, 100));
+    // MusicBrainz asks clients to stay at or below one request per second.
+    // Music-video metadata performs a MusicBrainz lookup, so pace that queue
+    // instead of getting rate-limited midway through a library refresh.
+    await new Promise(r => setTimeout(r, type === 'musicVideos' ? 1100 : 100));
   }
   _isProcessingQueue = false;
 }
@@ -278,6 +325,7 @@ const deps = () => ({
   getEncoder: () => cachedEncoder,
   getConfig, getSettings, updateConfig, updateSettings, saveConfig,
   HLS, ffmpegStatic, ytdlpReady, ensureYtDlp,
+  playbackCoordinator,
   metadataQueue, queueMetadata, scanDirectory, deduplicateMedia,
   buildVersionsMap, invalidateGroupedCache,
   invalidateCache: () => {}, detectHardwareAccel,
@@ -348,6 +396,16 @@ async function start() {
   loadConfig();
   await loadDB();
 
+  // The HLS route existed but its engine was never initialized, leaving the
+  // player to fall back to one-off direct FFmpeg streams.  Use the system
+  // FFmpeg on Linux so the current hardware encoder remains available.
+  HLS.init(
+    PATHS.DATA_DIR,
+    process.platform !== 'win32' ? '/usr/bin/ffmpeg' : 'ffmpeg',
+    { get value() { return cachedEncoder || 'libx264'; } },
+    playbackCoordinator,
+  );
+
   // ── API authentication (fix-05) ────────────────────────────────
   // Registered before any /api route so it covers both the `api`
   // router and streamforge's directly-mounted /api/sf/* handlers.
@@ -369,11 +427,57 @@ async function start() {
   try { api.use('/collections', require('./routes/collections')(deps())); } catch(e) { console.error('[Routes] collections failed:', e.message); }
   try { _libraryRouteRef = require('./routes/library')({ ...deps(), _trailerOverrides }); api.use('/library', _libraryRouteRef); } catch(e) { console.error('[Routes] library failed:', e.message); }
   try { api.use('/library', require('./routes/scanner')(deps())); } catch(e) { console.error('[Routes] scanner failed:', e.message); }
+
+  let autoCollectionStatus = { running: false, phase: 'idle', done: 0, total: 0, current: '', lastResult: null, error: null };
+  let autoCollectionPromise = null;
+  const setAutoCollectionStatus = (patch) => {
+    autoCollectionStatus = { ...autoCollectionStatus, ...patch };
+    io.emit('autocollections:status', autoCollectionStatus);
+  };
+  const runAutoCollectionBuild = async (source = 'manual') => {
+    if (autoCollectionPromise) return autoCollectionPromise;
+    setAutoCollectionStatus({ running: true, phase: 'starting', done: 0, total: 11, current: 'Preparing collection builder', error: null });
+    autoCollectionPromise = (async () => {
+      try {
+        const result = await buildAutoCollections({
+          db, saveDB, getConfig,
+          onProgress: progress => setAutoCollectionStatus({ ...progress, running: true }),
+        });
+        const currentConfig = getConfig().autocollections || {};
+        updateConfig({ autocollections: { ...currentConfig, lastRun: new Date().toISOString(), lastResult: result } });
+        setAutoCollectionStatus({ running: false, phase: 'complete', done: 11, total: 11, current: `Built ${result.total} collections`, lastResult: result, error: null });
+        io.emit('collections:rebuilt', result);
+        console.log(`[Collections] ${source}: built ${result.total} collections (${result.categories} genre categories)`);
+        return result;
+      } catch (error) {
+        const message = error?.message || String(error);
+        setAutoCollectionStatus({ running: false, phase: 'error', current: message, error: message });
+        console.error('[Collections] build failed:', message);
+        throw error;
+      } finally {
+        autoCollectionPromise = null;
+      }
+    })();
+    return autoCollectionPromise;
+  };
+
   // ── runTask — handles all scheduled task types ───────────────────────────
   const runTask = async (task) => {
     const type = (task.type || task.name || '').toLowerCase();
+    const storedTask = (db.scheduledTasks || []).find(t => t.id === task.id);
+    if (!storedTask) throw new Error(`Scheduled task no longer exists: ${task.id}`);
+
+    // Record the start before any work begins.  A scan or optimization can take
+    // longer than the browser request, but the Scheduler page must still show
+    // that it actually launched.
+    storedTask.lastRun = new Date().toISOString();
+    storedTask.lastStatus = 'running';
+    delete storedTask.lastError;
+    saveDB(true, 'scheduledTasks');
+    io.emit('scheduler:taskStart', { id: storedTask.id, name: storedTask.name });
     console.log(`[Scheduler] Running task: ${task.name} (${type})`);
 
+    try {
     if (type.includes('normalize')) {
       // Queue media scheduled in the configured window, then let the
       // Normalizer drain it. Conversion itself is rate-limited by the
@@ -433,23 +537,16 @@ async function start() {
         } catch(e) { console.error(`[Scheduler] scan ${libType} error:`, e.message); }
       }
 
-    } else if (type.includes('metadata') || type.includes('refresh')) {
+    } else if ((type.includes('metadata') || type.includes('refresh')) && !type.includes('musicvideo')) {
       // Re-queue all items missing metadata
       for (const libType of ['movies','tvShows','music','musicVideos']) {
         const missing = (db[libType]||[]).filter(i => !i.metadataFetched || !i.thumbnail);
-        if (missing.length) queueMetadata(missing, libType);
+        if (missing.length) queueMetadata(missing, libType, { force: true });
       }
 
     } else if (type.includes('collection')) {
-      // Rebuild auto collections
-      try {
-        const r = require('./routes/collections');
-        // Trigger rebuild via internal call
-        io.emit('collections:rebuilding');
-        const { buildAutoCollections } = require('./routes/collections');
-        if (buildAutoCollections) await buildAutoCollections(db, saveDB);
-        io.emit('collections:rebuilt');
-      } catch(e) { console.error('[Scheduler] collections error:', e.message); }
+      io.emit('collections:rebuilding');
+      storedTask.lastResult = await runAutoCollectionBuild('scheduler');
 
     } else if (type.includes('backup')) {
       const OrionDB = require('./database');
@@ -543,6 +640,45 @@ async function start() {
     } else if (type.includes('clearlog') || type.includes('clear debug')) {
       console.log('[Scheduler] Debug log cleared');
 
+    } else if (type.includes('checkupdate') || type.includes('check update')) {
+      const https = require('https');
+      const result = await new Promise((resolve, reject) => {
+        const request = https.get(
+          'https://api.github.com/repos/rpoltera/Orion/commits/main',
+          { headers: { 'User-Agent': 'Orion', 'Accept': 'application/vnd.github.v3+json' }, timeout: 20000 },
+          response => {
+            let body = '';
+            response.on('data', chunk => { body += chunk; });
+            response.on('end', () => {
+              if (response.statusCode < 200 || response.statusCode >= 300) {
+                return reject(new Error(`Update check returned HTTP ${response.statusCode}`));
+              }
+              try {
+                const commit = JSON.parse(body);
+                resolve({
+                  latestCommit: commit?.sha?.slice(0, 7) || 'unknown',
+                  message: commit?.commit?.message?.split('\n')[0] || '',
+                  date: commit?.commit?.author?.date || null,
+                });
+              } catch (e) { reject(new Error(`Could not read update result: ${e.message}`)); }
+            });
+          }
+        );
+        request.on('timeout', () => request.destroy(new Error('Update check timed out')));
+        request.on('error', reject);
+      });
+      storedTask.lastResult = result;
+      console.log(`[Scheduler] Update check completed: ${result.latestCommit}`);
+
+    } else if (type.includes('trailer')) {
+      // The trailer worker is an API route; call it internally with the same
+      // authenticated path used by the browser.
+      const response = await fetch('http://127.0.0.1:3001/api/tv-trailers/download-all', {
+        method: 'POST', headers: { 'X-Orion-Internal': '1' },
+      });
+      if (!response.ok) throw new Error(`Trailer task returned HTTP ${response.status}`);
+      storedTask.lastResult = await response.json().catch(() => ({ status: 'started' }));
+
     } else if (type.includes('thumbnail')) {
       // Trigger thumbnail generation for items without one
       io.emit('thumbnails:generating');
@@ -563,16 +699,30 @@ async function start() {
 
     } else if (type.includes('musicvideo') || type.includes('music video')) {
       // Queue music video metadata
-      const missing = (db.musicVideos||[]).filter(i => !i.metadataFetched);
-      if (missing.length) queueMetadata(missing, 'musicVideos');
+      const hasLastFm = Boolean(getConfig().lastfmKey);
+      const missing = (db.musicVideos||[]).filter(i =>
+        !i.metadataFetched || !i.thumbnail || (hasLastFm && !i.artistImage)
+      );
+      if (missing.length) queueMetadata(missing, 'musicVideos', { force: true });
 
     } else {
-      console.log(`[Scheduler] Unknown task type: ${type}`);
+      throw new Error(`No handler is configured for task type "${type}"`);
     }
 
-    // Update lastRun
-    const t = (db.scheduledTasks||[]).find(t => t.id === task.id);
-    if (t) { t.lastRun = new Date().toISOString(); saveDB(false, 'scheduledTasks'); }
+      storedTask.lastRun = new Date().toISOString();
+      storedTask.lastStatus = 'success';
+      delete storedTask.lastError;
+      saveDB(true, 'scheduledTasks');
+      io.emit('scheduler:taskDone', { id: storedTask.id, name: storedTask.name, status: 'success' });
+    } catch (error) {
+      storedTask.lastRun = new Date().toISOString();
+      storedTask.lastStatus = 'error';
+      storedTask.lastError = error?.message || String(error);
+      saveDB(true, 'scheduledTasks');
+      io.emit('scheduler:taskDone', { id: storedTask.id, name: storedTask.name, status: 'error', error: storedTask.lastError });
+      console.error(`[Scheduler] ${task.name} failed:`, storedTask.lastError);
+      throw error;
+    }
   };
 
   try { api.use('/', require('./routes/scheduler')({ ...deps(), runTask })); } catch(e) { console.error('[Routes] scheduler failed:', e.message); }
@@ -631,6 +781,7 @@ async function start() {
         getEncoder:  () => cachedEncoder || 'libx264',
         DATA_DIR:    sfDataDir,
         orionDb:     db,
+        playbackCoordinator,
       });
       console.log(`[StreamForge] Mounted at /api/sf — data dir: ${sfDataDir}`);
     }
@@ -1262,15 +1413,22 @@ password=${password||''}
     res.json({ ok: true, removed });
   });
 
-  // Autocollections stubs
+  // Auto collections
   api.get('/autocollections/config', (_, res) => res.json(getConfig().autocollections || {}));
   api.put('/autocollections/config', (req, res) => { updateConfig({ autocollections: { ...(getConfig().autocollections||{}), ...req.body } }); res.json(getConfig().autocollections); });
-  api.post('/autocollections/run', (_, res) => res.json({ ok: true, status: 'started' }));
-  api.get('/autocollections/status', (_, res) => res.json({ running: false, phase: 'idle', done: 0, total: 0, current: '' }));
-  api.post('/autocollections/franchises', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.post('/autocollections/run', (_, res) => {
+    runAutoCollectionBuild('manual').catch(() => {});
+    res.status(202).json({ ok: true, status: 'started' });
+  });
+  api.get('/autocollections/status', (_, res) => res.json(autoCollectionStatus));
+  api.post('/autocollections/franchises', (_, res) => {
+    runAutoCollectionBuild('franchises').catch(() => {});
+    res.status(202).json({ ok: true, status: 'started' });
+  });
   api.post('/autocollections/refresh-thumbnails', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
   api.get('/autocollections/streaming/status', (_, res) => res.json({ running: false, done: 0, total: 0 }));
   api.post('/autocollections/streaming/run', (_, res) => res.status(501).json({ ok: false, error: 'Not implemented' }));
+  api.get('/categories', (_, res) => res.json({ categories: db.categories || [] }));
 
   // TMDB search proxy
   api.get('/tmdb/search', async (req, res) => {

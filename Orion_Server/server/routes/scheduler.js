@@ -13,7 +13,10 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
   const router = express.Router();
 
   // ── Scheduler ─────────────────────────────────────────────────────────────────
-  router.get('/scheduler', (_, res) => res.json({ tasks: db.scheduledTasks || [] }));
+  router.get('/scheduler', (_, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ tasks: db.scheduledTasks || [] });
+  });
 
   router.post('/scheduler', (req, res) => {
     const tasks = Array.isArray(req.body) ? req.body : [req.body];
@@ -65,66 +68,15 @@ module.exports = function schedulerRoutes({ db, io, saveDB, runTask, PATHS }) {
   router.post('/scheduler/:id/run', async (req, res) => {
     const task = (db.scheduledTasks||[]).find(t => t.id === req.params.id);
     if (!task) return res.status(404).json({ error: 'Task not found' });
-    task.lastRun = new Date().toISOString();
-    saveDB(false, 'scheduledTasks');
-    res.json({ ok: true, message: `${task.name} started` });
+    if (!runTask) return res.status(503).json({ error: 'Scheduler worker is unavailable' });
+    if (task.lastStatus === 'running') return res.status(409).json({ error: `${task.name} is already running` });
 
-    // Dispatch task by type/name
-    const type = (task.type || task.name || '').toLowerCase();
-    if (type.includes('update') || type.includes('check for update')) {
-      const https = require('https');
-      const fsSync = require('fs');
-      const pathMod = require('path');
-      const { exec } = require('child_process');
-      const shaFile = pathMod.join(__dirname, '..', '..', '..', '.git', 'refs', 'heads', 'main');
-      const currentSha = fsSync.existsSync(shaFile)
-        ? fsSync.readFileSync(shaFile, 'utf8').trim().slice(0,7)
-        : 'unknown';
-      https.get('https://api.github.com/repos/rpoltera/Orion/commits/main',
-        { headers: { 'User-Agent': 'Orion', 'Accept': 'application/vnd.github.v3+json' } },
-        (r) => {
-          let d = ''; r.on('data', c => d += c);
-          r.on('end', () => {
-            try {
-              const commit = JSON.parse(d);
-              const latest = commit?.sha?.slice(0,7) || 'unknown';
-              const msg = commit?.commit?.message?.split('\n')[0] || '';
-              const date = commit?.commit?.author?.date || '';
-              const upToDate = currentSha !== 'unknown' && currentSha === latest;
-              console.log(`[Scheduler] Update check — installed: ${currentSha}, latest: ${latest} — ${upToDate ? 'UP TO DATE' : 'UPDATE AVAILABLE: ' + msg}`);
-              const t = (db.scheduledTasks||[]).find(t => t.id === task.id);
-              if (t) {
-                t.lastResult = { currentSha, latestCommit: latest, message: msg, date, upToDate };
-                t.lastRun = new Date().toISOString();
-                saveDB(true, 'scheduledTasks');
-              }
-              if (io) io.emit('update:checked', { currentSha, latestCommit: latest, message: msg, date, upToDate });
-              if (!upToDate) {
-                console.log('[Scheduler] Update available — running orion-update...');
-                if (io) io.emit('update:installing', { message: msg, latestCommit: latest });
-                // Use systemd-run to launch as a completely independent process
-                const { spawn } = require('child_process');
-                const child = spawn('sudo', [
-                  'systemd-run', '--unit=orion-update',
-                  '--description=Orion Auto Update',
-                  '/usr/local/bin/orion-update'
-                ], {
-                  detached: true,
-                  stdio: 'ignore'
-                });
-                child.unref();
-                console.log('[Scheduler] orion-update launched via systemd-run');
-              }
-            } catch(e) { console.error('[Scheduler] update check parse error:', e.message); }
-          });
-        }).on('error', e => console.error('[Scheduler] update check error:', e.message));
-    } else if (type.includes('trailer') || type.includes('tv-trailer')) {
-      fetch('http://localhost:3001/api/tv-trailers/download-all', { method: 'POST' }).catch(e => {
-        console.error('[Scheduler] trailer download-all failed:', e.message);
-      });
-    } else if (runTask) {
-      runTask(task);
-    }
+    // runTask records the running state synchronously before its first await.
+    // Do not wait for a long scan before replying to the browser.
+    Promise.resolve(runTask(task)).catch(error => {
+      console.error(`[Scheduler] Background task failed: ${task.name}:`, error?.message || error);
+    });
+    res.status(202).json({ ok: true, message: `${task.name} started`, task });
   });
 
   // ── Custom Libraries ──────────────────────────────────────────────────────────

@@ -6,7 +6,11 @@ import { FolderOpen, Play, ChevronLeft, Star, Tv } from 'lucide-react';
 import MediaCard from '../components/MediaCard';
 import ScrollableGrid from '../components/ScrollableGrid';
 
-const BASE = 'http://localhost:3001';
+// In a browser, localhost is the viewer's computer—not the Orion server.
+// Build every local API/image URL from the page that served Orion instead.
+const BASE = (typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol))
+  ? window.location.origin
+  : 'http://localhost:3001';
 const resolveImg = (url) => {
   if (!url) return null;
   if (url.startsWith('http')) return url;
@@ -89,7 +93,6 @@ function EpisodeRow({ ep, index, onSelect }) {
   const [screenshotErr, setScreenshotErr] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const epNum = (ep.filePath || ep.fileName || '').match(/[Ee](\d+)/)?.[1];
-  const BASE = 'http://localhost:3001';
   const screenshotUrl = !screenshotErr ? `${BASE}/api/library/item/${ep.id}/screenshot` : null;
 
   return (
@@ -155,7 +158,7 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
 
   React.useEffect(() => {
     if (!showData.seasons || showData.seasons.length === 0) {
-      fetch(`http://localhost:3001/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}`)
+      fetch(`${BASE}/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}`)
         .then(r => r.json())
         .then(d => {
           const eps = d.items || [];
@@ -180,7 +183,10 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
 
   const [seasonEpisodes, setSeasonEpisodes] = React.useState({});
   const [activeSeason, setActiveSeason] = useState(null);
-  const [activeTab, setActiveTab] = useState(null);
+  // A show is not useful without its episodes.  Keep Seasons open when a
+  // detail page first opens, rather than making the user discover a collapsed
+  // drawer at the bottom of the screen.
+  const [activeTab, setActiveTab] = useState('episodes');
   const [tvData, setTvData] = useState(null);
   const [cast, setCast] = useState(showData.cast || []);
   const [showEdit, setShowEdit] = useState(false);
@@ -190,11 +196,11 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const API = 'http://localhost:3001/api';
+  const API = `${BASE}/api`;
 
   const loadSeasonEpisodes = (seasonNum) => {
     if (seasonEpisodes[seasonNum]) return;
-    fetch(`http://localhost:3001/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}?season=${seasonNum}`)
+    fetch(`${BASE}/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}?season=${seasonNum}`)
       .then(r => r.json())
       .then(d => {
         const eps = (d.items || []).filter(ep => (ep.seasonNum || 1) === seasonNum);
@@ -240,13 +246,13 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
 
       if (overrideId) {
         if (cancelled) return;
-        const url = `http://localhost:3001/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + overrideId)}&showName=${encodeURIComponent(show.showName)}&t=${Date.now()}`;
+        const url = `${BASE}/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + overrideId)}&showName=${encodeURIComponent(show.showName)}&t=${Date.now()}`;
         setTrailerUrls([url]);
         return;
       }
 
       const getTrailers = (tmdbId) => {
-        fetch(`http://localhost:3001/api/tmdb/tv-videos/${tmdbId}`)
+        fetch(`${BASE}/api/tmdb/tv-videos/${tmdbId}`)
           .then(r => r.json())
           .then(d => {
             if (cancelled) return;
@@ -254,7 +260,7 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
             if (!videos.length) return;
             const shuffled = [...videos].sort(() => Math.random() - 0.5);
             const urls = shuffled.map(v =>
-              `http://localhost:3001/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + v.key)}&showName=${encodeURIComponent(show.showName)}&t=${Date.now()}`
+              `${BASE}/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + v.key)}&showName=${encodeURIComponent(show.showName)}&t=${Date.now()}`
             );
             setTrailerUrls(urls);
           }).catch(() => {});
@@ -263,7 +269,7 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
       if (show.tmdbId) {
         getTrailers(show.tmdbId);
       } else {
-        fetch(`http://localhost:3001/api/tmdb/search?q=${encodeURIComponent(show.showName)}&type=tv`)
+        fetch(`${BASE}/api/tmdb/search?q=${encodeURIComponent(show.showName)}&type=tv`)
           .then(r => r.json())
           .then(d => { if (cancelled) return; const id = d.results?.[0]?.id; if (id) getTrailers(id); })
           .catch(() => {});
@@ -315,7 +321,7 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
   const posterUrl = resolveImg(showData.thumbnail);
   const backdropUrl = resolveImg(showData.backdrop);
   const [clearLogoOk, setClearLogoOk] = React.useState(true);
-  const clearLogoUrl = `http://localhost:3001/api/clearlogo-show/${encodeURIComponent(showData.showName)}`;
+  const clearLogoUrl = `${BASE}/api/clearlogo-show/${encodeURIComponent(showData.showName)}`;
   const metaBadges = [show.contentRating, 'HD'].filter(Boolean);
 
   const handleRefresh = async () => {
@@ -388,7 +394,7 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
       }
 
       // Force reload trailer in UI with new URL
-      const newUrl = `http://localhost:3001/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + newVideoId)}&showName=${encodeURIComponent(show.showName)}&t=${Date.now()}`;
+      const newUrl = `${BASE}/api/ytdlp/stream?url=${encodeURIComponent('https://www.youtube.com/watch?v=' + newVideoId)}&showName=${encodeURIComponent(show.showName)}&t=${Date.now()}`;
       setTrailerUrls([newUrl]);
       setTrailerIdx(0);
       setVideoActive(false);
@@ -596,7 +602,7 @@ function ShowDetail({ show, onBack, onSelect, prevShow, nextShow, onPrev, onNext
                     const ep = [...seasonEpisodes[sNum]].sort((a, b) => (a.episode || 0) - (b.episode || 0))[0];
                     if (ep) onSelect(ep);
                   } else {
-                    const d = await fetch(`http://localhost:3001/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}?season=${sNum}`).then(r => r.json());
+                    const d = await fetch(`${BASE}/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}?season=${sNum}`).then(r => r.json());
                     const eps = (d.items || []).sort((a, b) => (a.episode || 0) - (b.episode || 0));
                     if (eps[0]) onSelect(eps[0]);
                   }
@@ -835,7 +841,7 @@ function ShowCard({ show, onClick }) {
     const observer = new IntersectionObserver(([entry]) => {
       if (entry.isIntersecting) {
         observer.disconnect();
-        fetch(`http://localhost:3001/api/tv/next/${encodeURIComponent(show.showName)}`)
+        fetch(`${BASE}/api/tv/next/${encodeURIComponent(show.showName)}`)
           .then(r => r.json())
           .then(d => setNextEp(d.episode || null))
           .catch(() => setNextEp(null));
@@ -857,14 +863,14 @@ function ShowCard({ show, onClick }) {
     }
 
     // nextEp not loaded yet — fetch directly and play
-    fetch(`http://localhost:3001/api/tv/next/${encodeURIComponent(show.showName)}`)
+    fetch(`${BASE}/api/tv/next/${encodeURIComponent(show.showName)}`)
       .then(r => r.json())
       .then(d => {
         if (d.episode?.filePath) {
           playEp(d.episode);
         } else {
           // Last resort — get any episode from byShow
-          return fetch(`http://localhost:3001/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}`)
+          return fetch(`${BASE}/api/library/tvShows/byShow/${encodeURIComponent(show.showName)}`)
             .then(r => r.json())
             .then(d2 => playEp(d2.items?.[0]));
         }
@@ -977,6 +983,8 @@ export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsume
   const [genre, setGenre] = useState(null);
   const [genres, setGenres] = useState([]);
   const [selectedCollection, setSelectedCollection] = useState(null);
+  const [collectionShows, setCollectionShows] = useState([]);
+  const [collectionLoading, setCollectionLoading] = useState(false);
   const [streamingService, setStreamingService] = useState(null);
   const [selectedNetworkGroup, setSelectedNetworkGroup] = useState(null);
   const [networkShows, setNetworkShows] = useState([]);
@@ -1012,6 +1020,33 @@ export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsume
       setNetworkLoading(false);
     } else {
       setNetworkShows(group.shows || []);
+    }
+  };
+
+  const openCollection = async (collection) => {
+    setSelectedCollection(collection);
+    setCollectionLoading(true);
+    setCollectionShows([]);
+    try {
+      const data = await fetch(`${API}/collections/${collection.id}`).then(r => r.json());
+      const byShowName = new Map((library.tvShows || []).map(show => [
+        String(show.showName || show.seriesTitle || show.title || '').trim().toLowerCase(), show,
+      ]));
+      const seen = new Set();
+      const shows = (data.items || []).map(item => {
+        const name = String(item.seriesTitle || item.showName || item.title || '').trim();
+        return byShowName.get(name.toLowerCase()) || { ...item, showName: name, title: name };
+      }).filter(show => {
+        const name = String(show.showName || show.seriesTitle || show.title || '').trim().toLowerCase();
+        if (!name || seen.has(name)) return false;
+        seen.add(name);
+        return true;
+      });
+      setCollectionShows(shows);
+    } catch {
+      setCollectionShows([]);
+    } finally {
+      setCollectionLoading(false);
     }
   };
 
@@ -1115,9 +1150,11 @@ export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsume
           return acc;
         }, {}));
         setGenres(genreDeduped.sort((a,b) => b.mediaIds.length - a.mediaIds.length));
-        const TV_COLLECTION_TYPES = ['franchise','manual','network','holiday','birthday','streaming'];
-        const allTvCols = cols.filter(c => TV_COLLECTION_TYPES.includes(c.type) && (c.mediaType === 'tvShows' || c.mediaType === 'mixed' || !c.mediaType));
-        setTvCollections(allTvCols.length > 0 ? allTvCols : cols.filter(c => c.type === 'auto-genre' && (c.mediaType === 'tvShows' || !c.mediaType)));
+        const tvCols = cols.filter(c => c.mediaType === 'tvShows' || c.mediaType === 'mixed' || !c.mediaType);
+        // Do not wait for legacy franchise/network entries. The builder also
+        // creates real decade, year, rating, and franchise collections.
+        const generatedCollections = tvCols.filter(c => c.type !== 'auto-genre');
+        setTvCollections(generatedCollections.length > 0 ? generatedCollections : tvCols.filter(c => c.type === 'auto-genre'));
       }).catch(() => {});
   }, [API]);
   // Provider normalization — merge variants into canonical names
@@ -1190,12 +1227,13 @@ export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsume
 
   const FILTERS = ['All', 'A-Z', 'By Rating'];
   const filtered = useMemo(() => [...shows]
+    .filter(s => !genre || (s.genres || []).some(value => String(value).toLowerCase() === String(genre.name || '').toLowerCase()))
     .filter(s => !search || s.showName.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
       if (filter === 'A-Z')       return a.showName.localeCompare(b.showName);
       if (filter === 'By Rating') return (parseFloat(b.rating) || 0) - (parseFloat(a.rating) || 0);
       return 0;
-    }), [shows, search, filter]);
+    }), [shows, genre, search, filter]);
 
   const [tvVisible, setTvVisible] = React.useState(200);
   const gridRef = React.useRef(null);
@@ -1280,7 +1318,24 @@ export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsume
 
       {/* COLLECTIONS */}
       {tab === 'collections' && (<>
-        {tvCollections.length === 0 ? (
+        {selectedCollection ? (
+          <>
+            <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:24 }}>
+              <button onClick={() => { setSelectedCollection(null); setCollectionShows([]); }} className="btn btn-secondary btn-sm">← Back</button>
+              <div>
+                <div style={{ fontSize:20, fontWeight:700 }}>{selectedCollection.name}</div>
+                <div style={{ fontSize:13, color:'var(--text-muted)' }}>{collectionLoading ? 'Loading…' : `${collectionShows.length} shows`}</div>
+              </div>
+            </div>
+            {collectionLoading ? (
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:200 }}><div style={{ width:32, height:32, border:'3px solid var(--bg-tertiary)', borderTop:'3px solid var(--accent)', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} /></div>
+            ) : (
+              <div className="tv-grid">
+                {collectionShows.map(show => <ShowCard key={show.id || show.showName} show={show} onClick={setSelectedShow} />)}
+              </div>
+            )}
+          </>
+        ) : tvCollections.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state-icon">📁</div>
             <h3>No TV collections yet</h3>
@@ -1293,9 +1348,9 @@ export function TVShowsPage({ onSelect, initialShow = null, onInitialShowConsume
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))', gap:16 }}>
             {tvCollections.map(col => {
               const img = col.thumbnail || col.poster;
-              const imgUrl = img ? (img.startsWith('http') ? img : `http://localhost:3001${img}`) : null;
+              const imgUrl = img ? (img.startsWith('http') ? img : `${BASE}${img}`) : null;
               return (
-                <div key={col.id} style={{ borderRadius:'var(--radius-lg)', overflow:'hidden', cursor:'pointer', background:'var(--bg-card)', border:'1px solid var(--border)', transition:'transform 0.2s' }}
+                <div key={col.id} onClick={() => openCollection(col)} style={{ borderRadius:'var(--radius-lg)', overflow:'hidden', cursor:'pointer', background:'var(--bg-card)', border:'1px solid var(--border)', transition:'transform 0.2s' }}
                   onMouseEnter={e => e.currentTarget.style.transform='translateY(-4px)'}
                   onMouseLeave={e => e.currentTarget.style.transform=''}
                 >
