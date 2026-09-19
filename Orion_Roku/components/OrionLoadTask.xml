@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="OrionLoadTask" extends="Task">
+  <interface>
+    <field id="serverUrl" type="string" />
+    <field id="mode" type="string" />
+    <field id="section" type="string" />
+    <field id="page" type="integer" />
+    <field id="showName" type="string" />
+    <field id="payload" type="string" />
+    <field id="error" type="string" />
+  </interface>
+  <script type="text/brightscript" uri="pkg:/components/OrionLoadTask.brs" />
+</component>
