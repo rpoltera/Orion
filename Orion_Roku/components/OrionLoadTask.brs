@@ -55,7 +55,7 @@ sub loadHome(base as String)
         return
     end if
     iptv = fetchPage(withToken(base + "/api/roku/iptv?page=0&limit=48", token))
-    channels = fetchPage(withToken(base + "/api/roku/channels?page=0&limit=48", token))
+    channels = fetchStreamForgeChannels(base, token, 0, 48)
     if iptv = invalid then iptv = { items: [], total: 0 }
     if channels = invalid then channels = { items: [], total: 0 }
     m.top.payload = FormatJson({
@@ -79,7 +79,7 @@ sub loadBrowse(base as String)
     if section = "iptv" then
         result = fetchPage(withToken(base + "/api/roku/iptv?page=" + page.ToStr() + "&limit=" + limit.ToStr(), token))
     else if section = "channels" then
-        result = fetchPage(withToken(base + "/api/roku/channels?page=" + page.ToStr() + "&limit=" + limit.ToStr(), token))
+        result = fetchStreamForgeChannels(base, token, page, limit)
     else
         result = fetchPage(withToken(base + "/api/roku/browse?section=" + urlEscape(section) + "&page=" + page.ToStr() + "&limit=" + limit.ToStr(), token))
     end if
@@ -121,6 +121,36 @@ function fetchPage(url as String) as Dynamic
     total = data.total
     if total = invalid then total = data.items.Count()
     return { items: data.items, total: total }
+end function
+
+function fetchStreamForgeChannels(base as String, token as String, page as Integer, limit as Integer) as Dynamic
+    data = fetchJson(withToken(base + "/api/sf/channels?light=1", token))
+    if data = invalid or type(data) <> "roArray" then return invalid
+    allItems = []
+    for each channel in data
+        if channel.active = false then continue
+        count = channel.itemCount
+        subtitle = channel.group
+        if subtitle = invalid or subtitle = "" then subtitle = "Orion live channel"
+        allItems.Push({
+            id: channel.id
+            title: channel.name
+            subtitle: subtitle
+            thumbnail: channel.logo
+            kind: "channel"
+            section: "channels"
+        })
+    end for
+    output = []
+    start = page * limit
+    finish = start + limit - 1
+    if finish >= allItems.Count() then finish = allItems.Count() - 1
+    if finish >= start then
+        for index = start to finish
+            output.Push(allItems[index])
+        end for
+    end if
+    return { items: output, total: allItems.Count() }
 end function
 
 function fetchJson(url as String) as Dynamic
