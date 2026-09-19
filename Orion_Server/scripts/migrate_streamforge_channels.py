@@ -165,6 +165,48 @@ def referenced_media_ids(channels):
     return ids
 
 
+def merged_ref(database_ref, inline_item, series_title=""):
+    """Use library data when present; channel schedules are the fallback.
+
+    Older StreamForge channels can hold episode records generated before the
+    current Orion database, so their mediaId is absent from orion.db.  Those
+    records still contain a path/title/season/episode and are portable.
+    """
+    result = dict(database_ref or {})
+    inline = item_ref(inline_item) if isinstance(inline_item, dict) else {}
+    for key, value in inline.items():
+        if result.get(key) in (None, "") and value not in (None, ""):
+            result[key] = value
+    if result.get("seriesTitle") in (None, ""):
+        result["seriesTitle"] = series_title or ""
+    return result
+
+
+def portable_refs(channels, source_by_id):
+    refs = {}
+    for channel in channels:
+        series = channel.get("seriesSchedule") or {}
+        series_title = series.get("showTitle") or channel.get("name") or ""
+        for block in channel.get("playout") or []:
+            if not isinstance(block, dict) or not block.get("mediaId"):
+                continue
+            media_id = str(block["mediaId"])
+            ref = merged_ref(source_by_id.get(media_id), block)
+            if any(ref.get(k) not in (None, "") for k in ("filePath", "title", "seriesTitle")):
+                refs[media_id] = ref
+        for episode in series.get("episodes") or []:
+            if not isinstance(episode, dict):
+                continue
+            media_id = episode.get("mediaId") or episode.get("id")
+            if not media_id:
+                continue
+            media_id = str(media_id)
+            ref = merged_ref(source_by_id.get(media_id), episode, series_title)
+            if any(ref.get(k) not in (None, "") for k in ("filePath", "title", "seriesTitle")):
+                refs[media_id] = ref
+    return refs
+
+
 def export_channels(destination):
     data_dir, sf_dir, channels_file, streams_file = streamforge_paths()
     channels = load_json(channels_file, [])
@@ -181,11 +223,7 @@ def export_channels(destination):
         channel.pop("scheduledProgramsGeneratedAt", None)
 
     source_by_id, _, _, _ = media_indexes(library_items(data_dir))
-    refs = {
-        media_id: source_by_id[media_id]
-        for media_id in referenced_media_ids(clean_channels)
-        if media_id in source_by_id
-    }
+    refs = portable_refs(clean_channels, source_by_id)
     live_ids = {str(ch.get("liveStreamId")) for ch in clean_channels if ch.get("liveStreamId")}
     linked_streams = [copy.deepcopy(s) for s in streams if str(s.get("id")) in live_ids]
 
