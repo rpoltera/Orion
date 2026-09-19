@@ -128,18 +128,19 @@ function fetchStreamForgeChannels(base as String, token as String, page as Integ
     if data = invalid or type(data) <> "roArray" then return invalid
     allItems = []
     for each channel in data
-        if channel.active = false then continue
-        count = channel.itemCount
-        subtitle = channel.group
-        if subtitle = invalid or subtitle = "" then subtitle = "Orion live channel"
-        allItems.Push({
-            id: channel.id
-            title: channel.name
-            subtitle: subtitle
-            thumbnail: channel.logo
-            kind: "channel"
-            section: "channels"
-        })
+        isActive = channel.active
+        if isActive <> false then
+            subtitle = channel.group
+            if subtitle = invalid or subtitle = "" then subtitle = "Orion live channel"
+            allItems.Push({
+                id: channel.id
+                title: channel.name
+                subtitle: subtitle
+                thumbnail: channel.logo
+                kind: "channel"
+                section: "channels"
+            })
+        end if
     end for
     output = []
     start = page * limit
