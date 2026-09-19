@@ -548,7 +548,7 @@ function countText(value as Dynamic) as String
 end function
 
 function normalizeServer(value as String) as String
-    server = Trim(value)
+    server = value.Trim()
     while Len(server) > 0 and Right(server, 1) = "/"
         server = Left(server, Len(server) - 1)
     end while
