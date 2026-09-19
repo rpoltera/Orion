@@ -62,13 +62,30 @@ def write_json_atomic(path, data):
 
 def normalized(value):
     value = unicodedata.normalize("NFKD", str(value or ""))
-    return "".join(c for c in value if not unicodedata.combining(c)).lower()
+    value = "".join(c for c in value if not unicodedata.combining(c)).lower()
+    # Scanner titles, playlist labels, and filenames use different separators
+    # (spaces, dots, underscores, and dashes). Treat those as equivalent.
+    return re.sub(r"[^a-z0-9]+", "", value)
 
 
 def path_key(value):
     if not value:
         return ""
     return os.path.normcase(os.path.normpath(str(value)))
+
+
+def episode_signature(value):
+    """Return (show title, season, episode) when text includes SxxExx."""
+    text = str(value or "")
+    match = SEASON_EPISODE_RE.search(text)
+    if not match:
+        return None
+    # The regular expression includes the separator immediately before "S".
+    # Strip it so "Home Town S01E01" becomes "Home Town".
+    show = text[:match.start()].strip(" ._-")
+    if not show:
+        return None
+    return normalized(show), str(int(match.group(1))), str(int(match.group(2)))
 
 
 def service_data_dir():
@@ -152,10 +169,19 @@ def media_indexes(items):
         if key:
             by_path.setdefault(key, str(item_id))
 
-        show = normalized(ref["seriesTitle"] or item.get("title"))
         season, episode = ref["season"], ref["episode"]
-        if show and season is not None and episode is not None:
-            by_episode.setdefault((show, str(season), str(episode)), str(item_id))
+        if season is not None and episode is not None:
+            aliases = [ref["seriesTitle"], item.get("title")]
+            # Scanners sometimes put the network in title/seriesTitle but the
+            # filename has the real show name, e.g. "Home Town S01E01".
+            for value in (os.path.basename(str(ref["filePath"])), item.get("fileName")):
+                parsed = episode_signature(value)
+                if parsed:
+                    aliases.append(parsed[0])
+            for alias in aliases:
+                show = normalized(alias)
+                if show:
+                    by_episode.setdefault((show, str(season), str(episode)), str(item_id))
 
         title = normalized(ref["title"])
         if title:
@@ -261,10 +287,19 @@ def resolve_media(ref, by_path, by_episode, by_title_year):
     if candidate:
         return candidate
 
-    show = normalized(ref.get("seriesTitle") or "")
     season, episode = ref.get("season"), ref.get("episode")
+    episode_candidates = []
+    show = normalized(ref.get("seriesTitle") or "")
     if show and season is not None and episode is not None:
-        candidate = by_episode.get((show, str(season), str(episode)))
+        episode_candidates.append((show, str(season), str(episode)))
+    # Manual playout blocks often only retain a title such as
+    # "House Hunters Renovation S18E01". Use it as a second key.
+    for value in (ref.get("title"), ref.get("filePath")):
+        parsed = episode_signature(value)
+        if parsed:
+            episode_candidates.append(parsed)
+    for candidate_key in episode_candidates:
+        candidate = by_episode.get(candidate_key)
         if candidate:
             return candidate
 
