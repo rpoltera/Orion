@@ -44,11 +44,11 @@ if id orion &>/dev/null; then
   chown -R orion:orion "$STAGE"
   NPM_CACHE="$STAGE/.npm-cache"
   install -d -o orion -g orion "$NPM_CACHE"
-  NPM=(runuser -u orion -- env "npm_config_cache=$NPM_CACHE" npm)
+  NPM=(runuser -u orion -- env "HOME=$STAGE" "XDG_CACHE_HOME=$STAGE/.cache" "npm_config_cache=$NPM_CACHE" "NPM_CONFIG_CACHE=$NPM_CACHE" npm)
 else
   NPM_CACHE="$STAGE/.npm-cache"
   mkdir -p "$NPM_CACHE"
-  NPM=(env "npm_config_cache=$NPM_CACHE" npm)
+  NPM=(env "HOME=$STAGE" "XDG_CACHE_HOME=$STAGE/.cache" "npm_config_cache=$NPM_CACHE" "NPM_CONFIG_CACHE=$NPM_CACHE" npm)
 fi
 
 info "Installing matching dependencies"
