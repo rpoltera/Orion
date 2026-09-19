@@ -9,6 +9,14 @@ const path    = require('path');
 const fs      = require('fs');
 const ffmpeg  = require('fluent-ffmpeg');
 const { PassThrough } = require('stream');
+const orionAuth = require('../auth');
+const {
+  resolveAccess,
+  itemVisibleToUser,
+  collectionVisibleToUser,
+  customLibraryVisibleToUser,
+  liveItemVisibleToUser,
+} = require('../services/media-access');
 
 const AUDIO_MIME = {
   '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
@@ -87,12 +95,150 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   const router = express.Router();
 
   const HLS_QUALITIES = new Set(['4k', '1080p', '720p', '480p', '360p', 'source']);
+  const standardTypes = ['movies', 'tvShows', 'music', 'musicVideos'];
+
+  function customRecords() {
+    const output = [];
+    for (const library of db.customLibraries || []) {
+      for (const item of library.items || []) {
+        output.push({ item, type: 'custom', library });
+      }
+    }
+    return output;
+  }
+
+  function mediaRecord(mediaId) {
+    const wanted = String(mediaId || '');
+    for (const type of standardTypes) {
+      const item = (db[type] || []).find(entry => String(entry.id) === wanted);
+      if (item) return { item, type, library: null };
+    }
+    return customRecords().find(record => String(record.item.id) === wanted) || null;
+  }
+
   const videoItems = () => [
     ...(db.movies || []),
     ...(db.tvShows || []),
     ...(db.musicVideos || []),
+    ...customRecords()
+      .filter(record => !AUDIO_MIME[path.extname(record.item.filePath || '').toLowerCase()])
+      .map(record => record.item),
   ];
-  const findVideoItem = mediaId => videoItems().find(item => item.id === mediaId) || null;
+  const findVideoItem = mediaId => mediaRecord(mediaId)?.item || null;
+
+  function clientToken(req) {
+    const header = String(req.headers.authorization || '');
+    if (header.toLowerCase().startsWith('bearer ')) return header.slice(7).trim();
+    return String(req.query.token || '').trim();
+  }
+
+  function requireRokuUser(req, res) {
+    const session = orionAuth.lookup(clientToken(req));
+    if (!session) {
+      res.status(401).json({ error: 'Sign in on Orion before using the Roku player.', code: 'ROKU_SIGN_IN_REQUIRED' });
+      return null;
+    }
+    const user = (db.users || []).find(entry => entry.id === session.userId);
+    if (!user) {
+      res.status(401).json({ error: 'This Orion profile no longer exists.', code: 'ROKU_PROFILE_MISSING' });
+      return null;
+    }
+    return { user, access: resolveAccess(db, user) };
+  }
+
+  function recordVisibleToUser(record, user, access) {
+    if (!record) return false;
+    if (record.type === 'custom') return customLibraryVisibleToUser(record.library, user, access, db);
+    return itemVisibleToUser(db, record.item, record.type, user, access);
+  }
+
+  function safeImage(item) {
+    return item?.thumbnail || item?.poster || item?.backdrop || item?.logo || '';
+  }
+
+  function displayEpisodeTitle(item) {
+    const season = item?.seasonNum || item?.season;
+    const episode = item?.episodeNum || item?.episode;
+    const code = season !== undefined && season !== null && episode !== undefined && episode !== null
+      ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')} `
+      : '';
+    return code + (item?.episodeTitle || item?.title || 'Episode');
+  }
+
+  function cardFor(record, kind = null, section = '') {
+    const item = record.item || record;
+    const itemKind = kind || (record.type === 'music' ? 'music' : 'video');
+    const isEpisode = record.type === 'tvShows';
+    return {
+      id: String(item.id || ''),
+      title: isEpisode ? displayEpisodeTitle(item) : (item.title || item.name || 'Untitled'),
+      subtitle: isEpisode ? (item.seriesTitle || item.showName || '') : (item.artist || item.year || item.group || ''),
+      thumbnail: safeImage(item),
+      backdrop: item.backdrop || '',
+      year: item.year || null,
+      rating: item.contentRating || '',
+      kind: itemKind,
+      section,
+      showName: item.seriesTitle || item.showName || '',
+      customLibraryId: record.library?.id || '',
+    };
+  }
+
+  function showCards(episodes) {
+    const groups = new Map();
+    for (const episode of episodes || []) {
+      const name = String(episode.seriesTitle || episode.showName || episode.title || 'Unknown Show').trim();
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(episode);
+    }
+    return [...groups.entries()].map(([showName, entries]) => {
+      const first = entries.find(entry => safeImage(entry)) || entries[0] || {};
+      return {
+        id: `show:${showName}`,
+        title: showName,
+        showName,
+        subtitle: `${entries.length} episode${entries.length === 1 ? '' : 's'}`,
+        thumbnail: safeImage(first),
+        backdrop: first.backdrop || '',
+        kind: 'show',
+        section: 'tvShows',
+      };
+    }).sort((a, b) => a.title.localeCompare(b.title));
+  }
+
+  function genreCards(type, records) {
+    const counts = new Map();
+    for (const record of records) {
+      for (const genre of record.item?.genres || []) {
+        const name = String(genre || '').trim();
+        if (name) counts.set(name, (counts.get(name) || 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .map(([name, count]) => ({
+        id: `genre:${type}:${name}`,
+        title: name,
+        subtitle: `${count} title${count === 1 ? '' : 's'}`,
+        kind: 'genre',
+        section: `genre:${type}:${name}`,
+      }))
+      .sort((a, b) => a.title.localeCompare(b.title));
+  }
+
+  function rokuThemes() {
+    try {
+      const builtin = Object.values(require('../themes').themes || {});
+      return [...builtin, ...(getConfig().customThemes || [])].map(theme => ({
+        id: String(theme.id || theme.name || ''),
+        title: theme.name || 'Orion Theme',
+        subtitle: 'Apply this server theme',
+        kind: 'theme',
+        vars: theme.vars || {},
+      }));
+    } catch (_) {
+      return [];
+    }
+  }
 
   function startLibraryHls(item, {
     quality = 'source',
@@ -308,13 +454,159 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
 
   router.delete('/hls/:sessionId', (req, res) => { HLS.stopSession(req.params.sessionId); res.json({ ok: true }); });
 
+  // ── Roku catalogue ────────────────────────────────────────────────────────────
+  // Roku gets a purpose-built, access-filtered catalogue rather than trying to
+  // recreate Orion's database rules on a television.  These endpoints always
+  // require a signed-in profile even when normal Orion GETs are public.
+  router.get('/roku/users', (_, res) => {
+    const users = (db.users || []).map(user => ({
+      id: user.id,
+      name: user.name,
+      avatar: user.avatar || '👤',
+      role: user.role || 'user',
+      maxRating: user.maxRating || null,
+    }));
+    res.set('Cache-Control', 'no-store').json({ users });
+  });
+
+  router.get('/roku/catalog', (req, res) => {
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
+    const { user, access } = identity;
+
+    const movies = (db.movies || []).map(item => ({ item, type: 'movies' }))
+      .filter(record => recordVisibleToUser(record, user, access));
+    const tvEpisodes = (db.tvShows || []).map(item => ({ item, type: 'tvShows' }))
+      .filter(record => recordVisibleToUser(record, user, access));
+    const music = (db.music || []).map(item => ({ item, type: 'music' }))
+      .filter(record => recordVisibleToUser(record, user, access));
+    const musicVideos = (db.musicVideos || []).map(item => ({ item, type: 'musicVideos' }))
+      .filter(record => recordVisibleToUser(record, user, access));
+    const collections = (db.collections || [])
+      .filter(collection => collectionVisibleToUser(collection, user, access))
+      .map(collection => ({
+        id: String(collection.id || ''), title: collection.name || 'Untitled Collection',
+        subtitle: `${(collection.mediaIds || []).length} title${(collection.mediaIds || []).length === 1 ? '' : 's'}`,
+        thumbnail: collection.thumbnail || collection.poster || '', kind: 'collection',
+        section: `collection:${collection.id}`,
+      }));
+    const customLibraries = (db.customLibraries || [])
+      .filter(library => customLibraryVisibleToUser(library, user, access, db))
+      .map(library => ({
+        id: String(library.id || ''), title: library.name || 'Custom Library',
+        subtitle: `${(library.items || []).length} item${(library.items || []).length === 1 ? '' : 's'}`,
+        thumbnail: '', kind: 'section', section: `custom:${library.id}`,
+        accentColor: library.color || '', icon: library.icon || '📁',
+      }));
+    const shows = showCards(tvEpisodes.map(record => record.item));
+    const movieGenres = genreCards('movies', movies);
+    const tvGenres = genreCards('tvShows', tvEpisodes);
+    const musicGenres = genreCards('music', music);
+
+    const rows = [
+      { id: 'movies', title: `Movies · ${movies.length}`, kind: 'video', section: 'movies', items: movies.slice(0, 48).map(record => cardFor(record, 'video', 'movies')) },
+      { id: 'tvShows', title: `TV Shows · ${shows.length}`, kind: 'show', section: 'tvShows', items: shows.slice(0, 48) },
+      { id: 'music', title: `Music · ${music.length}`, kind: 'music', section: 'music', items: music.slice(0, 48).map(record => cardFor(record, 'music', 'music')) },
+      { id: 'musicVideos', title: `Music Videos · ${musicVideos.length}`, kind: 'video', section: 'musicVideos', items: musicVideos.slice(0, 48).map(record => cardFor(record, 'video', 'musicVideos')) },
+      { id: 'collections', title: `Collections · ${collections.length}`, kind: 'collection', section: 'collections', items: collections.slice(0, 48) },
+      { id: 'movieGenres', title: `Movie Categories · ${movieGenres.length}`, kind: 'genre', section: 'genres:movies', items: movieGenres.slice(0, 48) },
+      { id: 'tvGenres', title: `TV Categories · ${tvGenres.length}`, kind: 'genre', section: 'genres:tvShows', items: tvGenres.slice(0, 48) },
+      { id: 'musicGenres', title: `Music Categories · ${musicGenres.length}`, kind: 'genre', section: 'genres:music', items: musicGenres.slice(0, 48) },
+      { id: 'customLibraries', title: `Your Libraries · ${customLibraries.length}`, kind: 'section', section: 'customLibraries', items: customLibraries },
+      { id: 'themes', title: 'Server Themes', kind: 'theme', section: 'themes', items: rokuThemes() },
+    ].filter(row => row.items.length > 0 || ['collections', 'customLibraries'].includes(row.id));
+
+    res.set('Cache-Control', 'no-store').json({
+      user: { id: user.id, name: user.name, avatar: user.avatar || '👤', role: user.role || 'user', maxRating: user.maxRating || null },
+      rows,
+    });
+  });
+
+  router.get('/roku/browse', (req, res) => {
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
+    const { user, access } = identity;
+    const section = String(req.query.section || '');
+    const page = Math.max(0, Number.parseInt(req.query.page, 10) || 0);
+    const limit = Math.max(1, Math.min(100, Number.parseInt(req.query.limit, 10) || 80));
+    let items = [];
+
+    const typeRecords = type => (db[type] || []).map(item => ({ item, type }))
+      .filter(record => recordVisibleToUser(record, user, access));
+    if (['movies', 'music', 'musicVideos'].includes(section)) {
+      const kind = section === 'music' ? 'music' : 'video';
+      items = typeRecords(section).map(record => cardFor(record, kind, section));
+    } else if (section === 'tvShows') {
+      items = showCards(typeRecords('tvShows').map(record => record.item));
+    } else if (section === 'collections') {
+      items = (db.collections || []).filter(collection => collectionVisibleToUser(collection, user, access)).map(collection => ({
+        id: String(collection.id || ''), title: collection.name || 'Untitled Collection',
+        subtitle: `${(collection.mediaIds || []).length} title${(collection.mediaIds || []).length === 1 ? '' : 's'}`,
+        thumbnail: collection.thumbnail || collection.poster || '', kind: 'collection', section: `collection:${collection.id}`,
+      }));
+    } else if (section === 'themes') {
+      items = rokuThemes();
+    } else if (section.startsWith('genres:')) {
+      const type = section.slice('genres:'.length);
+      if (['movies', 'tvShows', 'music'].includes(type)) items = genreCards(type, typeRecords(type));
+    } else if (section.startsWith('genre:')) {
+      const [, type, ...genreParts] = section.split(':');
+      const genre = genreParts.join(':');
+      const records = typeRecords(type).filter(record => (record.item.genres || []).some(value => String(value).toLowerCase() === genre.toLowerCase()));
+      items = type === 'tvShows'
+        ? showCards(records.map(record => record.item))
+        : records.map(record => cardFor(record, type === 'music' ? 'music' : 'video', section));
+    } else if (section.startsWith('collection:')) {
+      const id = section.slice('collection:'.length);
+      const collection = (db.collections || []).find(entry => String(entry.id) === id);
+      if (collection && collectionVisibleToUser(collection, user, access)) {
+        items = (collection.mediaIds || []).map(mediaRecord).filter(record => recordVisibleToUser(record, user, access))
+          .map(record => cardFor(record, record.type === 'music' ? 'music' : 'video', section));
+      }
+    } else if (section.startsWith('custom:')) {
+      const id = section.slice('custom:'.length);
+      const library = (db.customLibraries || []).find(entry => String(entry.id) === id);
+      if (library && customLibraryVisibleToUser(library, user, access, db)) {
+        items = (library.items || []).map(item => ({ item, type: 'custom', library })).map(record => {
+          const isAudio = !!AUDIO_MIME[path.extname(record.item.filePath || '').toLowerCase()];
+          return cardFor(record, isAudio ? 'music' : 'video', section);
+        });
+      }
+    }
+
+    items.sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+    const total = items.length;
+    res.set('Cache-Control', 'no-store').json({ section, page, limit, total, items: items.slice(page * limit, (page + 1) * limit) });
+  });
+
+  router.get('/roku/episodes', (req, res) => {
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
+    const showName = String(req.query.showName || '').trim();
+    if (!showName) return res.status(400).json({ error: 'showName is required' });
+    const { user, access } = identity;
+    const items = (db.tvShows || [])
+      .filter(item => String(item.seriesTitle || item.showName || item.title || '') === showName)
+      .map(item => ({ item, type: 'tvShows' }))
+      .filter(record => recordVisibleToUser(record, user, access))
+      .sort((a, b) => Number(a.item.seasonNum || a.item.season || 0) - Number(b.item.seasonNum || b.item.season || 0)
+        || Number(a.item.episodeNum || a.item.episode || 0) - Number(b.item.episodeNum || b.item.episode || 0))
+      .map(record => cardFor(record, 'video', 'tvShows'));
+    res.set('Cache-Control', 'no-store').json({ title: showName, total: items.length, items });
+  });
+
   // ── Roku playback ─────────────────────────────────────────────────────────────
   // Roku's Video node is most reliable with HLS.  This route accepts only an
   // Orion media id, starts a server-side HLS session, and redirects the Roku to
   // the playlist.  It never exposes the media file path to the TV.
   router.get('/roku/stream/:mediaId', async (req, res) => {
-    const item = findVideoItem(req.params.mediaId);
-    if (!item) return res.status(404).json({ error: 'Media not found' });
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
+    const record = mediaRecord(req.params.mediaId);
+    if (!record || !recordVisibleToUser(record, identity.user, identity.access)) {
+      return res.status(404).json({ error: 'This title is not available to the selected Orion profile.' });
+    }
+    const item = record.item;
 
     const quality = ['4k', '1080p', '720p', '480p', '360p', 'source'].includes(req.query.quality)
       ? req.query.quality
@@ -344,7 +636,13 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   // Keep filesystem paths private from the Roku and retain HTTP Range support so
   // the Video node can seek without needing access to NAS paths.
   router.get('/roku/audio/:mediaId', (req, res) => {
-    const item = (db.music || []).find(entry => entry.id === req.params.mediaId);
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
+    const record = mediaRecord(req.params.mediaId);
+    if (!record || !recordVisibleToUser(record, identity.user, identity.access)) {
+      return res.status(404).json({ error: 'This title is not available to the selected Orion profile.' });
+    }
+    const item = record.item;
     if (!item?.filePath || !fs.existsSync(item.filePath)) {
       return res.status(404).json({ error: 'Music file is unavailable' });
     }
@@ -386,10 +684,13 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   // A Roku pages large IPTV lists rather than downloading the entire provider
   // catalogue before its home screen can render.
   router.get('/roku/iptv', (req, res) => {
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
     const page = Math.max(0, Number.parseInt(req.query.page, 10) || 0);
     const limit = Math.max(1, Math.min(100, Number.parseInt(req.query.limit, 10) || 60));
     const query = String(req.query.query || '').trim().toLowerCase();
-    let channels = Array.isArray(db.iptvChannels) ? db.iptvChannels : [];
+    let channels = (Array.isArray(db.iptvChannels) ? db.iptvChannels : [])
+      .filter(channel => liveItemVisibleToUser(channel, 'iptvChannels', identity.user, identity.access, db));
     if (query) {
       channels = channels.filter(channel => `${channel.name || ''} ${channel.group || channel.category || ''}`.toLowerCase().includes(query));
     }
@@ -407,10 +708,15 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   // Roku receives an Orion IPTV id, never a provider URL or its credentials.
   // The HLS engine normalizes the source to H.264/AAC before it reaches the TV.
   router.get('/roku/iptv/:channelId', async (req, res) => {
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
     const channel = (db.iptvChannels || []).find(entry =>
       String(entry.id || entry.tvgId || entry.url || '') === String(req.params.channelId)
     );
     if (!channel?.url) return res.status(404).json({ error: 'IPTV channel not found' });
+    if (!liveItemVisibleToUser(channel, 'iptvChannels', identity.user, identity.access, db)) {
+      return res.status(404).json({ error: 'This channel is not available to the selected Orion profile.' });
+    }
 
     const quality = ['1080p', '720p', '480p', '360p', 'source'].includes(req.query.quality)
       ? req.query.quality
@@ -426,7 +732,6 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       return playbackError(res, error);
     }
   });
-
 
   // ── Main stream endpoint ──────────────────────────────────────────────────────
   router.get('/stream', async (req, res) => {
