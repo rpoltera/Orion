@@ -10,7 +10,11 @@ sub run()
     end if
 
     mode = m.top.mode
-    if mode = "episodes" then
+    if mode = "profiles" then
+        loadProfiles(base)
+    else if mode = "login" then
+        login(base)
+    else if mode = "episodes" then
         loadEpisodes(base)
     else if mode = "browse" then
         loadBrowse(base)
@@ -19,67 +23,71 @@ sub run()
     end if
 end sub
 
-sub loadHome(base as String)
-    movies = fetchPage(base + "/api/library/movies?page=0&limit=60")
-    shows = fetchPage(base + "/api/library/tvShows/grouped?page=0&limit=60")
-    music = fetchPage(base + "/api/library/music?page=0&limit=60")
-    musicVideos = fetchPage(base + "/api/library/musicVideos?page=0&limit=60")
-    iptv = fetchPage(base + "/api/roku/iptv?page=0&limit=60")
-    channels = fetchArray(base + "/api/sf/channels?light=1")
-    themes = fetchArray(base + "/api/themes")
-
-    if movies = invalid and shows = invalid and music = invalid and musicVideos = invalid and iptv = invalid and channels = invalid then
-        m.top.error = "Could not reach Orion at " + base
+sub loadProfiles(base as String)
+    data = fetchJson(base + "/api/roku/users")
+    if data = invalid or data.users = invalid then
+        m.top.error = "Could not load Orion profiles from " + base
         return
     end if
+    m.top.payload = FormatJson({ mode: "profiles", users: data.users })
+end sub
 
-    data = {
+sub login(base as String)
+    name = m.top.userName
+    credential = m.top.credential
+    if name = "" or credential = "" then
+        m.top.error = "Enter the Orion profile PIN or password."
+        return
+    end if
+    result = postJson(base + "/api/auth/login", { name: name, pin: credential })
+    if result = invalid or result.token = invalid or result.token = "" then
+        m.top.error = "Orion did not accept that PIN or password."
+        return
+    end if
+    m.top.payload = FormatJson({ mode: "login", token: result.token, user: result.user })
+end sub
+
+sub loadHome(base as String)
+    token = m.top.token
+    catalog = fetchJson(withToken(base + "/api/roku/catalog", token))
+    if catalog = invalid or catalog.rows = invalid then
+        m.top.error = "Session expired. Choose your Orion profile again."
+        return
+    end if
+    iptv = fetchPage(withToken(base + "/api/roku/iptv?page=0&limit=48", token))
+    channels = fetchPage(withToken(base + "/api/roku/channels?page=0&limit=48", token))
+    if iptv = invalid then iptv = { items: [], total: 0 }
+    if channels = invalid then channels = { items: [], total: 0 }
+    m.top.payload = FormatJson({
         mode: "home"
-        movies: pageItems(movies)
-        moviesTotal: pageTotal(movies)
-        tvShows: pageItems(shows)
-        tvShowsTotal: pageTotal(shows)
-        music: pageItems(music)
-        musicTotal: pageTotal(music)
-        musicVideos: pageItems(musicVideos)
-        musicVideosTotal: pageTotal(musicVideos)
+        user: catalog.user
+        rows: catalog.rows
         iptv: pageItems(iptv)
         iptvTotal: pageTotal(iptv)
-        channels: validArray(channels)
-        themes: validArray(themes)
-    }
-    m.top.payload = FormatJson(data)
+        channels: pageItems(channels)
+        channelsTotal: pageTotal(channels)
+    })
 end sub
 
 sub loadBrowse(base as String)
     section = m.top.section
     page = m.top.page
     limit = 80
+    token = m.top.token
     result = invalid
 
-    if section = "movies" then
-        result = fetchPage(base + "/api/library/movies?page=" + page.ToStr() + "&limit=" + limit.ToStr())
-    else if section = "tvShows" then
-        result = fetchPage(base + "/api/library/tvShows/grouped?page=" + page.ToStr() + "&limit=" + limit.ToStr())
-    else if section = "music" then
-        result = fetchPage(base + "/api/library/music?page=" + page.ToStr() + "&limit=" + limit.ToStr())
-    else if section = "musicVideos" then
-        result = fetchPage(base + "/api/library/musicVideos?page=" + page.ToStr() + "&limit=" + limit.ToStr())
-    else if section = "iptv" then
-        result = fetchPage(base + "/api/roku/iptv?page=" + page.ToStr() + "&limit=" + limit.ToStr())
+    if section = "iptv" then
+        result = fetchPage(withToken(base + "/api/roku/iptv?page=" + page.ToStr() + "&limit=" + limit.ToStr(), token))
     else if section = "channels" then
-        allChannels = validArray(fetchArray(base + "/api/sf/channels?light=1"))
-        result = { items: pageSlice(allChannels, page, limit), total: allChannels.Count() }
-    else if section = "themes" then
-        allThemes = validArray(fetchArray(base + "/api/themes"))
-        result = { items: pageSlice(allThemes, page, limit), total: allThemes.Count() }
+        result = fetchPage(withToken(base + "/api/roku/channels?page=" + page.ToStr() + "&limit=" + limit.ToStr(), token))
+    else
+        result = fetchPage(withToken(base + "/api/roku/browse?section=" + urlEscape(section) + "&page=" + page.ToStr() + "&limit=" + limit.ToStr(), token))
     end if
 
     if result = invalid then
-        m.top.error = "Could not load " + section + " from Orion."
+        m.top.error = "Could not load " + sectionLabel(section) + "."
         return
     end if
-
     m.top.payload = FormatJson({
         mode: "browse"
         section: section
@@ -96,7 +104,7 @@ sub loadEpisodes(base as String)
         m.top.error = "This TV show has no name."
         return
     end if
-    data = fetchJson(base + "/api/library/tvShows/byShow/" + urlEscape(showName))
+    data = fetchJson(withToken(base + "/api/roku/episodes?showName=" + urlEscape(showName), m.top.token))
     if data = invalid then
         m.top.error = "Could not load episodes for " + showName
         return
@@ -115,20 +123,22 @@ function fetchPage(url as String) as Dynamic
     return { items: data.items, total: total }
 end function
 
-function fetchArray(url as String) as Dynamic
-    data = fetchJson(url)
-    if data = invalid then return invalid
-    if type(data) = "roArray" then return data
-    if data.items <> invalid then return data.items
-    if data.channels <> invalid then return data.channels
-    return []
-end function
-
 function fetchJson(url as String) as Dynamic
     transfer = CreateObject("roUrlTransfer")
     transfer.SetUrl(url)
     transfer.AddHeader("Accept", "application/json")
+    if m.top.token <> "" then transfer.AddHeader("Authorization", "Bearer " + m.top.token)
     body = transfer.GetToString()
+    if transfer.GetResponseCode() <> 200 then return invalid
+    return ParseJson(body)
+end function
+
+function postJson(url as String, payload as Object) as Dynamic
+    transfer = CreateObject("roUrlTransfer")
+    transfer.SetUrl(url)
+    transfer.AddHeader("Accept", "application/json")
+    transfer.AddHeader("Content-Type", "application/json")
+    body = transfer.PostFromString(FormatJson(payload))
     if transfer.GetResponseCode() <> 200 then return invalid
     return ParseJson(body)
 end function
@@ -143,21 +153,11 @@ function pageTotal(page as Dynamic) as Integer
     return page.total
 end function
 
-function validArray(value as Dynamic) as Object
-    if value = invalid then return []
-    return value
-end function
-
-function pageSlice(items as Object, page as Integer, limit as Integer) as Object
-    output = []
-    start = page * limit
-    finish = start + limit - 1
-    if finish >= items.Count() then finish = items.Count() - 1
-    if finish < start then return output
-    for index = start to finish
-        output.Push(items[index])
-    end for
-    return output
+function withToken(url as String, token as String) as String
+    if token = "" then return url
+    separator = "?"
+    if Instr(1, url, "?") > 0 then separator = "&"
+    return url + separator + "token=" + token
 end function
 
 function normalizeServer(value as String) as String
@@ -171,4 +171,18 @@ end function
 function urlEscape(value as String) as String
     transfer = CreateObject("roUrlTransfer")
     return transfer.Escape(value)
+end function
+
+function sectionLabel(section as String) as String
+    if section = "tvShows" then return "TV Shows"
+    if section = "musicVideos" then return "Music Videos"
+    if section = "iptv" then return "Live TV"
+    if section = "channels" then return "Orion Channels"
+    if section = "themes" then return "Themes"
+    if section = "collections" then return "Collections"
+    if Left(section, 7) = "genres:" then return "Categories"
+    if Left(section, 6) = "genre:" then return "Category"
+    if Left(section, 11) = "collection:" then return "Collection"
+    if Left(section, 7) = "custom:" then return "Library"
+    return section
 end function
