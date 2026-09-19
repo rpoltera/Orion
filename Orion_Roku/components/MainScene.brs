@@ -341,7 +341,7 @@ sub onItemSelected()
     else if kind = "iptv" then
         startPlayback(item, appendToken(normalizeServer(m.top.serverUrl) + "/api/roku/iptv/" + item.mediaId + "?quality=720p"), "hls")
     else if kind = "channel" then
-        startPlayback(item, appendToken(normalizeServer(m.top.serverUrl) + "/api/roku/channel/" + item.mediaId), "hls")
+        startPlayback(item, normalizeServer(m.top.serverUrl) + "/sf/hls/" + item.mediaId + "/index.m3u8", "hls")
     else if kind = "video" then
         startPlayback(item, appendToken(normalizeServer(m.top.serverUrl) + "/api/roku/stream/" + item.mediaId + "?quality=720p"), "hls")
     end if
