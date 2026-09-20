@@ -93,6 +93,23 @@ sub startLoader(mode as String, section as String, page as Integer, showName as 
     m.loader.control = "RUN"
 end sub
 
+sub startVideoPlayback(item as Object)
+    if item.mediaId = "" then
+        m.status.text = "This item is missing its Orion media id."
+        return
+    end if
+    m.pendingPlaybackTitle = item.title
+    m.status.text = "Preparing " + item.title + "..."
+    m.loader = CreateObject("roSGNode", "OrionLoadTask")
+    m.loader.serverUrl = normalizeServer(m.top.serverUrl)
+    m.loader.mode = "play"
+    m.loader.mediaId = item.mediaId
+    m.loader.token = m.token
+    m.loader.observeField("payload", "onLibraryLoaded")
+    m.loader.observeField("error", "onLibraryError")
+    m.loader.control = "RUN"
+end sub
+
 sub onLibraryLoaded()
     if m.loader = invalid then return
     if m.loader.payload = "" then return
@@ -114,6 +131,8 @@ sub onLibraryLoaded()
         renderEpisodes(data)
     else if data.mode = "browse" then
         renderBrowse(data)
+    else if data.mode = "play" then
+        beginHlsPlayback(data)
     end if
 end sub
 
@@ -377,8 +396,28 @@ sub onItemSelected()
     else if kind = "channel" then
         startPlayback(item, normalizeServer(m.top.serverUrl) + "/sf/hls/" + item.mediaId + "/index.m3u8", "hls")
     else if kind = "video" then
-        startPlayback(item, appendToken(normalizeServer(m.top.serverUrl) + "/api/roku/stream/" + item.mediaId + "?quality=720p"), "hls")
+        startVideoPlayback(item)
     end if
+end sub
+
+sub beginHlsPlayback(data as Object)
+    if data.url = invalid then
+        m.status.text = "Orion did not return a video URL."
+        return
+    end if
+    if data.url = "" then
+        m.status.text = "Orion did not return a video URL."
+        return
+    end if
+    content = CreateObject("roSGNode", "ContentNode")
+    content.title = m.pendingPlaybackTitle
+    content.url = data.url
+    content.streamFormat = "hls"
+    m.status.text = "Starting " + m.pendingPlaybackTitle + "..."
+    m.video.content = content
+    m.video.visible = true
+    m.video.control = "play"
+    m.video.setFocus(true)
 end sub
 
 sub startPlayback(item as Object, url as String, streamFormat as String)
