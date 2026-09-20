@@ -142,7 +142,10 @@ function getEncoderArgs(encoder, tier, videoCodecHint, audioCodecHint, gpuId = n
       // filter would otherwise download every frame and waste several cores.
       if (encoder.includes('nvenc')) {
         const [width, height] = scale.split(':');
-        args.push('-vf', `scale_cuda=w=${width}:h=${height}:format=yuv420p`);
+        // scale_cuda outputs CUDA hardware frames.  yuv420p is a software
+        // pixel format, which causes FFmpeg to fail while reinitializing the
+        // graph.  NV12 stays on the GPU and is accepted directly by NVENC.
+        args.push('-vf', `scale_cuda=w=${width}:h=${height}:format=nv12`);
       } else {
         args.push('-vf', `scale=${scale}`);
       }
