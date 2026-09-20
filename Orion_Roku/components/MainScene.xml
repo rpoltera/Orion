@@ -1,4 +1,3 @@
-@@MAIN@@
 <?xml version="1.0" encoding="utf-8" ?>
 <component name="MainScene" extends="Scene">
   <interface>
@@ -8,7 +7,8 @@
     <Rectangle id="background" width="1280" height="720" color="080D1A" />
     <Label id="title" translation="[50,30]" width="1100" height="50" text="Orion" font="font:LargeBoldSystemFont" color="F9FAFB" />
     <Label id="server" translation="[52,82]" width="1100" height="28" font="font:SmallSystemFont" color="9CA3AF" />
-    <RowList id="rows" translation="[50,120]" width="1180" height="548"
+    <Label id="connection" translation="[52,112]" width="1150" height="32" font="font:MediumBoldSystemFont" color="F9FAFB" />
+    <RowList id="rows" translation="[50,155]" width="1180" height="513"
       rowItemComponentName="MediaTile" rowItemSize="[220,150]" rowItemSpacing="[16,22]"
       rowFocusAnimationStyle="floatingFocus" showRowLabel="true" rowLabelColor="F9FAFB"
       rowLabelFont="font:MediumBoldSystemFont" />
