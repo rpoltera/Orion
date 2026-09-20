@@ -208,13 +208,8 @@ sub renderHome(data as Object)
     m.currentUser = data.user
     addProfileRow(root, data.user)
     addNavigationRow(root)
-    for each rowData in data.rows
-        addCatalogRow(root, rowData)
-    end for
-    addMediaRow(root, "Live TV (IPTV) · " + countText(data.iptvTotal), data.iptv, "iptv", "iptv")
-    addMediaRow(root, "Orion Live Channels · " + countText(data.channelsTotal), data.channels, "channel", "channels")
     m.rows.content = root
-    m.status.text = "Select a title to play • Press * for server settings"
+    m.status.text = "Choose a library • Press * for server settings"
     m.connectionLabel.text = "Connected as " + stringValue(data.user, "name")
     m.rows.setFocus(true)
 end sub
