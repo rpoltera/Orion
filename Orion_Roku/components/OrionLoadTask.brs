@@ -57,34 +57,46 @@ sub login(base as String)
         m.top.error = requestError("Orion did not accept that PIN or password.")
         return
     end if
-    m.top.payload = FormatJson({ mode: "login", token: result.token, user: result.user })
+    home = buildHome(base, result.token)
+    if home = invalid then
+        m.top.error = requestError("Orion signed in, but the Roku could not load your library.")
+        return
+    end if
+    home.mode = "loginHome"
+    home.token = result.token
+    m.top.payload = FormatJson(home)
 end sub
 
 sub loadHome(base as String)
-    token = m.top.token
+    home = buildHome(base, m.top.token)
+    if home = invalid then return
+    home.mode = "home"
+    m.top.payload = FormatJson(home)
+end sub
+
+function buildHome(base as String, token as String) as Dynamic
     catalog = fetchJson(withToken(base + "/api/roku/catalog", token))
     if catalog = invalid then
         m.top.error = requestError("Session expired. Choose your Orion profile again.")
-        return
+        return invalid
     end if
     if catalog.rows = invalid then
         m.top.error = "Session expired. Choose your Orion profile again."
-        return
+        return invalid
     end if
     iptv = fetchPage(withToken(base + "/api/roku/iptv?page=0&limit=48", token))
     channels = fetchStreamForgeChannels(base, token, 0, 48)
     if iptv = invalid then iptv = { items: [], total: 0 }
     if channels = invalid then channels = { items: [], total: 0 }
-    m.top.payload = FormatJson({
-        mode: "home"
+    return {
         user: catalog.user
         rows: catalog.rows
         iptv: pageItems(iptv)
         iptvTotal: pageTotal(iptv)
         channels: pageItems(channels)
         channelsTotal: pageTotal(channels)
-    })
-end sub
+    }
+end function
 
 sub loadBrowse(base as String)
     section = m.top.section
