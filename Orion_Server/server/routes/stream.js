@@ -596,6 +596,35 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   });
 
   // ── Roku playback ─────────────────────────────────────────────────────────────
+  // Starts an authorized Roku HLS session and returns the final playlist URL.
+  // Roku Video nodes are unreliable when asked to follow an HTTP redirect while
+  // the first segment is still being generated.
+  router.get('/roku/playback/:mediaId', async (req, res) => {
+    const identity = requireRokuUser(req, res);
+    if (!identity) return;
+    const record = mediaRecord(req.params.mediaId);
+    if (!record || !recordVisibleToUser(record, identity.user, identity.access)) {
+      return res.status(404).json({ error: 'This title is not available to the selected Orion profile.' });
+    }
+    const quality = HLS_QUALITIES.has(String(req.query.quality || '')) ? req.query.quality : '720p';
+    try {
+      const { sessionId } = startLibraryHls(record.item, { quality });
+      const startup = await HLS.waitForPlaylist(sessionId, 30000);
+      if (!startup.ready) {
+        return res.status(503).json({ error: startup.error || 'Stream startup timed out' });
+      }
+      res.set('Cache-Control', 'no-store').json({
+        ok: true,
+        mediaId: record.item.id,
+        sessionId,
+        playlistUrl: `/api/hls/${sessionId}/index.m3u8`,
+      });
+    } catch (error) {
+      console.error('[Roku] Playback startup failed:', error.message);
+      return playbackError(res, error);
+    }
+  });
+
   // Roku's Video node is most reliable with HLS.  This route accepts only an
   // Orion media id, starts a server-side HLS session, and redirects the Roku to
   // the playlist.  It never exposes the media file path to the TV.
