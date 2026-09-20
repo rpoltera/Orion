@@ -6,6 +6,7 @@
     <field id="section" type="string" />
     <field id="page" type="integer" />
     <field id="showName" type="string" />
+    <field id="mediaId" type="string" />
     <field id="token" type="string" />
     <field id="userName" type="string" />
     <field id="credential" type="string" />
