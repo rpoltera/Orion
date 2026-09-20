@@ -619,14 +619,13 @@ sub applyTheme(item as Object)
 end sub
 
 sub applySavedTheme()
-    registry = CreateObject("roRegistrySection", "Orion")
-    m.background.color = rokuColor(registry.Read("themeBackground"), "080D1A")
-    m.sidebar.color = rokuColor(registry.Read("themeCard"), "10182B")
-    m.hero.color = rokuColor(registry.Read("themeCard"), "171D33")
-    m.title.color = rokuColor(registry.Read("themeText"), "F9FAFB")
-    m.status.color = rokuColor(registry.Read("themeMuted"), "9CA3AF")
-    m.serverLabel.color = rokuColor(registry.Read("themeMuted"), "9CA3AF")
-    m.connectionLabel.color = rokuColor(registry.Read("themeText"), "F9FAFB")
+    m.background.color = "111315"
+    m.sidebar.color = "1B1D20"
+    m.hero.color = "24272B"
+    m.title.color = "F2F4F8"
+    m.status.color = "96A2B3"
+    m.serverLabel.color = "7F8A98"
+    m.connectionLabel.color = "B7C0CC"
 end sub
 
 function onKeyEvent(key as String, press as Boolean) as Boolean
