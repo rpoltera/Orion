@@ -8,10 +8,9 @@
     <Label id="title" translation="[50,30]" width="1100" height="50" text="Orion" font="font:LargeBoldSystemFont" color="F9FAFB" />
     <Label id="server" translation="[52,82]" width="1100" height="28" font="font:SmallSystemFont" color="9CA3AF" />
     <Label id="connection" translation="[52,112]" width="1150" height="32" font="font:MediumBoldSystemFont" color="F9FAFB" />
-    <RowList id="rows" translation="[50,155]" width="1180" height="513"
-      rowItemComponentName="MediaTile" rowItemSize="[220,150]" rowItemSpacing="[16,22]"
-      rowFocusAnimationStyle="floatingFocus" showRowLabel="true" rowLabelColor="F9FAFB"
-      rowLabelFont="font:MediumBoldSystemFont" />
+    <MarkupGrid id="rows" translation="[50,155]" width="1180" height="513"
+      itemComponentName="MediaTile" itemSize="[220,150]" itemSpacing="[16,22]"
+      numRows="3" numColumns="5" drawFocusFeedbackOnTop="true" />
     <Label id="status" translation="[52,680]" width="1150" height="28" font="font:SmallSystemFont" color="9CA3AF" />
     <Video id="video" width="1280" height="720" visible="false" enableUI="true" />
   </children>
