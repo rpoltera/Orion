@@ -2,8 +2,8 @@
 <component name="MainScene" extends="Scene">
   <interface><field id="serverUrl" type="string" /></interface>
   <children>
-    <Rectangle id="background" width="1280" height="720" color="080B12" />
-    <Rectangle id="sidebar" width="182" height="720" color="131A23" />
+    <Rectangle id="background" width="1280" height="720" color="111315" />
+    <Rectangle id="sidebar" width="182" height="720" color="1B1D20" />
     <Label id="title" translation="[28,34]" width="135" height="40" text="ORION" font="font:LargeBoldSystemFont" color="F2F4F8" />
     <Label translation="[29,104]" width="130" height="22" text="HOME" font="font:SmallBoldSystemFont" color="E5A00D" />
     <Label translation="[29,148]" width="130" height="22" text="MOVIES" font="font:SmallSystemFont" color="B7C0CC" />
@@ -15,9 +15,10 @@
     <Label id="server" translation="[24,664]" width="145" height="20" font="font:TinySystemFont" color="7F8A98" />
     <Label id="connection" translation="[24,690]" width="145" height="18" font="font:TinySystemFont" color="B7C0CC" />
 
-    <Rectangle id="hero" translation="[208,26]" width="1040" height="184" color="1D2633" />
+    <Rectangle id="hero" translation="[208,26]" width="1040" height="184" color="24272B" />
+    <Rectangle translation="[208,26]" width="7" height="184" color="E5A00D" />
     <Poster id="heroPoster" translation="[1030,26]" width="218" height="184" loadDisplayMode="scaleToFill" />
-    <Rectangle translation="[965,26]" width="80" height="184" color="1D2633DD" />
+    <Rectangle translation="[965,26]" width="80" height="184" color="24272BDD" />
     <Label id="heroEyebrow" translation="[240,55]" width="680" height="22" text="ORION MEDIA SERVER" font="font:SmallBoldSystemFont" color="E5A00D" />
     <Label id="heroTitle" translation="[240,86]" width="680" height="46" text="Your library" font="font:LargeBoldSystemFont" color="F2F4F8" maxLines="1" wrap="false" />
     <Label id="heroMeta" translation="[240,145]" width="680" height="25" text="Movies, shows, music and live TV" font="font:SmallSystemFont" color="C7CED8" maxLines="1" wrap="false" />
