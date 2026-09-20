@@ -9,7 +9,7 @@ sub init()
     m.currentView = "profiles"
     m.currentSection = ""
     m.currentPage = 0
-    m.rows.observeField("rowItemSelected", "onItemSelected")
+    m.rows.observeField("itemSelected", "onItemSelected")
     m.video.observeField("state", "onVideoState")
     m.top.observeField("serverUrl", "onServerChanged")
     applySavedTheme()
@@ -131,10 +131,8 @@ end sub
 
 sub renderProfiles(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
-    row = root.createChild("ContentNode")
-    row.title = "Choose your Orion profile"
     for each user in data.users
-        node = createNode(row)
+        node = createNode(root)
         node.title = stringValue(user, "name")
         node.shortDescriptionLine1 = profileSubtitle(user)
         node.orionKind = "profile"
@@ -204,12 +202,10 @@ end sub
 
 sub renderBrowse(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
-    row = root.createChild("ContentNode")
-    row.title = sectionLabel(data.section) + " · Page " + (data.page + 1).ToStr() + " · " + countText(data.total)
     for each item in data.items
-        addItem(row, item, stringValue(item, "kind"), data.section)
+        addItem(root, item, stringValue(item, "kind"), data.section)
     end for
-    if (data.page + 1) * data.limit < data.total then addMoreItem(row, data.section, data.page + 1)
+    if (data.page + 1) * data.limit < data.total then addMoreItem(root, data.section, data.page + 1)
     m.rows.content = root
     m.currentView = "browse"
     m.currentSection = data.section
@@ -220,10 +216,8 @@ end sub
 
 sub renderEpisodes(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
-    row = root.createChild("ContentNode")
-    row.title = data.title + " · " + countText(data.total) + " Episodes"
     for each item in data.items
-        addItem(row, item, "video", "tvShows")
+        addItem(root, item, "video", "tvShows")
     end for
     m.rows.content = root
     m.currentView = "episodes"
@@ -233,9 +227,7 @@ end sub
 
 sub addProfileRow(root as Object, user as Object)
     if user = invalid then return
-    row = root.createChild("ContentNode")
-    row.title = "Current Profile"
-    node = createNode(row)
+    node = createNode(root)
     node.title = stringValue(user, "name")
     node.shortDescriptionLine1 = "Switch profile"
     node.orionKind = "switchProfile"
@@ -243,8 +235,6 @@ sub addProfileRow(root as Object, user as Object)
 end sub
 
 sub addNavigationRow(root as Object)
-    row = root.createChild("ContentNode")
-    row.title = "Browse All Orion"
     entries = [
         { title: "All Movies", section: "movies", color: "1F5EDB" }
         { title: "All TV Shows", section: "tvShows", color: "7936B5" }
@@ -259,7 +249,7 @@ sub addNavigationRow(root as Object)
         { title: "Server Themes", section: "themes", color: "6D28D9" }
     ]
     for each entry in entries
-        node = createNode(row)
+        node = createNode(root)
         node.title = entry.title
         node.shortDescriptionLine1 = "Browse all"
         node.orionKind = "section"
@@ -272,25 +262,26 @@ sub addCatalogRow(root as Object, rowData as Object)
     items = rowData.items
     if items = invalid then return
     if items.Count() = 0 then return
-    row = root.createChild("ContentNode")
-    row.title = stringValue(rowData, "title")
+    shown = 0
     for each item in items
-        addItem(row, item, stringValue(item, "kind"), stringValue(item, "section"))
+        if shown >= 12 then exit for
+        addItem(root, item, stringValue(item, "kind"), stringValue(item, "section"))
+        shown = shown + 1
     end for
     section = stringValue(rowData, "section")
-    if section <> "" and items.Count() < 48 then return
-    if section <> "" then addBrowseAllItem(row, section)
+    if section <> "" then addBrowseAllItem(root, section)
 end sub
 
 sub addMediaRow(root as Object, label as String, items as Object, kind as String, section as String)
     if items = invalid then return
     if items.Count() = 0 then return
-    row = root.createChild("ContentNode")
-    row.title = label
+    shown = 0
     for each item in items
-        addItem(row, item, kind, section)
+        if shown >= 12 then exit for
+        addItem(root, item, kind, section)
+        shown = shown + 1
     end for
-    addBrowseAllItem(row, section)
+    addBrowseAllItem(root, section)
 end sub
 
 sub addItem(row as Object, item as Object, kind as String, section as String)
@@ -360,12 +351,9 @@ function createNode(row as Object) as Object
 end function
 
 sub onItemSelected()
-    selected = m.rows.rowItemSelected
+    selected = m.rows.itemSelected
     if selected = invalid then return
-    if selected.Count() <> 2 then return
-    row = m.rows.content.getChild(selected[0])
-    if row = invalid then return
-    item = row.getChild(selected[1])
+    item = m.rows.content.getChild(selected)
     if item = invalid then return
 
     kind = item.orionKind
