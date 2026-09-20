@@ -3,6 +3,7 @@ sub init()
 end sub
 
 sub loadTask()
+    m.requestFailure = ""
     base = normalizeServer(m.top.serverUrl)
     if base = "" then
         m.top.error = "Press * and enter your Orion server address."
@@ -26,7 +27,7 @@ end sub
 sub loadProfiles(base as String)
     data = fetchJson(base + "/api/roku/users")
     if data = invalid then
-        m.top.error = "Could not load Orion profiles from " + base
+        m.top.error = requestError("Could not load Orion profiles from " + base)
         return
     end if
     if data.users = invalid then
@@ -44,8 +45,16 @@ sub login(base as String)
         return
     end if
     result = postJson(base + "/api/auth/login", { name: name, pin: credential })
-    if result = invalid or result.token = invalid or result.token = "" then
-        m.top.error = "Orion did not accept that PIN or password."
+    if result = invalid then
+        m.top.error = requestError("Orion did not accept that PIN or password.")
+        return
+    end if
+    if result.token = invalid then
+        m.top.error = requestError("Orion did not accept that PIN or password.")
+        return
+    end if
+    if result.token = "" then
+        m.top.error = requestError("Orion did not accept that PIN or password.")
         return
     end if
     m.top.payload = FormatJson({ mode: "login", token: result.token, user: result.user })
@@ -54,7 +63,11 @@ end sub
 sub loadHome(base as String)
     token = m.top.token
     catalog = fetchJson(withToken(base + "/api/roku/catalog", token))
-    if catalog = invalid or catalog.rows = invalid then
+    if catalog = invalid then
+        m.top.error = requestError("Session expired. Choose your Orion profile again.")
+        return
+    end if
+    if catalog.rows = invalid then
         m.top.error = "Session expired. Choose your Orion profile again."
         return
     end if
@@ -129,13 +142,15 @@ end function
 
 function fetchStreamForgeChannels(base as String, token as String, page as Integer, limit as Integer) as Dynamic
     data = fetchJson(withToken(base + "/api/sf/channels?light=1", token))
-    if data = invalid or type(data) <> "roArray" then return invalid
+    if data = invalid then return invalid
+    if type(data) <> "roArray" then return invalid
     allItems = []
     for each channel in data
         isActive = channel.active
         if isActive <> false then
             subtitle = channel.group
-            if subtitle = invalid or subtitle = "" then subtitle = "Orion live channel"
+            if subtitle = invalid then subtitle = "Orion live channel"
+            if subtitle = "" then subtitle = "Orion live channel"
             allItems.Push({
                 id: channel.id
                 title: channel.name
@@ -160,31 +175,94 @@ end function
 
 function fetchJson(url as String) as Dynamic
     transfer = CreateObject("roUrlTransfer")
+    port = CreateObject("roMessagePort")
+    transfer.SetMessagePort(port)
     transfer.SetUrl(url)
     transfer.AddHeader("Accept", "application/json")
     if m.top.token <> "" then transfer.AddHeader("Authorization", "Bearer " + m.top.token)
-    body = transfer.GetToString()
-    if transfer.GetResponseCode() <> 200 then return invalid
+    transfer.AsyncGetToString()
+    event = wait(10000, port)
+    if event = invalid then
+        transfer.AsyncCancel()
+        m.requestFailure = "The Roku could not reach Orion within 10 seconds."
+        return invalid
+    end if
+    if type(event) <> "roUrlEvent" then
+        transfer.AsyncCancel()
+        m.requestFailure = "The Roku received an unexpected network response."
+        return invalid
+    end if
+    code = event.GetResponseCode()
+    if code <> 200 then
+        m.requestFailure = "Orion returned HTTP " + code.ToStr() + "."
+        return invalid
+    end if
+    body = event.GetString()
+    if body = invalid then
+        m.requestFailure = "Orion returned an empty response."
+        return invalid
+    end if
+    if body = "" then
+        m.requestFailure = "Orion returned an empty response."
+        return invalid
+    end if
     return ParseJson(body)
+end function
+
+function requestError(fallback as String) as String
+    if m.requestFailure = invalid then return fallback
+    if m.requestFailure <> "" then return m.requestFailure
+    return fallback
 end function
 
 function postJson(url as String, payload as Object) as Dynamic
     transfer = CreateObject("roUrlTransfer")
+    port = CreateObject("roMessagePort")
+    transfer.SetMessagePort(port)
     transfer.SetUrl(url)
     transfer.AddHeader("Accept", "application/json")
     transfer.AddHeader("Content-Type", "application/json")
-    body = transfer.PostFromString(FormatJson(payload))
-    if transfer.GetResponseCode() <> 200 then return invalid
+    if not transfer.AsyncPostFromString(FormatJson(payload)) then
+        m.requestFailure = "The Roku could not start the Orion sign-in request."
+        return invalid
+    end if
+    event = wait(10000, port)
+    if event = invalid then
+        transfer.AsyncCancel()
+        m.requestFailure = "The Roku sign-in request timed out after 10 seconds."
+        return invalid
+    end if
+    if type(event) <> "roUrlEvent" then
+        transfer.AsyncCancel()
+        m.requestFailure = "The Roku received an unexpected sign-in response."
+        return invalid
+    end if
+    code = event.GetResponseCode()
+    if code <> 200 then
+        m.requestFailure = "Orion sign-in returned HTTP " + code.ToStr() + "."
+        return invalid
+    end if
+    body = event.GetString()
+    if body = invalid then
+        m.requestFailure = "Orion sign-in returned an empty response."
+        return invalid
+    end if
+    if body = "" then
+        m.requestFailure = "Orion sign-in returned an empty response."
+        return invalid
+    end if
     return ParseJson(body)
 end function
 
 function pageItems(page as Dynamic) as Object
-    if page = invalid or page.items = invalid then return []
+    if page = invalid then return []
+    if page.items = invalid then return []
     return page.items
 end function
 
 function pageTotal(page as Dynamic) as Integer
-    if page = invalid or page.total = invalid then return 0
+    if page = invalid then return 0
+    if page.total = invalid then return 0
     return page.total
 end function
 
