@@ -2,26 +2,31 @@
 <component name="MainScene" extends="Scene">
   <interface><field id="serverUrl" type="string" /></interface>
   <children>
-    <Rectangle id="background" width="1280" height="720" color="080D1A" />
-    <Rectangle id="sidebar" width="190" height="720" color="10182B" />
-    <Label id="title" translation="[30,42]" width="140" height="42" text="ORION" font="font:LargeBoldSystemFont" color="F9FAFB" />
-    <Label translation="[32,105]" width="125" height="24" text="HOME" font="font:SmallBoldSystemFont" color="70A7FF" />
-    <Label translation="[32,151]" width="125" height="24" text="MOVIES" font="font:SmallSystemFont" color="B8C0D0" />
-    <Label translation="[32,187]" width="125" height="24" text="TV SHOWS" font="font:SmallSystemFont" color="B8C0D0" />
-    <Label translation="[32,223]" width="125" height="24" text="MUSIC" font="font:SmallSystemFont" color="B8C0D0" />
-    <Label translation="[32,259]" width="125" height="24" text="LIVE TV" font="font:SmallSystemFont" color="B8C0D0" />
-    <Label translation="[32,295]" width="125" height="24" text="COLLECTIONS" font="font:SmallSystemFont" color="B8C0D0" />
-    <Label translation="[32,331]" width="125" height="24" text="CATEGORIES" font="font:SmallSystemFont" color="B8C0D0" />
-    <Label id="server" translation="[30,665]" width="145" height="20" font="font:TinySystemFont" color="7F8AA3" />
-    <Label id="connection" translation="[30,690]" width="145" height="20" font="font:TinySystemFont" color="B8C0D0" />
-    <Rectangle id="hero" translation="[220,30]" width="1010" height="180" color="171D33" />
-    <Poster id="heroPoster" translation="[1015,30]" width="215" height="180" loadDisplayMode="scaleToFill" />
-    <Rectangle id="heroFade" translation="[940,30]" width="100" height="180" color="171D33CC" />
-    <Label id="heroEyebrow" translation="[250,58]" width="600" height="25" text="ORION MEDIA SERVER" font="font:SmallBoldSystemFont" color="70A7FF" />
-    <Label id="heroTitle" translation="[250,88]" width="670" height="48" text="Your library" font="font:LargeBoldSystemFont" color="F9FAFB" maxLines="1" wrap="false" />
-    <Label id="heroMeta" translation="[250,142]" width="650" height="24" text="Select a library below" font="font:SmallSystemFont" color="B8C0D0" maxLines="1" wrap="false" />
-    <Label id="status" translation="[222,218]" width="1000" height="24" font="font:SmallSystemFont" color="9CA3AF" />
-    <RowList id="rows" translation="[220,250]" width="1020" height="455" itemSize="[1020,245]" itemSpacing="[0,0]" numRows="2" rowHeights="[245,245]" rowItemComponentName="MediaTile" rowItemSize="[156,220]" rowItemSpacing="[18,0]" showRowLabel="true" rowLabelOffset="[0,0]" rowLabelColor="F9FAFB" rowLabelFont="font:MediumBoldSystemFont" drawFocusFeedbackOnTop="true" />
+    <Rectangle id="background" width="1280" height="720" color="080B12" />
+    <Rectangle id="sidebar" width="182" height="720" color="131A23" />
+    <Label id="title" translation="[28,34]" width="135" height="40" text="ORION" font="font:LargeBoldSystemFont" color="F2F4F8" />
+    <Label translation="[29,104]" width="130" height="22" text="HOME" font="font:SmallBoldSystemFont" color="E5A00D" />
+    <Label translation="[29,148]" width="130" height="22" text="MOVIES" font="font:SmallSystemFont" color="B7C0CC" />
+    <Label translation="[29,182]" width="130" height="22" text="TV SHOWS" font="font:SmallSystemFont" color="B7C0CC" />
+    <Label translation="[29,216]" width="130" height="22" text="MUSIC" font="font:SmallSystemFont" color="B7C0CC" />
+    <Label translation="[29,250]" width="130" height="22" text="LIVE TV" font="font:SmallSystemFont" color="B7C0CC" />
+    <Label translation="[29,284]" width="130" height="22" text="COLLECTIONS" font="font:SmallSystemFont" color="B7C0CC" />
+    <Label translation="[29,318]" width="130" height="22" text="CATEGORIES" font="font:SmallSystemFont" color="B7C0CC" />
+    <Label id="server" translation="[24,664]" width="145" height="20" font="font:TinySystemFont" color="7F8A98" />
+    <Label id="connection" translation="[24,690]" width="145" height="18" font="font:TinySystemFont" color="B7C0CC" />
+
+    <Rectangle id="hero" translation="[208,26]" width="1040" height="184" color="1D2633" />
+    <Poster id="heroPoster" translation="[1030,26]" width="218" height="184" loadDisplayMode="scaleToFill" />
+    <Rectangle translation="[965,26]" width="80" height="184" color="1D2633DD" />
+    <Label id="heroEyebrow" translation="[240,55]" width="680" height="22" text="ORION MEDIA SERVER" font="font:SmallBoldSystemFont" color="E5A00D" />
+    <Label id="heroTitle" translation="[240,86]" width="680" height="46" text="Your library" font="font:LargeBoldSystemFont" color="F2F4F8" maxLines="1" wrap="false" />
+    <Label id="heroMeta" translation="[240,145]" width="680" height="25" text="Movies, shows, music and live TV" font="font:SmallSystemFont" color="C7CED8" maxLines="1" wrap="false" />
+    <Label id="status" translation="[210,218]" width="1010" height="22" font="font:SmallSystemFont" color="96A2B3" />
+
+    <Label id="shelf1Label" translation="[210,248]" width="1000" height="25" font="font:MediumBoldSystemFont" color="F2F4F8" />
+    <MarkupGrid id="shelf1" translation="[210,278]" width="1030" height="186" itemComponentName="MediaTile" itemSize="[148,180]" itemSpacing="[18,0]" numRows="1" numColumns="6" drawFocusFeedbackOnTop="true" />
+    <Label id="shelf2Label" translation="[210,480]" width="1000" height="25" font="font:MediumBoldSystemFont" color="F2F4F8" />
+    <MarkupGrid id="shelf2" translation="[210,510]" width="1030" height="186" itemComponentName="MediaTile" itemSize="[148,180]" itemSpacing="[18,0]" numRows="1" numColumns="6" drawFocusFeedbackOnTop="true" />
     <Video id="video" width="1280" height="720" visible="false" enableUI="true" />
   </children>
   <script type="text/brightscript" uri="pkg:/components/MainScene.brs" />
