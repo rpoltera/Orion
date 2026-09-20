@@ -4,12 +4,19 @@ sub init()
     m.serverLabel = m.top.findNode("server")
     m.connectionLabel = m.top.findNode("connection")
     m.background = m.top.findNode("background")
+    m.sidebar = m.top.findNode("sidebar")
+    m.hero = m.top.findNode("hero")
+    m.heroPoster = m.top.findNode("heroPoster")
+    m.heroTitle = m.top.findNode("heroTitle")
+    m.heroMeta = m.top.findNode("heroMeta")
+    m.heroEyebrow = m.top.findNode("heroEyebrow")
     m.title = m.top.findNode("title")
     m.video = m.top.findNode("video")
     m.currentView = "profiles"
     m.currentSection = ""
     m.currentPage = 0
-    m.rows.observeField("itemSelected", "onItemSelected")
+    m.rows.observeField("rowItemSelected", "onItemSelected")
+    m.rows.observeField("rowItemFocused", "onItemFocused")
     m.video.observeField("state", "onVideoState")
     m.top.observeField("serverUrl", "onServerChanged")
     applySavedTheme()
@@ -150,8 +157,9 @@ end sub
 
 sub renderProfiles(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
+    row = createRow(root, "Choose Profile")
     for each user in data.users
-        node = createNode(root)
+        node = createNode(row)
         node.title = stringValue(user, "name")
         node.shortDescriptionLine1 = profileSubtitle(user)
         node.orionKind = "profile"
@@ -206,20 +214,28 @@ sub renderHome(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
     m.homeContent = root
     m.currentUser = data.user
-    addProfileRow(root, data.user)
     addNavigationRow(root)
+    for each rowData in data.rows
+        addCatalogRow(root, rowData)
+    end for
+    addMediaRow(root, "Live TV · " + countText(data.iptvTotal), data.iptv, "iptv", "iptv")
+    addMediaRow(root, "Orion Channels · " + countText(data.channelsTotal), data.channels, "channel", "channels")
     m.rows.content = root
-    m.status.text = "Choose a library • Press * for server settings"
+    m.heroTitle.text = "Welcome back, " + stringValue(data.user, "name")
+    m.heroMeta.text = "Movies, shows, music, live TV and your Orion channels"
+    m.heroPoster.visible = false
+    m.status.text = "Browse your libraries • Press * for server settings"
     m.connectionLabel.text = "Connected as " + stringValue(data.user, "name")
     m.rows.setFocus(true)
 end sub
 
 sub renderBrowse(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
-    for each item in data.items
-        addItem(root, item, stringValue(item, "kind"), data.section)
-    end for
-    if (data.page + 1) * data.limit < data.total then addMoreItem(root, data.section, data.page + 1)
+    addItemsInRows(root, sectionLabel(data.section), data.items, data.section)
+    if (data.page + 1) * data.limit < data.total then
+        row = createRow(root, "More")
+        addMoreItem(row, data.section, data.page + 1)
+    end if
     m.rows.content = root
     m.currentView = "browse"
     m.currentSection = data.section
@@ -230,9 +246,7 @@ end sub
 
 sub renderEpisodes(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
-    for each item in data.items
-        addItem(root, item, "video", "tvShows")
-    end for
+    addItemsInRows(root, stringValue(data, "title"), data.items, "tvShows")
     m.rows.content = root
     m.currentView = "episodes"
     m.status.text = "Select an episode to play • Back returns to your Orion home"
@@ -241,7 +255,8 @@ end sub
 
 sub addProfileRow(root as Object, user as Object)
     if user = invalid then return
-    node = createNode(root)
+    row = createRow(root, "Profile")
+    node = createNode(row)
     node.title = stringValue(user, "name")
     node.shortDescriptionLine1 = "Switch profile"
     node.orionKind = "switchProfile"
@@ -249,6 +264,7 @@ sub addProfileRow(root as Object, user as Object)
 end sub
 
 sub addNavigationRow(root as Object)
+    row = createRow(root, "Libraries")
     entries = [
         { title: "All Movies", section: "movies", color: "1F5EDB" }
         { title: "All TV Shows", section: "tvShows", color: "7936B5" }
@@ -263,7 +279,7 @@ sub addNavigationRow(root as Object)
         { title: "Server Themes", section: "themes", color: "6D28D9" }
     ]
     for each entry in entries
-        node = createNode(root)
+        node = createNode(row)
         node.title = entry.title
         node.shortDescriptionLine1 = "Browse all"
         node.orionKind = "section"
@@ -276,26 +292,43 @@ sub addCatalogRow(root as Object, rowData as Object)
     items = rowData.items
     if items = invalid then return
     if items.Count() = 0 then return
+    row = createRow(root, stringValue(rowData, "title"))
     shown = 0
     for each item in items
         if shown >= 12 then exit for
-        addItem(root, item, stringValue(item, "kind"), stringValue(item, "section"))
+        addItem(row, item, stringValue(item, "kind"), stringValue(item, "section"))
         shown = shown + 1
     end for
     section = stringValue(rowData, "section")
-    if section <> "" then addBrowseAllItem(root, section)
+    if section <> "" then addBrowseAllItem(row, section)
 end sub
 
 sub addMediaRow(root as Object, label as String, items as Object, kind as String, section as String)
     if items = invalid then return
     if items.Count() = 0 then return
+    row = createRow(root, label)
     shown = 0
     for each item in items
         if shown >= 12 then exit for
-        addItem(root, item, kind, section)
+        addItem(row, item, kind, section)
         shown = shown + 1
     end for
-    addBrowseAllItem(root, section)
+    addBrowseAllItem(row, section)
+end sub
+
+sub addItemsInRows(root as Object, label as String, items as Object, section as String)
+    if items = invalid then return
+    row = invalid
+    index = 0
+    for each item in items
+        if index mod 12 = 0 then
+            rowLabel = label
+            if index > 0 then rowLabel = label + " · " + (index + 1).ToStr()
+            row = createRow(root, rowLabel)
+        end if
+        addItem(row, item, stringValue(item, "kind"), section)
+        index = index + 1
+    end for
 end sub
 
 sub addItem(row as Object, item as Object, kind as String, section as String)
@@ -364,10 +397,14 @@ function createNode(row as Object) as Object
     return node
 end function
 
+function createRow(root as Object, label as String) as Object
+    row = root.createChild("ContentNode")
+    row.title = label
+    return row
+end function
+
 sub onItemSelected()
-    selected = m.rows.itemSelected
-    if selected = invalid then return
-    item = m.rows.content.getChild(selected)
+    item = selectedRowItem(m.rows.rowItemSelected)
     if item = invalid then return
 
     kind = item.orionKind
@@ -394,6 +431,28 @@ sub onItemSelected()
         startVideoPlayback(item)
     end if
 end sub
+
+sub onItemFocused()
+    item = selectedRowItem(m.rows.rowItemFocused)
+    if item = invalid then return
+    m.heroTitle.text = item.title
+    m.heroMeta.text = item.shortDescriptionLine1
+    poster = item.hdPosterUrl
+    m.heroPoster.visible = poster <> ""
+    m.heroPoster.uri = poster
+    if item.accentColor <> invalid then
+        if item.accentColor <> "" then m.hero.color = rokuColor(item.accentColor, "171D33")
+    end if
+end sub
+
+function selectedRowItem(position as Dynamic) as Dynamic
+    if position = invalid then return invalid
+    if type(position) <> "roArray" then return invalid
+    if position.Count() < 2 then return invalid
+    row = m.rows.content.getChild(position[0])
+    if row = invalid then return invalid
+    return row.getChild(position[1])
+end function
 
 sub beginHlsPlayback(data as Object)
     if data.url = invalid then
@@ -524,6 +583,8 @@ end sub
 sub applySavedTheme()
     registry = CreateObject("roRegistrySection", "Orion")
     m.background.color = rokuColor(registry.Read("themeBackground"), "080D1A")
+    m.sidebar.color = rokuColor(registry.Read("themeCard"), "10182B")
+    m.hero.color = rokuColor(registry.Read("themeCard"), "171D33")
     m.title.color = rokuColor(registry.Read("themeText"), "F9FAFB")
     m.status.color = rokuColor(registry.Read("themeMuted"), "9CA3AF")
     m.serverLabel.color = rokuColor(registry.Read("themeMuted"), "9CA3AF")
@@ -541,7 +602,7 @@ function onKeyEvent(key as String, press as Boolean) as Boolean
         m.currentView = "home"
         m.currentSection = ""
         m.currentPage = 0
-        m.status.text = "Select a title to play • Press * for server settings"
+        m.status.text = "Browse your libraries • Press * for server settings"
         m.rows.setFocus(true)
         return true
     end if
