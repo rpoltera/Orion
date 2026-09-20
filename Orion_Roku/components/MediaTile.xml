@@ -2,11 +2,11 @@
 <component name="MediaTile" extends="Group">
   <interface><field id="itemContent" type="node" onChange="showContent" /></interface>
   <children>
-    <Rectangle id="background" width="156" height="220" color="171D33" />
-    <Poster id="poster" width="156" height="220" loadDisplayMode="scaleToFill" />
-    <Rectangle id="shade" translation="[0,157]" width="156" height="63" color="111827E8" />
-    <Label id="title" translation="[9,166]" width="138" height="31" font="font:SmallBoldSystemFont" color="F9FAFB" maxLines="2" wrap="true" />
-    <Label id="subtitle" translation="[9,199]" width="138" height="16" font="font:TinySystemFont" color="B8C0D0" maxLines="1" wrap="false" />
+    <Rectangle id="background" width="148" height="180" color="202936" />
+    <Poster id="poster" width="148" height="180" loadDisplayMode="scaleToFill" />
+    <Rectangle id="shade" translation="[0,124]" width="148" height="56" color="0B0F16E8" />
+    <Label id="title" translation="[8,132]" width="132" height="29" font="font:SmallBoldSystemFont" color="F9FAFB" maxLines="2" wrap="true" />
+    <Label id="subtitle" translation="[8,163]" width="132" height="14" font="font:TinySystemFont" color="B8C0D0" maxLines="1" wrap="false" />
   </children>
   <script type="text/brightscript" uri="pkg:/components/MediaTile.brs" />
 </component>
