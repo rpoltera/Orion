@@ -1,5 +1,8 @@
 sub init()
-    m.rows = m.top.findNode("rows")
+    m.shelf1 = m.top.findNode("shelf1")
+    m.shelf2 = m.top.findNode("shelf2")
+    m.shelf1Label = m.top.findNode("shelf1Label")
+    m.shelf2Label = m.top.findNode("shelf2Label")
     m.status = m.top.findNode("status")
     m.serverLabel = m.top.findNode("server")
     m.connectionLabel = m.top.findNode("connection")
@@ -15,8 +18,10 @@ sub init()
     m.currentView = "profiles"
     m.currentSection = ""
     m.currentPage = 0
-    m.rows.observeField("rowItemSelected", "onItemSelected")
-    m.rows.observeField("rowItemFocused", "onItemFocused")
+    m.shelf1.observeField("itemSelected", "onShelf1Selected")
+    m.shelf2.observeField("itemSelected", "onShelf2Selected")
+    m.shelf1.observeField("itemFocused", "onShelf1Focused")
+    m.shelf2.observeField("itemFocused", "onShelf2Focused")
     m.video.observeField("state", "onVideoState")
     m.top.observeField("serverUrl", "onServerChanged")
     applySavedTheme()
@@ -30,7 +35,7 @@ sub init()
         m.lastLoadedServer = server
         loadCurrentServer()
     end if
-    m.rows.setFocus(true)
+    m.shelf1.setFocus(true)
 end sub
 
 sub onServerChanged()
@@ -166,7 +171,7 @@ sub renderProfiles(data as Object)
         node.userName = stringValue(user, "name")
         node.accentColor = "2563EB"
     end for
-    m.rows.content = root
+    setShelfContent(root)
     if data.users.Count() = 1 then
         m.status.text = "Signing in to your Orion profile..."
         m.connectionLabel.text = "Enter your Orion password once on this Roku"
@@ -175,7 +180,7 @@ sub renderProfiles(data as Object)
     end if
     m.status.text = "Select a profile • Press * for server settings"
     m.connectionLabel.text = "Connected — choose your profile"
-    m.rows.setFocus(true)
+    m.shelf1.setFocus(true)
 end sub
 
 sub onLogin(data as Object)
@@ -220,13 +225,13 @@ sub renderHome(data as Object)
     end for
     addMediaRow(root, "Live TV · " + countText(data.iptvTotal), data.iptv, "iptv", "iptv")
     addMediaRow(root, "Orion Channels · " + countText(data.channelsTotal), data.channels, "channel", "channels")
-    m.rows.content = root
+    setShelfContent(root)
     m.heroTitle.text = "Welcome back, " + stringValue(data.user, "name")
     m.heroMeta.text = "Movies, shows, music, live TV and your Orion channels"
     m.heroPoster.visible = false
     m.status.text = "Browse your libraries • Press * for server settings"
     m.connectionLabel.text = "Connected as " + stringValue(data.user, "name")
-    m.rows.setFocus(true)
+    m.shelf1.setFocus(true)
 end sub
 
 sub renderBrowse(data as Object)
@@ -236,21 +241,21 @@ sub renderBrowse(data as Object)
         row = createRow(root, "More")
         addMoreItem(row, data.section, data.page + 1)
     end if
-    m.rows.content = root
+    setShelfContent(root)
     m.currentView = "browse"
     m.currentSection = data.section
     m.currentPage = data.page
     m.status.text = "Back returns to your Orion home"
-    m.rows.setFocus(true)
+    m.shelf1.setFocus(true)
 end sub
 
 sub renderEpisodes(data as Object)
     root = CreateObject("roSGNode", "ContentNode")
     addItemsInRows(root, stringValue(data, "title"), data.items, "tvShows")
-    m.rows.content = root
+    setShelfContent(root)
     m.currentView = "episodes"
     m.status.text = "Select an episode to play • Back returns to your Orion home"
-    m.rows.setFocus(true)
+    m.shelf1.setFocus(true)
 end sub
 
 sub addProfileRow(root as Object, user as Object)
@@ -403,8 +408,7 @@ function createRow(root as Object, label as String) as Object
     return row
 end function
 
-sub onItemSelected()
-    item = selectedRowItem(m.rows.rowItemSelected)
+sub activateItem(item as Object)
     if item = invalid then return
 
     kind = item.orionKind
@@ -432,8 +436,25 @@ sub onItemSelected()
     end if
 end sub
 
-sub onItemFocused()
-    item = selectedRowItem(m.rows.rowItemFocused)
+sub onShelf1Selected()
+    activateItem(shelfItem(0, m.shelf1.itemSelected))
+end sub
+
+sub onShelf2Selected()
+    activateItem(shelfItem(1, m.shelf2.itemSelected))
+end sub
+
+sub onShelf1Focused()
+    m.activeShelf = 0
+    showHero(shelfItem(0, m.shelf1.itemFocused))
+end sub
+
+sub onShelf2Focused()
+    m.activeShelf = 1
+    showHero(shelfItem(1, m.shelf2.itemFocused))
+end sub
+
+sub showHero(item as Object)
     if item = invalid then return
     m.heroTitle.text = item.title
     m.heroMeta.text = item.shortDescriptionLine1
@@ -442,14 +463,34 @@ sub onItemFocused()
     m.heroPoster.uri = poster
 end sub
 
-function selectedRowItem(position as Dynamic) as Dynamic
+function shelfItem(slot as Integer, position as Dynamic) as Dynamic
+    if m.shelfContent = invalid then return invalid
     if position = invalid then return invalid
-    if type(position) <> "roArray" then return invalid
-    if position.Count() < 2 then return invalid
-    row = m.rows.content.getChild(position[0])
+    row = m.shelfContent.getChild(m.shelfStart + slot)
     if row = invalid then return invalid
-    return row.getChild(position[1])
+    return row.getChild(position)
 end function
+
+sub setShelfContent(root as Object)
+    m.shelfContent = root
+    m.shelfStart = 0
+    m.activeShelf = 0
+    renderShelfWindow()
+end sub
+
+sub renderShelfWindow()
+    if m.shelfContent = invalid then return
+    first = m.shelfContent.getChild(m.shelfStart)
+    second = m.shelfContent.getChild(m.shelfStart + 1)
+    m.shelf1.content = first
+    m.shelf1Label.text = ""
+    if first <> invalid then m.shelf1Label.text = first.title
+    m.shelf2.content = second
+    m.shelf2Label.text = ""
+    m.shelf2.visible = second <> invalid
+    m.shelf2Label.visible = second <> invalid
+    if second <> invalid then m.shelf2Label.text = second.title
+end sub
 
 sub beginHlsPlayback(data as Object)
     if data.url = invalid then
@@ -500,7 +541,7 @@ end sub
 sub closeVideo()
     m.video.control = "stop"
     m.video.visible = false
-    m.rows.setFocus(true)
+    m.shelf1.setFocus(true)
 end sub
 
 sub openPinDialog(userName as String)
@@ -522,7 +563,7 @@ sub onPinDialog(event as Object)
     if event.getData() = 0 then
         startLogin(m.pendingUserName, credential)
     else
-        m.rows.setFocus(true)
+        m.shelf1.setFocus(true)
     end if
 end sub
 
@@ -553,7 +594,7 @@ sub onServerDialog(event as Object)
             loadCurrentServer()
         end if
     else
-        m.rows.setFocus(true)
+        m.shelf1.setFocus(true)
     end if
 end sub
 
@@ -595,13 +636,40 @@ function onKeyEvent(key as String, press as Boolean) as Boolean
         return true
     end if
     if key = "back" and (m.currentView = "browse" or m.currentView = "episodes") then
-        m.rows.content = m.homeContent
+        setShelfContent(m.homeContent)
         m.currentView = "home"
         m.currentSection = ""
         m.currentPage = 0
         m.status.text = "Browse your libraries • Press * for server settings"
-        m.rows.setFocus(true)
+        m.shelf1.setFocus(true)
         return true
+    end if
+    if not m.video.visible and key = "down" then
+        if m.activeShelf = 0 and m.shelfContent.getChild(m.shelfStart + 1) <> invalid then
+            m.activeShelf = 1
+            m.shelf2.setFocus(true)
+            return true
+        end if
+        if m.activeShelf = 1 and m.shelfContent.getChild(m.shelfStart + 2) <> invalid then
+            m.shelfStart = m.shelfStart + 1
+            m.activeShelf = 1
+            renderShelfWindow()
+            m.shelf2.setFocus(true)
+            return true
+        end if
+    end if
+    if not m.video.visible and key = "up" then
+        if m.activeShelf = 1 then
+            m.activeShelf = 0
+            m.shelf1.setFocus(true)
+            return true
+        end if
+        if m.activeShelf = 0 and m.shelfStart > 0 then
+            m.shelfStart = m.shelfStart - 1
+            renderShelfWindow()
+            m.shelf1.setFocus(true)
+            return true
+        end if
     end if
     if key = "options" and not m.video.visible then
         openServerDialog()
