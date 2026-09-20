@@ -4,11 +4,10 @@ sub init()
     m.shade = m.top.findNode("shade")
     m.title = m.top.findNode("title")
     m.subtitle = m.top.findNode("subtitle")
-    registry = CreateObject("roRegistrySection", "Orion")
-    m.background.color = cleanColor(registry.Read("themeCard"), "171D33")
-    m.shade.color = cleanColor(registry.Read("themeCard"), "171D33")
-    m.title.color = cleanColor(registry.Read("themeText"), "F9FAFB")
-    m.subtitle.color = cleanColor(registry.Read("themeMuted"), "B8C0D0")
+    m.background.color = "24272B"
+    m.shade.color = "080A0EE8"
+    m.title.color = "F2F4F8"
+    m.subtitle.color = "B7C0CC"
 end sub
 
 sub showContent()
@@ -17,11 +16,9 @@ sub showContent()
     poster = item.hdPosterUrl
     m.poster.visible = poster <> ""
     m.poster.uri = poster
+    m.background.color = "24272B"
     m.title.text = item.title
     m.subtitle.text = item.shortDescriptionLine1
-    if item.accentColor <> invalid then
-        if item.accentColor <> "" and poster = "" then m.background.color = cleanColor(item.accentColor, "171D33")
-    end if
 end sub
 
 function cleanColor(value as Dynamic, fallback as String) as String
