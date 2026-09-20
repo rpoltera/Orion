@@ -19,9 +19,46 @@ sub loadTask()
         loadEpisodes(base)
     else if mode = "browse" then
         loadBrowse(base)
+    else if mode = "play" then
+        loadPlayback(base)
     else
         loadHome(base)
     end if
+end sub
+
+sub loadPlayback(base as String)
+    if m.top.mediaId = "" then
+        m.top.error = "This item is missing its Orion media id."
+        return
+    end if
+
+    playback = postJson(withToken(base + "/api/playback/start", m.top.token), {
+        mediaId: m.top.mediaId
+        quality: "720p"
+    })
+    if playback = invalid then
+        m.top.error = requestError("Orion could not prepare this video.")
+        return
+    end if
+    if playback.ready = invalid then
+        m.top.error = "Orion did not return a ready playback session."
+        return
+    end if
+    if playback.ready <> true then
+        m.top.error = "Orion is still preparing this video. Please try again."
+        return
+    end if
+    if playback.playlistUrl = invalid then
+        m.top.error = "Orion did not return an HLS playlist."
+        return
+    end if
+    playlist = playback.playlistUrl
+    if playlist = "" then
+        m.top.error = "Orion returned an empty HLS playlist URL."
+        return
+    end if
+    if Left(playlist, 1) = "/" then playlist = base + playlist
+    m.top.payload = FormatJson({ mode: "play", url: playlist })
 end sub
 
 sub loadProfiles(base as String)
