@@ -2,6 +2,7 @@ sub init()
     m.rows = m.top.findNode("rows")
     m.status = m.top.findNode("status")
     m.serverLabel = m.top.findNode("server")
+    m.connectionLabel = m.top.findNode("connection")
     m.background = m.top.findNode("background")
     m.title = m.top.findNode("title")
     m.video = m.top.findNode("video")
@@ -17,6 +18,7 @@ sub init()
     m.lastLoadedServer = ""
     if server = "" then
         m.status.text = "Press * to connect Orion."
+        m.connectionLabel.text = "No Orion server configured — press * to connect"
     else
         m.lastLoadedServer = server
         loadCurrentServer()
@@ -43,6 +45,7 @@ sub loadProfiles()
     m.currentSection = ""
     m.serverLabel.text = "Server: " + normalizeServer(m.top.serverUrl) + "   •   * Server settings"
     m.status.text = "Loading Orion profiles..."
+    m.connectionLabel.text = "Connecting to Orion…"
     startLoader("profiles", "", 0, "", "", "")
 end sub
 
@@ -52,6 +55,7 @@ sub loadHome()
     m.currentPage = 0
     m.serverLabel.text = "Server: " + normalizeServer(m.top.serverUrl) + "   •   * Settings"
     m.status.text = "Loading your Orion library..."
+    m.connectionLabel.text = "Connected to Orion"
     startLoader("home", "", 0, "", "", "")
 end sub
 
@@ -90,7 +94,8 @@ sub startLoader(mode as String, section as String, page as Integer, showName as 
 end sub
 
 sub onLibraryLoaded()
-    if m.loader = invalid or m.loader.payload = "" then return
+    if m.loader = invalid then return
+    if m.loader.payload = "" then return
     data = ParseJson(m.loader.payload)
     if data = invalid then
         m.status.text = "Orion returned unreadable data."
@@ -111,9 +116,11 @@ sub onLibraryLoaded()
 end sub
 
 sub onLibraryError()
-    if m.loader = invalid or m.loader.error = "" then return
+    if m.loader = invalid then return
+    if m.loader.error = "" then return
     m.status.text = m.loader.error
     m.serverLabel.text = "Error: " + m.loader.error
+    m.connectionLabel.text = "Connection failed — press * to edit server"
     if Instr(1, m.loader.error, "Session expired") > 0 then
         clearProfile()
         loadProfiles()
@@ -133,12 +140,23 @@ sub renderProfiles(data as Object)
         node.accentColor = "2563EB"
     end for
     m.rows.content = root
+    if data.users.Count() = 1 then
+        m.status.text = "Signing in to your Orion profile..."
+        m.connectionLabel.text = "Enter your Orion password once on this Roku"
+        openPinDialog(stringValue(data.users[0], "name"))
+        return
+    end if
     m.status.text = "Select a profile • Press * for server settings"
+    m.connectionLabel.text = "Connected — choose your profile"
     m.rows.setFocus(true)
 end sub
 
 sub onLogin(data as Object)
-    if data.token = invalid or data.token = "" then
+    if data.token = invalid then
+        m.status.text = "Orion did not return a sign-in token."
+        return
+    end if
+    if data.token = "" then
         m.status.text = "Orion did not return a sign-in token."
         return
     end if
@@ -162,6 +180,7 @@ sub renderHome(data as Object)
     addMediaRow(root, "Orion Live Channels · " + countText(data.channelsTotal), data.channels, "channel", "channels")
     m.rows.content = root
     m.status.text = "Select a title to play • Press * for server settings"
+    m.connectionLabel.text = "Connected as " + stringValue(data.user, "name")
     m.rows.setFocus(true)
 end sub
 
@@ -233,7 +252,8 @@ end sub
 
 sub addCatalogRow(root as Object, rowData as Object)
     items = rowData.items
-    if items = invalid or items.Count() = 0 then return
+    if items = invalid then return
+    if items.Count() = 0 then return
     row = root.createChild("ContentNode")
     row.title = stringValue(rowData, "title")
     for each item in items
@@ -245,7 +265,8 @@ sub addCatalogRow(root as Object, rowData as Object)
 end sub
 
 sub addMediaRow(root as Object, label as String, items as Object, kind as String, section as String)
-    if items = invalid or items.Count() = 0 then return
+    if items = invalid then return
+    if items.Count() = 0 then return
     row = root.createChild("ContentNode")
     row.title = label
     for each item in items
@@ -322,7 +343,8 @@ end function
 
 sub onItemSelected()
     selected = m.rows.rowItemSelected
-    if selected = invalid or selected.Count() <> 2 then return
+    if selected = invalid then return
+    if selected.Count() <> 2 then return
     row = m.rows.content.getChild(selected[0])
     if row = invalid then return
     item = row.getChild(selected[1])
@@ -465,6 +487,7 @@ sub applySavedTheme()
     m.title.color = rokuColor(registry.Read("themeText"), "F9FAFB")
     m.status.color = rokuColor(registry.Read("themeMuted"), "9CA3AF")
     m.serverLabel.color = rokuColor(registry.Read("themeMuted"), "9CA3AF")
+    m.connectionLabel.color = rokuColor(registry.Read("themeText"), "F9FAFB")
 end sub
 
 function onKeyEvent(key as String, press as Boolean) as Boolean
@@ -530,7 +553,8 @@ function themeColor(item as Object, key as String, fallback as String) as String
     vars = item.vars
     if vars = invalid then return fallback
     value = vars[key]
-    if value = invalid or value = "" then return fallback
+    if value = invalid then return fallback
+    if value = "" then return fallback
     return rokuColor(value, fallback)
 end function
 
