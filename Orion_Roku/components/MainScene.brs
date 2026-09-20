@@ -440,9 +440,6 @@ sub onItemFocused()
     poster = item.hdPosterUrl
     m.heroPoster.visible = poster <> ""
     m.heroPoster.uri = poster
-    if item.accentColor <> invalid then
-        if item.accentColor <> "" then m.hero.color = rokuColor(item.accentColor, "171D33")
-    end if
 end sub
 
 function selectedRowItem(position as Dynamic) as Dynamic
