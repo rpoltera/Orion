@@ -106,6 +106,8 @@ sub onLibraryLoaded()
         renderProfiles(data)
     else if data.mode = "login" then
         onLogin(data)
+    else if data.mode = "loginHome" then
+        onLoginHome(data)
     else if data.mode = "home" then
         renderHome(data)
     else if data.mode = "episodes" then
@@ -165,6 +167,22 @@ sub onLogin(data as Object)
     registry.Write("userToken", m.token)
     registry.Flush()
     loadHome()
+end sub
+
+sub onLoginHome(data as Object)
+    if data.token = invalid then
+        m.status.text = "Orion did not return a sign-in token."
+        return
+    end if
+    if data.token = "" then
+        m.status.text = "Orion did not return a sign-in token."
+        return
+    end if
+    m.token = data.token
+    registry = CreateObject("roRegistrySection", "Orion")
+    registry.Write("userToken", m.token)
+    registry.Flush()
+    renderHome(data)
 end sub
 
 sub renderHome(data as Object)
