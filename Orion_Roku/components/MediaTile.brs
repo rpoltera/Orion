@@ -19,7 +19,9 @@ sub showContent()
     m.poster.uri = poster
     m.title.text = item.title
     m.subtitle.text = item.shortDescriptionLine1
-    if item.accentColor <> invalid and item.accentColor <> "" and poster = "" then m.background.color = cleanColor(item.accentColor, "171D33")
+    if item.accentColor <> invalid then
+        if item.accentColor <> "" and poster = "" then m.background.color = cleanColor(item.accentColor, "171D33")
+    end if
 end sub
 
 function cleanColor(value as Dynamic, fallback as String) as String
