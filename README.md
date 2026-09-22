@@ -7,7 +7,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/rpoltera/Orion/main/Orion_Server/create_lxc.sh)
 ```
 
-![Orion Logo]()
+![Orion Logo](https://github.com/rpoltera/Orion/blob/main/Orion_Server/assets/icon.png)
 
 **Status:** Alpha &nbsp;·&nbsp; **License:** Custom Attribution
 
