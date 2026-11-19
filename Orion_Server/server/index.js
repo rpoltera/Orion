@@ -30,6 +30,7 @@ const { PlaybackCoordinator } = require('./services/playback-coordinator');
 const { buildAutoCollections } = require('./services/autocollections');
 const { db, loadDB, saveDB, rebuildIndex, findById, _idx } = require('./db');
 const { scanDirectory, deduplicateMedia, getQualityScore, isTrailerOrExtra } = require('./services/scanner');
+const { isDiscImage, probeDiscImage } = require('./services/disc-image');
 const { fetchMovieMeta, fetchTVMeta, fetchMusicVideoMeta, decodeHtmlEntities, axiosPool } = require('./services/metadata');
 
 const app    = express();
@@ -1022,14 +1023,15 @@ password=${password||''}
     const { path: filePath } = req.query;
     if (!filePath) return res.json({ audio: [], subtitles: [], chapters: [], duration: 0 });
     try {
-      ffmpeg.ffprobe(filePath, (err, meta) => {
+      const discImage = isDiscImage(filePath);
+      const sendTracks = (err, meta) => {
         if (err) return res.json({ audio: [], subtitles: [], chapters: [], duration: 0 });
-        const duration = meta.format?.duration || 0;
+        const duration = Number(meta.format?.duration) || 0;
         const audio = (meta.streams || []).filter(s => s.codec_type === 'audio').map((s, i) => ({
           index: i, codec: s.codec_name, language: s.tags?.language || 'und',
           title: s.tags?.title || null, channels: s.channels, default: s.disposition?.default === 1,
         }));
-        const subtitles = (meta.streams || []).filter(s => s.codec_type === 'subtitle').map((s, i) => ({
+        const subtitles = (discImage ? [] : meta.streams || []).filter(s => s.codec_type === 'subtitle').map((s, i) => ({
           index: i, codec: s.codec_name, language: s.tags?.language || 'und',
           title: s.tags?.title || null, forced: s.disposition?.forced === 1,
         }));
@@ -1040,7 +1042,12 @@ password=${password||''}
         }));
         res.setHeader('X-Content-Duration', String(duration));
         res.json({ duration, audio, subtitles, chapters });
-      });
+      };
+      if (discImage) {
+        const disc = await probeDiscImage(filePath);
+        return sendTracks(null, disc.metadata);
+      }
+      ffmpeg.ffprobe(filePath, sendTracks);
     } catch(e) { res.json({ audio: [], subtitles: [], chapters: [], duration: 0 }); }
   });
 

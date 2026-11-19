@@ -10,6 +10,7 @@ const fs      = require('fs');
 const ffmpeg  = require('fluent-ffmpeg');
 const { PassThrough } = require('stream');
 const orionAuth = require('../auth');
+const { isDiscImage, probeDiscImage } = require('../services/disc-image');
 const {
   resolveAccess,
   itemVisibleToUser,
@@ -240,7 +241,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
     }
   }
 
-  function startLibraryHls(item, {
+  async function startLibraryHls(item, {
     quality = 'source',
     audioTrack = 0,
     seekTime = 0,
@@ -256,7 +257,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       throw error;
     }
     const selectedQuality = HLS_QUALITIES.has(quality) ? quality : 'source';
-    const sessionId = HLS.beginSession(
+    const sessionId = await HLS.beginSession(
       item.filePath,
       selectedQuality,
       Math.max(0, Number.parseInt(audioTrack, 10) || 0),
@@ -374,7 +375,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
     const item = findVideoItem(req.body?.mediaId);
     if (!item) return res.status(404).json({ error: 'Media not found' });
     try {
-      const playback = startLibraryHls(item, req.body || {});
+      const playback = await startLibraryHls(item, req.body || {});
       // Waiting only for the first playable segment prevents hls.js from
       // receiving an initial 404 and entering its retry back-off.  The
       // response stays bounded, so an unusually slow or failing source still
@@ -399,7 +400,8 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       const item = findVideoItem(mediaId);
       if (!item) return res.status(404).json({ error: 'Media not found' });
       try {
-        return res.json({ ok: true, ...startLibraryHls(item, { quality, audioTrack, seekTime }) });
+        const playback = await startLibraryHls(item, { quality, audioTrack, seekTime });
+        return res.json({ ok: true, ...playback });
       } catch (error) {
         return playbackError(res, error);
       }
@@ -411,7 +413,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
         const item = [...db.movies, ...db.tvShows].find(m => m.filePath === filePath);
         if (item) { vCodec = vCodec||item.videoCodec||null; aCodec = aCodec||item.audioCodec||null; }
       }
-      const sessionId = HLS.beginSession(filePath, quality, audioTrack, seekTime, vCodec, aCodec);
+      const sessionId = await HLS.beginSession(filePath, quality, audioTrack, seekTime, vCodec, aCodec);
       res.json({ ok: true, sessionId, playlistUrl: `/api/hls/${sessionId}/index.m3u8`, ready: false, qualities: Object.keys(HLS.QUALITY_TIERS||QUALITY_TIERS) });
     } catch(e) { return playbackError(res, e); }
   });
@@ -608,7 +610,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
     }
     const quality = HLS_QUALITIES.has(String(req.query.quality || '')) ? req.query.quality : '720p';
     try {
-      const { sessionId } = startLibraryHls(record.item, { quality });
+      const { sessionId } = await startLibraryHls(record.item, { quality });
       const startup = await HLS.waitForPlaylist(sessionId, 30000);
       if (!startup.ready) {
         return res.status(503).json({ error: startup.error || 'Stream startup timed out' });
@@ -642,7 +644,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       : '720p';
 
     try {
-      const { sessionId } = startLibraryHls(item, { quality });
+      const { sessionId } = await startLibraryHls(item, { quality });
 
       // Do not redirect Roku until the playlist exists; Video nodes do not
       // reliably retry an initial 404 while ffmpeg is starting.
@@ -751,7 +753,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       ? req.query.quality
       : '720p';
     try {
-      const sessionId = HLS.beginSession(channel.url, quality, 0, 0, null, null);
+      const sessionId = await HLS.beginSession(channel.url, quality, 0, 0, null, null);
       const startup = await HLS.waitForPlaylist(sessionId, 30000);
       if (!startup.ready) return res.status(503).json({ error: startup.error || 'IPTV stream startup timed out' });
       res.set('Cache-Control', 'no-store');
@@ -765,7 +767,14 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
   // ── Main stream endpoint ──────────────────────────────────────────────────────
   router.get('/stream', async (req, res) => {
     const { path: filePath, transcode, quality, subtitle } = req.query;
-    if (!filePath) return res.status(400).json({ error: 'No path provided' });
+    if (typeof filePath !== 'string' || !filePath) return res.status(400).json({ error: 'No path provided' });
+
+    let disc;
+    if (isDiscImage(filePath)) {
+      try { disc = await probeDiscImage(filePath); }
+      catch (error) { return playbackError(res, error); }
+      if (res.destroyed) return;
+    }
 
     const streamStart = Date.now();
     const clientKey   = `${req.ip}_${filePath}`;
@@ -820,7 +829,12 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
 
     // Always probe the actual file for codec info — DB values can be stale or wrong
     // after metadata corruption / rescans. ffprobe result is cached per file.
-    const probed = await probeFileCodecs(filePath);
+    const discVideo = disc?.metadata.streams.find(stream => stream.codec_type === 'video');
+    const audioTrack = Math.max(0, parseInt(req.query.audio, 10) || 0);
+    const discAudio = disc?.metadata.streams.filter(stream => stream.codec_type === 'audio')[audioTrack];
+    const probed = disc ? {
+      video: discVideo?.codec_name, audio: discAudio?.codec_name, channels: discAudio?.channels,
+    } : await probeFileCodecs(filePath);
     const probeVideoCodec  = probed.video    || mediaItem?.videoCodec?.toLowerCase() || null;
     const probeAudioCodec  = probed.audio    || mediaItem?.audioCodec?.toLowerCase() || null;
     const probeChannels    = probed.channels || 0;
@@ -828,7 +842,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
 
     const videoNeedsDecode = probeVideoCodec && !COPY_VIDEO_CODECS.has(probeVideoCodec);
     const isNativeContainer = NATIVE_EXTS.includes(ext);
-    const needsTranscode = transcode === '1' || videoNeedsDecode || (!probeVideoCodec && !isNativeContainer);
+    const needsTranscode = Boolean(disc) || transcode === '1' || videoNeedsDecode || (!probeVideoCodec && !isNativeContainer);
 
     console.log(`[Stream] ${path.basename(filePath)} | video=${probeVideoCodec||'unknown'} audio=${probeAudioCodec||'unknown'} | transcode=${needsTranscode} forceEncode=${videoNeedsDecode}`);
 
@@ -843,7 +857,6 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       }
 
       const seekTime   = parseFloat(req.query.seek) || 0;
-      const audioTrack = parseInt(req.query.audio) || 0;
       const qualityTier = QUALITY_TIERS[quality] || null;
 
       res.setHeader('Content-Type', 'video/mp4');
@@ -852,7 +865,8 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
       res.setHeader('X-Accel-Buffering', 'no');
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Playback-Session-Id', sessionId);
-      if (mediaItem?.runtime > 0) res.setHeader('X-Content-Duration', String(mediaItem.runtime * 60));
+      const duration = Number(disc?.metadata.format?.duration) || (mediaItem?.runtime || 0) * 60;
+      if (duration > 0) res.setHeader('X-Content-Duration', String(duration));
 
       let ffmpegCmd, playbackClaim = null, clientClosed = false, firstChunk = true, retryCount = 0;
       let softwareFallback = false; // set true when GPU encoder fails → forces libx264 on retry
@@ -878,14 +892,16 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
         if (clientClosed) return;
 
         const inputOptions = ['-probesize','200000','-analyzeduration','200000','-fflags', '+genpts+discardcorrupt+igndts+fastseek', '-err_detect', 'ignore_err'];
-        if (seekTime > 10) {
+        if (disc) {
+          inputOptions.push(...disc.options);
+          if (seekTime > 0 && !disc.seekAfterInput) inputOptions.push('-ss', String(seekTime));
+        } else if (seekTime > 10) {
           // Fast keyframe seek before input, then precise seek after
           inputOptions.push('-ss', String(Math.max(0, seekTime - 5)));
         } else if (seekTime > 0) {
           inputOptions.push('-ss', String(seekTime));
         }
 
-        const outputSeek = seekTime > 10 ? 5 : 0;
         let videoCodec = 'copy', videoOptions = [], scaleFilter = null;
         if (forceEncode || qualityTier) {
           if (!softwareFallback && encoder.includes('amf')) {
@@ -933,7 +949,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
         // Multichannel downmix: triggered by known codec OR channel count > 2
         const isMultichannel = probeChannels > 2 ||
           (probeAudioCodec && ['ac3','dts','truehd','eac3','dts-hd','dts-x','atmos'].some(c => probeAudioCodec.toLowerCase().includes(c)));
-        const audioFilter = isMultichannel
+        const audioFilter = !disc && isMultichannel
           ? 'pan=stereo|c0=0.5*c0+0.707*c2+0.707*c4|c1=0.5*c1+0.707*c2+0.707*c5'
           : null;
 
@@ -949,7 +965,8 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
         ];
         if (videoCodec !== 'copy') outputOptions.push('-pix_fmt', pixFmt, '-threads', '0', '-vsync', 'cfr');
         if (scaleFilter) outputOptions.push(`-vf scale=${scaleFilter}`);
-        if (subtitle && subtitle !== '0') {
+        if (disc?.seekAfterInput && seekTime > 0) outputOptions.push('-ss', String(seekTime));
+        if (!disc && subtitle && subtitle !== '0') {
           const subIdx = parseInt(subtitle)||0;
           if (scaleFilter) { const idx = outputOptions.findIndex(o=>o.startsWith('-vf')); if (idx>=0) outputOptions[idx] = `-vf scale=${scaleFilter},subtitles='${filePath}':si=${subIdx}`; }
           else outputOptions.push(`-vf subtitles='${filePath}':si=${subIdx}`);
@@ -991,7 +1008,7 @@ module.exports = function streamRoutes({ db, io, saveDB, HLS, OrionDB, getConfig
             if (ffmpegDone && !res.writableEnded) { clearInterval(stallTimer); res.end(); }
           }
 
-          ffmpegCmd = ffmpeg(filePath)
+          ffmpegCmd = ffmpeg(disc?.source || filePath)
             .inputOptions(inputOptions)
             .videoCodec(videoCodec)
             .audioCodec('aac')
