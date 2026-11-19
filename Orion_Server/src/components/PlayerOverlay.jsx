@@ -44,14 +44,7 @@ export default function PlayerOverlay() {
   const [settingsTab, setSettingsTab] = useState('audio');
   const [addingChapter, setAddingChapter] = useState(false);
   const [newChapterTitle, setNewChapterTitle] = useState('');
-  const [_streamUrl, _setStreamUrl]    = useState('');
-  const streamUrl = _streamUrl;
-  const setStreamUrl = React.useCallback((url) => {
-    if (url && url !== _streamUrl) {
-      console.log('[setStreamUrl CALLED]', { url: url.slice(-100), stack: new Error().stack.split('\n').slice(1,4).join(' | ') });
-    }
-    _setStreamUrl(url);
-  }, [_streamUrl]);
+  const [streamUrl, setStreamUrl] = useState('');
   const hideTimeout = useRef(null);
   const saveTimer   = useRef(null);
   const clientLogTimes = useRef(new Map());
@@ -101,11 +94,12 @@ export default function PlayerOverlay() {
     // Selecting another track needs the server stream so FFmpeg can map it.
     return isDirectPlayable && track === 0 ? base : `${base}&transcode=1&audio=${track}`;
   }, [nowPlaying, API, isDirectPlayable]);
-  const startHLS = useCallback(async (filePath, track = 0, seekTime = 0) => {
+  const startHLS = useCallback(async (filePath, track, seekTime, signal) => {
     try {
       const usePlaybackApi = Boolean(nowPlaying?.id);
       const resp = await fetch(`${API}${usePlaybackApi ? '/playback/start' : '/hls/start'}`, {
         method: 'POST',
+        signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...(usePlaybackApi ? { mediaId: nowPlaying.id } : { filePath }),
@@ -119,36 +113,45 @@ export default function PlayerOverlay() {
       const data = await resp.json();
       if (!data.ok) throw new Error(data.error || 'HLS start failed');
       const playlistUrl = `${API}/hls/${data.sessionId}/index.m3u8`;
+      if (data.ready) return { sessionId: data.sessionId, playlistUrl };
       for (let i = 0; i < 120; i++) {
         await new Promise(r => setTimeout(r, 500));
+        if (signal.aborted) return null;
         try {
-          const check = await fetch(playlistUrl);
+          const check = await fetch(playlistUrl, { signal });
           if (check.ok) {
             const text = await check.text();
             if (text.includes('.ts')) {
-              setHlsSessionId(data.sessionId);
-              return playlistUrl;
+              return { sessionId: data.sessionId, playlistUrl };
             }
           }
         } catch {}
       }
       throw new Error('HLS playlist never became ready');
     } catch (e) {
-      console.warn('[HLS] Failed, falling back to direct stream:', e.message);
+      if (!signal.aborted) console.warn('[HLS] Failed, falling back to direct stream:', e.message);
     }
     return null;
   }, [API, nowPlaying]);
+  const hlsStartRef = useRef(null);
   const loadHLS = useCallback(async (filePath, track = 0, seekTime = 0) => {
     const v = videoRef.current;
     if (!v) return;
-    const playlistUrl = await startHLS(filePath, track, seekTime);
-    if (!playlistUrl) {
+    hlsStartRef.current?.abort();
+    const controller = new AbortController();
+    hlsStartRef.current = controller;
+    const playback = await startHLS(filePath, track, seekTime, controller.signal);
+    if (controller.signal.aborted) return;
+    hlsStartRef.current = null;
+    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    setHlsSessionId(playback?.sessionId || null);
+    if (!playback) {
       const url = buildStreamUrl(track) + (seekTime > 0 ? `&seek=${Math.floor(seekTime)}` : '');
       setStreamUrl(url);
       return;
     }
+    const { playlistUrl } = playback;
     if (Hls.isSupported()) {
-      if (hlsRef.current) { hlsRef.current.destroy(); }
       const hls = new Hls({
         maxBufferLength: 60,
         maxMaxBufferLength: 120,
@@ -221,22 +224,21 @@ export default function PlayerOverlay() {
   }, [startHLS, buildStreamUrl]);
   React.useEffect(() => {
     return () => {
+      hlsStartRef.current?.abort();
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-      if (hlsSessionId) {
-        fetch(`${API}/hls/${hlsSessionId}`, { method: 'DELETE' }).catch(() => {});
-      }
-      if (liveSessionId) {
-        fetch(`${API}/stream/live/${liveSessionId}`, { method: 'DELETE' }).catch(() => {});
-      }
     };
-  }, [hlsSessionId, liveSessionId, API]);
+  }, []);
+  React.useEffect(() => () => {
+    if (hlsSessionId) fetch(`${API}/hls/${hlsSessionId}`, { method: 'DELETE' }).catch(() => {});
+  }, [hlsSessionId, API]);
+  React.useEffect(() => () => {
+    if (liveSessionId) fetch(`${API}/stream/live/${liveSessionId}`, { method: 'DELETE' }).catch(() => {});
+  }, [liveSessionId, API]);
   useEffect(() => {
+    hlsStartRef.current?.abort();
     if (!nowPlaying) return;
     if (hlsRef.current) { try { hlsRef.current.destroy(); } catch {} hlsRef.current = null; }
-    if (hlsSessionId) {
-      fetch(`${API}/hls/${hlsSessionId}`, { method: 'DELETE' }).catch(() => {});
-      setHlsSessionId(null);
-    }
+    setHlsSessionId(null);
     setError(null); setLoading(true); setPlaying(false);
     setProgress(0); setCurrentTime(0); setDuration(0); setBuffered(0);
     seekOffset.current = 0;
@@ -308,7 +310,7 @@ export default function PlayerOverlay() {
       return;
     }
 
-    const isManagedHls = /\/hls\/[^/]+\/index\.m3u8(?:\?|$)/.test(streamUrl);
+    const isManagedHls = hlsRef.current && /\/hls\/[^/]+\/index\.m3u8(?:\?|$)/.test(streamUrl);
 
     // hls.js owns media.src (a blob: URL).  Replacing it with the playlist URL
     // here would tear down the source buffer immediately after it starts.
