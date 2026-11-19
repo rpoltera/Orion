@@ -9,6 +9,7 @@ const fs     = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
 const VIDEO_EXTS = ['.mp4','.mkv','.avi','.mov','.wmv','.flv','.m4v','.ts','.m2ts','.webm','.3gp','.mpg','.mpeg'];
+const MOVIE_EXTS = [...VIDEO_EXTS, '.iso'];
 const AUDIO_EXTS = ['.mp3','.flac','.aac','.wav','.ogg','.m4a','.wma','.opus','.aiff','.alac'];
 
 const EXTRAS_FOLDERS = /^(featurettes?|extras?|trailers?|interviews?|scenes?|shorts?|behind.the.scenes?|deleted.scenes?|specials?|samples?|subtitles?|subs?|bonus|behindthescenes|featurette)$/i;
@@ -33,7 +34,7 @@ function getQualityScore(fileName) {
 
 function cleanTitle(filename) {
   const cleaned = filename
-    .replace(/\.(mkv|mp4|avi|mov|wmv|flv|m4v|ts|m2ts|webm|mpeg|mpg|3gp)$/i, '')
+    .replace(/\.(mkv|mp4|avi|mov|wmv|flv|m4v|ts|m2ts|webm|mpeg|mpg|3gp|iso)$/i, '')
     .replace(/\b(1080p|720p|480p|4k|2160p|uhd|bluray|blu-ray|bdrip|brrip|webrip|web-dl|webdl|hdtv|x264|x265|h264|h265|hevc|avc|dvdrip|hdrip|remux|hdr|hdr10|dts|aac|ac3|eac3|truehd|atmos|repack|proper|extended|theatrical|directors\.cut|unrated)\b.*/gi, '')
     .replace(/^(.+?)\s*\(\s*(19|20)\d{2}\s*\)\s*$/, '$1')
     .replace(/^(.+?)\s+(19|20)\d{2}\s*$/, '$1')
@@ -45,7 +46,7 @@ function cleanTitle(filename) {
     .trim();
   if (!cleaned) {
     return filename
-      .replace(/\.(mkv|mp4|avi|mov|wmv|flv|m4v|ts|m2ts|webm|mpeg|mpg|3gp)$/i, '')
+      .replace(/\.(mkv|mp4|avi|mov|wmv|flv|m4v|ts|m2ts|webm|mpeg|mpg|3gp|iso)$/i, '')
       .replace(/[_]/g, ' ').replace(/\./g, ' ').replace(/\s+/g, ' ').trim();
   }
   return cleaned;
@@ -199,7 +200,7 @@ async function scanDirectory(dirPath, type = 'movies', { onProgress, findLocalIm
         const ext = path.extname(entry.name).toLowerCase();
         // [BAK-FILTER] Skip backup files left over from convert-service
         if (/\.bak\./.test(entry.name) || /\.bak$/.test(entry.name)) continue;
-        const isVideo = VIDEO_EXTS.includes(ext);
+        const isVideo = (type === 'movies' ? MOVIE_EXTS : VIDEO_EXTS).includes(ext);
         const isAudio = AUDIO_EXTS.includes(ext);
         if ((type === 'music' && isAudio) || (type !== 'music' && isVideo)) {
           let size = 0;
@@ -283,6 +284,7 @@ function getFolderMtime(folderPath) {
 }
 
 module.exports = {
+  MOVIE_EXTS,
   VIDEO_EXTS,
   AUDIO_EXTS,
   QUALITY_RANK,

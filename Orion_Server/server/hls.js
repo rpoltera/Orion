@@ -8,6 +8,7 @@ const path   = require('path');
 const fs     = require('fs');
 const { spawn, execFileSync } = require('child_process');
 const crypto = require('crypto');
+const { isDiscImage, probeDiscImage } = require('./services/disc-image');
 
 // Two-second segments give Roku and other HLS clients a quick first frame
 // without the long startup pause caused by the old ten-second segments.
@@ -125,13 +126,12 @@ function probeInputCodecs(filePath, videoHint = null, audioHint = null) {
   }
 }
 
-function getEncoderArgs(encoder, tier, videoCodecHint, audioCodecHint, gpuId = null) {
+function getEncoderArgs(encoder, tier, videoCodecHint, gpuId = null, decodedOnGpu = false) {
   const { scale, videoBitrate, crf } = tier;
   const args = [];
 
   // Smart copy: if video is already H.264 and no scaling needed — copy it
   const canCopyVideo = !scale && videoCodecHint && COPY_VIDEO.has(videoCodecHint.toLowerCase());
-  const canCopyAudio = audioCodecHint && COPY_AUDIO.has(audioCodecHint.toLowerCase());
 
   if (canCopyVideo) {
     args.push('-c:v', 'copy');
@@ -140,7 +140,7 @@ function getEncoderArgs(encoder, tier, videoCodecHint, audioCodecHint, gpuId = n
     if (scale) {
       // CUDA frames stay on the GPU all the way into NVENC.  The CPU scale
       // filter would otherwise download every frame and waste several cores.
-      if (encoder.includes('nvenc')) {
+      if (decodedOnGpu) {
         const [width, height] = scale.split(':');
         // Keep the decoded CUDA surface in its native hardware format.  Some
         // FFmpeg builds cannot reconfigure scale_cuda when a format conversion
@@ -242,9 +242,12 @@ function waitForPlaylist(sessionId, timeoutMs = 10000) {
 }
 
 
-// Start session without waiting — returns sessionId immediately
-function beginSession(filePath, quality = 'source', audioTrack = 0, seekTime = 0, videoCodec = null, audioCodec = null) {
+// Start FFmpeg without waiting for its first segment.
+async function beginSession(filePath, quality = 'source', audioTrack = 0, seekTime = 0, videoCodec = null, audioCodec = null) {
   if (!HLS_DIR) throw new Error('HLS engine is not initialized');
+  const disc = isDiscImage(filePath) && !/^[a-z][a-z\d+.-]*:\/\//i.test(filePath)
+    ? await probeDiscImage(filePath)
+    : null;
   const sessionId = getSessionId(filePath, quality, audioTrack, seekTime);
 
   // Return existing if running
@@ -268,7 +271,10 @@ function beginSession(filePath, quality = 'source', audioTrack = 0, seekTime = 0
   const encoder = encoderRef?.value || 'libx264';
   // Older Orion scans did not persist videoCodec/audioCodec.  Probe the file
   // here so those entries still get NVDEC rather than silently CPU-decoding.
-  const codecs = probeInputCodecs(filePath, videoCodec, audioCodec);
+  const codecs = disc ? {
+    video: disc.metadata.streams.find(stream => stream.codec_type === 'video')?.codec_name,
+    audio: disc.metadata.streams.filter(stream => stream.codec_type === 'audio')[audioTrack]?.codec_name,
+  } : probeInputCodecs(filePath, videoCodec, audioCodec);
   const effectiveVideoCodec = codecs.video;
   const effectiveAudioCodec = codecs.audio;
   const playbackClaim = reservePlayback(sessionId, tier, effectiveVideoCodec, effectiveAudioCodec);
@@ -277,16 +283,16 @@ function beginSession(filePath, quality = 'source', audioTrack = 0, seekTime = 0
 
   // Log the full FFmpeg command for debugging
   const args = ['-hide_banner', '-loglevel', 'error'];
-  if (seekTime > 0) args.push('-ss', String(seekTime));
+  if (seekTime > 0 && !disc?.seekAfterInput) args.push('-ss', String(seekTime));
   // H.264 stream-copy sessions do not decode video at all.  Avoid creating a
   // CUDA context for those sessions; that reduces their startup work and
   // leaves the GPU immediately available for HEVC/AV1 transcodes.
-  if (needsEncoder(tier, effectiveVideoCodec, effectiveAudioCodec)) {
-    args.push(...getNvdecArgs(encoder, effectiveVideoCodec, playbackClaim?.gpuId));
-  }
-  args.push('-i', filePath);
+  const nvdecArgs = needsEncoder(tier, effectiveVideoCodec, effectiveAudioCodec)
+    ? getNvdecArgs(encoder, effectiveVideoCodec, playbackClaim?.gpuId) : [];
+  args.push(...nvdecArgs, ...(disc?.options || []), '-i', disc?.source || filePath);
+  if (seekTime > 0 && disc?.seekAfterInput) args.push('-ss', String(seekTime));
 
-  const encArgs = getEncoderArgs(encoder, tier, effectiveVideoCodec, effectiveAudioCodec, playbackClaim?.gpuId);
+  const encArgs = getEncoderArgs(encoder, tier, effectiveVideoCodec, playbackClaim?.gpuId, nvdecArgs.length > 0);
   args.push(...encArgs);
 
   // Smart audio: copy if already AAC, else re-encode
@@ -355,7 +361,7 @@ function beginSession(filePath, quality = 'source', audioTrack = 0, seekTime = 0
 }
 
 async function startSession(filePath, quality = 'source', audioTrack = 0, seekTime = 0) {
-  const sessionId = beginSession(filePath, quality, audioTrack, seekTime);
+  const sessionId = await beginSession(filePath, quality, audioTrack, seekTime);
   const session = sessions.get(sessionId);
   const ready = await waitForSegments(session.segDir, 2, 30000);
   if (!ready) console.warn(`[HLS] Timeout waiting for segments: ${path.basename(filePath)}`);

@@ -11,6 +11,7 @@ const express = require('express');
 const path    = require('path');
 const fs      = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const { MOVIE_EXTS } = require('../services/scanner');
 
 const RATING_ORDER = ['G','TV-G','TV-Y','TV-Y7','PG','TV-PG','PG-13','TV-14','R','TV-MA','NC-17','NR','UNRATED'];
 function getRatingRank(r) { const i = RATING_ORDER.indexOf((r||'').toUpperCase().trim()); return i === -1 ? 99 : i; }
@@ -431,7 +432,6 @@ module.exports = function libraryRoutes({ db, io, saveDB, rebuildIndex, OrionDB,
     if (!folders?.length) return res.status(400).json({ error: 'folders required' });
     const dbPaths = new Set(db.movies.map(m => m.filePath?.toLowerCase()));
     const orphans = [];
-    const VIDEO_EXTS = ['.mp4','.mkv','.avi','.mov','.wmv','.flv','.m4v','.ts','.m2ts','.webm','.3gp','.mpg','.mpeg'];
     for (const folder of folders) {
       try {
         const walk = (dir) => {
@@ -439,7 +439,7 @@ module.exports = function libraryRoutes({ db, io, saveDB, rebuildIndex, OrionDB,
           for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             const full = path.join(dir, entry.name);
             if (entry.isDirectory()) walk(full);
-            else if (VIDEO_EXTS.includes(path.extname(entry.name).toLowerCase()) && !dbPaths.has(full.toLowerCase())) orphans.push(full);
+            else if (MOVIE_EXTS.includes(path.extname(entry.name).toLowerCase()) && !dbPaths.has(full.toLowerCase())) orphans.push(full);
           }
         };
         walk(folder);

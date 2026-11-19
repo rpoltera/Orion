@@ -11,6 +11,7 @@ const express = require('express');
 const path    = require('path');
 const fs      = require('fs');
 const ffmpeg  = require('fluent-ffmpeg');
+const { isDiscImage, probeDiscImage } = require('../services/disc-image');
 
 const RATING_ORDER = ['G','TV-G','TV-Y','TV-Y7','PG','TV-PG','PG-13','TV-14','R','TV-MA','NC-17','NR','UNRATED'];
 function getRatingRank(r) { const i = RATING_ORDER.indexOf((r||'').toUpperCase().trim()); return i === -1 ? 99 : i; }
@@ -281,7 +282,7 @@ module.exports = function scannerRoutes({ db, io, saveDB, rebuildIndex, scanDire
         return item.filePath;
       })();
 
-      ffmpeg.ffprobe(resolved, (err, meta) => {
+      const onProbe = (err, meta) => {
         if (err) { probeState.errors++; probeState.done++; return resolve(); }
         try {
           const streams = meta.streams || [];
@@ -299,7 +300,12 @@ module.exports = function scannerRoutes({ db, io, saveDB, rebuildIndex, scanDire
         } catch {}
         probeState.done++;
         resolve();
-      });
+      };
+      if (isDiscImage(resolved)) {
+        probeDiscImage(resolved).then(disc => onProbe(null, disc.metadata), onProbe);
+      } else {
+        ffmpeg.ffprobe(resolved, onProbe);
+      }
     });
 
     (async () => {
